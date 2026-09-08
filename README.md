@@ -17,3 +17,8 @@ Se compila solo en **GitHub Actions** (pestaña *Actions* → último run → *A
 `LevoPrint-debug-apk`). Se instala por *sideload* (activar "orígenes desconocidos").
 
 ⚡ by LevoDev · levodev.app
+
+## Dos formas, un mismo cerebro
+- **APK (Android)** — carpeta `app/`. CI: workflow *build-apk* → artifact `LevoPrint-debug-apk`.
+- **.exe (Windows/PC)** — carpeta `agente/` (Node SEA). CI: workflow *build-exe* → artifact `LevoPrint-exe`.
+Ambos son **genéricos**: el mismo binario sirve para cualquier app de LevoDev cambiando el *prefijo* (`komo`, etc.).

@@ -1,0 +1,25 @@
+name: build-exe
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+jobs:
+  exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Instalar postject
+        working-directory: agente
+        run: npm install --no-save postject
+      - name: Compilar LevoPrint.exe (Node SEA)
+        working-directory: agente
+        run: node build-exe.mjs
+      - name: Subir .exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: LevoPrint-exe
+          path: agente/dist/LevoPrint.exe
+          if-no-files-found: error
