@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:fillViewport="true" android:background="@color/navy">
+  <LinearLayout
+      android:layout_width="match_parent" android:layout_height="wrap_content"
+      android:orientation="vertical" android:padding="20dp">
+
+    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:text="⚡ LevoPrint" android:textColor="@color/oro"
+        android:textSize="26sp" android:textStyle="bold" />
+    <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:text="Gestor de impresoras · LevoDev" android:textColor="#8FB6D9"
+        android:textSize="13sp" android:layout_marginBottom="18dp" />
+
+    <TextView style="@style/Etiqueta" android:text="URL del backend" />
+    <EditText android:id="@+id/inUrl" style="@style/Campo"
+        android:hint="https://xxxx.supabase.co" android:inputType="textUri" />
+
+    <TextView style="@style/Etiqueta" android:text="Clave anónima (anon key)" />
+    <EditText android:id="@+id/inAnon" style="@style/Campo"
+        android:hint="eyJ..." android:inputType="textNoSuggestions" />
+
+    <TextView style="@style/Etiqueta" android:text="Device (te lo da LevoDev)" />
+    <EditText android:id="@+id/inDevice" style="@style/Campo"
+        android:hint="uuid del dispositivo" android:inputType="textNoSuggestions" />
+
+    <TextView style="@style/Etiqueta" android:text="App (prefijo)" />
+    <EditText android:id="@+id/inPrefijo" style="@style/Campo"
+        android:hint="komo" android:text="komo" android:inputType="text" />
+
+    <TextView style="@style/Etiqueta" android:text="Ancho del papel (columnas: 48=80mm, 32=58mm)" />
+    <EditText android:id="@+id/inAncho" style="@style/Campo"
+        android:hint="48" android:text="48" android:inputType="number" />
+
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="horizontal" android:gravity="center_vertical"
+        android:layout_marginTop="12dp">
+      <com.google.android.material.materialswitch.MaterialSwitch
+          android:id="@+id/swBluetooth"
+          android:layout_width="wrap_content" android:layout_height="wrap_content" />
+      <TextView android:layout_width="0dp" android:layout_height="wrap_content"
+          android:layout_weight="1" android:layout_marginStart="10dp"
+          android:text="Habilitar impresora Bluetooth (opcional)"
+          android:textColor="#EAF4FF" android:textSize="14sp" />
+    </LinearLayout>
+
+    <Button android:id="@+id/btnToggle" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:layout_marginTop="20dp"
+        android:text="Guardar y arrancar" android:textStyle="bold"
+        android:backgroundTint="@color/cian" android:textColor="@color/navy" />
+
+    <TextView android:id="@+id/txtEstado" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:layout_marginTop="16dp"
+        android:text="Detenido" android:textColor="@color/cian" android:textSize="14sp"
+        android:textStyle="bold" />
+
+    <TextView android:id="@+id/txtLog" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:layout_marginTop="10dp"
+        android:fontFamily="monospace" android:textColor="#8FB6D9" android:textSize="11sp" />
+  </LinearLayout>
+</ScrollView>

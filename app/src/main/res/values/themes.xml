@@ -1,0 +1,25 @@
+<resources>
+  <style name="Theme.LevoPrint" parent="Theme.Material3.DayNight.NoActionBar">
+    <item name="colorPrimary">@color/cian</item>
+  </style>
+
+  <style name="Etiqueta">
+    <item name="android:layout_width">match_parent</item>
+    <item name="android:layout_height">wrap_content</item>
+    <item name="android:layout_marginTop">12dp</item>
+    <item name="android:textColor">#8FB6D9</item>
+    <item name="android:textSize">12sp</item>
+    <item name="android:textAllCaps">true</item>
+  </style>
+
+  <style name="Campo">
+    <item name="android:layout_width">match_parent</item>
+    <item name="android:layout_height">wrap_content</item>
+    <item name="android:layout_marginTop">4dp</item>
+    <item name="android:padding">12dp</item>
+    <item name="android:background">#14406C</item>
+    <item name="android:textColor">#EAF4FF</item>
+    <item name="android:textColorHint">#5F8AB0</item>
+    <item name="android:textSize">14sp</item>
+  </style>
+</resources>
