@@ -24,7 +24,7 @@ console.log('3/3  Inyectando el blob en el .exe...');
 execFileSync(process.execPath, [
   join(AQUI, 'node_modules', 'postject', 'dist', 'cli.js'),  // CLI real (multiplataforma)
   salida, 'NODE_SEA_BLOB', join(AQUI, 'sea-prep.blob'), '--sentinel-fuse', FUSE
-], { stdio: 'inherit', cwd: AQUI }).toString?.();
+], { stdio: 'inherit', cwd: AQUI });
 
 try { rmSync(join(AQUI, 'sea-prep.blob')); } catch { /* nada */ }
 console.log(`\nListo -> ${salida}  (${(statSync(salida).size / 1e6).toFixed(0)} MB)`);
