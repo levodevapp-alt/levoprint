@@ -22,7 +22,7 @@ copyFileSync(process.execPath, salida);
 
 console.log('3/3  Inyectando el blob en el .exe...');
 execFileSync(process.execPath, [
-  join(AQUI, 'node_modules', '.bin', 'postject'),  // si esta instalado local
+  join(AQUI, 'node_modules', 'postject', 'dist', 'cli.js'),  // CLI real (multiplataforma)
   salida, 'NODE_SEA_BLOB', join(AQUI, 'sea-prep.blob'), '--sentinel-fuse', FUSE
 ], { stdio: 'inherit', cwd: AQUI }).toString?.();
 
