@@ -12,8 +12,27 @@ android {
     versionCode = 3
     versionName = "1.1.1"
   }
+  // Firma RELEASE de la casa (keystore PKCS12 de LevoDev). En CI llega por
+  // secrets (KEYSTORE_B64/KEYSTORE_PASSWORD/KEY_ALIAS/KEY_PASSWORD); sin
+  // ellos se firma con la clave debug (instalable, pero NO actualiza sobre
+  // un APK firmado con la release).
+  val ksPath = System.getenv("KEYSTORE_PATH")
+  signingConfigs {
+    if (ksPath != null && file(ksPath).exists()) {
+      create("release") {
+        storeFile = file(ksPath)
+        storePassword = System.getenv("KEYSTORE_PASSWORD")
+        keyAlias = System.getenv("KEY_ALIAS") ?: "levodev"
+        keyPassword = System.getenv("KEY_PASSWORD")
+        storeType = "PKCS12"
+      }
+    }
+  }
   buildTypes {
-    release { isMinifyEnabled = false }
+    release {
+      isMinifyEnabled = false
+      signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
+    }
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_17

@@ -16,11 +16,20 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
-      - name: Build debug APK
-        run: gradle assembleDebug --no-daemon --stacktrace
+      - name: Keystore de la casa (si hay secrets)
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/levodev.p12"; echo "KEYSTORE_PATH=$RUNNER_TEMP/levodev.p12" >> "$GITHUB_ENV"; echo "firma: RELEASE"; else echo "firma: debug (sin KEYSTORE_B64)"; fi
+      - name: Build release APK
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon --stacktrace && cp app/build/outputs/apk/release/app-release.apk LevoPrint.apk
       - name: Subir APK
         uses: actions/upload-artifact@v4
         with:
-          name: LevoPrint-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: LevoPrint-apk
+          path: LevoPrint.apk
           if-no-files-found: error
