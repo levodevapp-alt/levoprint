@@ -98,12 +98,20 @@ class MainActivity : AppCompatActivity() {
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) pedir(Manifest.permission.POST_NOTIFICATIONS)
 
+    // Arranque automático si ya hay configuración (tras reinicio/reapertura).
+    if (Prefs.leer(this) != null && !PrintService.activo) {
+      val i = Intent(this, PrintService::class.java)
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(i) else startService(i)
+    }
     refrescar()
-    val tick = object : Runnable {
+    tick = object : Runnable {
       override fun run() { log.text = PrintService.ultimoLog; refrescar(); h.postDelayed(this, 1500) }
     }
-    h.post(tick)
+    h.post(tick!!)
   }
+
+  private var tick: Runnable? = null
+  override fun onDestroy() { tick?.let { h.removeCallbacks(it) }; super.onDestroy() }
 
   private fun pedir(p: String) {
     if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED)

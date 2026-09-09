@@ -83,8 +83,8 @@ object Agent {
     val esp = maxOf(1, ancho - izq.length - der.length)
     return izq + " ".repeat(esp) + der + NL
   }
-  private fun money(n: Double) = "S/ " + String.format("%.2f", n)
-  private fun cant(n: Double) = if (n % 1.0 == 0.0) n.toInt().toString() else String.format("%.3f", n)
+  private fun money(n: Double) = "S/ " + String.format(java.util.Locale.US, "%.2f", n)
+  private fun cant(n: Double) = if (n % 1.0 == 0.0) n.toInt().toString() else String.format(java.util.Locale.US, "%.3f", n)
   private fun items(pl: JSONObject): JSONArray = pl.optJSONArray("items") ?: JSONArray()
   private fun pagos(pl: JSONObject): JSONArray = pl.optJSONArray("pagos") ?: JSONArray()
   private fun n(x: Double) = x

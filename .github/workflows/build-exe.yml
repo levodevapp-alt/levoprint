@@ -13,7 +13,7 @@ jobs:
           node-version: '20'
       - name: Instalar postject
         working-directory: agente
-        run: npm install --no-save postject
+        run: npm install --no-save postject@1.0.0-alpha.6
       - name: Compilar LevoPrint.exe (Node SEA)
         working-directory: agente
         run: node build-exe.mjs

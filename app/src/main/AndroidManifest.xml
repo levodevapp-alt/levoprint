@@ -6,6 +6,12 @@
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
   <uses-permission android:name="android.permission.WAKE_LOCK" />
+  <!-- connectedDevice (API 34) exige un permiso de la familia; CHANGE_NETWORK_STATE es normal (se concede solo). -->
+  <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+  <!-- Bluetooth legacy (API 26-30): sin esto bondedDevices/connect lanzan SecurityException. -->
+  <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+  <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
   <!-- Bluetooth: opcional, para impresoras BT (se pide en runtime al activarlo). -->
   <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
   <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
@@ -30,5 +36,12 @@
       android:name=".PrintService"
       android:exported="false"
       android:foregroundServiceType="connectedDevice" />
+    <!-- Tras reinicio / actualización: vuelve a imprimir solo (corte de luz en la cocina). -->
+    <receiver android:name=".BootReceiver" android:exported="true">
+      <intent-filter>
+        <action android:name="android.intent.action.BOOT_COMPLETED" />
+        <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+      </intent-filter>
+    </receiver>
   </application>
 </manifest>

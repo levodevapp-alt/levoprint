@@ -29,7 +29,7 @@ class PrintService : Service() {
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     if (corriendo) return START_STICKY
     val cfg = Prefs.leer(this) ?: run { stopSelf(); return START_NOT_STICKY }
-    arrancarForeground()
+    try { arrancarForeground() } catch (e: Exception) { ultimoLog = "foreground: " + e.message }
     corriendo = true
     activo = true
     wake = (getSystemService(Context.POWER_SERVICE) as PowerManager)

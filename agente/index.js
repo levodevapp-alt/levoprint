@@ -114,6 +114,7 @@ if (!URL_BASE || !ANON || !DEVICE || /TU-PROYECTO|PEGA-AQUI/.test(URL_BASE + ANO
 
 async function rpc(fn, p) {
   const r = await fetch(`${URL_BASE}/rest/v1/rpc/${fn}`, {
+    signal: AbortSignal.timeout(12000),
     method: 'POST',
     headers: { apikey: ANON, Authorization: `Bearer ${ANON}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ p }),
@@ -284,8 +285,8 @@ async function ciclo() {
     const r = await rpc(`${PREFIJO}_print_tomar`, { device: DEVICE, limite: 10 });
     for (const job of r.jobs || []) {
       const est = estaciones.get(job.estacion);
-      const texto = render(job);
       try {
+        const texto = render(job);   // dentro del try: un payload roto se marca con error y no bloquea la cola
         if (MODO_CONSOLA || !est || !est.ip) {
           console.log(`\n--- JOB ${job.id} (${job.tipo}) -> ${est ? est.nombre : 'SIN ESTACION'} ---`);
           console.log(texto.replace(/[\x00-\x1f]/g, '').trim());

@@ -26,7 +26,7 @@ object Bt {
     try {
       try { a.cancelDiscovery() } catch (_: SecurityException) {}
       sock.connect()
-      sock.outputStream.use { it.write(Agent.bytes(texto)); it.flush() }
+      sock.outputStream.use { it.write(Agent.bytes(texto)); it.flush(); try { Thread.sleep(900) } catch (_: InterruptedException) {} }
     } finally {
       try { sock.close() } catch (_: Exception) {}
     }
