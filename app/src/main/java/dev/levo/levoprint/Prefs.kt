@@ -26,4 +26,15 @@ object Prefs {
 
   fun getBluetooth(ctx: Context): Boolean =
     ctx.getSharedPreferences(F, Context.MODE_PRIVATE).getBoolean("bt", false)
+
+  fun setBt(ctx: Context, mac: String, nombre: String) {
+    ctx.getSharedPreferences(F, Context.MODE_PRIVATE).edit()
+      .putString("btMac", mac).putString("btNombre", nombre).apply()
+  }
+
+  fun getBtMac(ctx: Context): String =
+    ctx.getSharedPreferences(F, Context.MODE_PRIVATE).getString("btMac", "") ?: ""
+
+  fun getBtNombre(ctx: Context): String =
+    ctx.getSharedPreferences(F, Context.MODE_PRIVATE).getString("btNombre", "") ?: ""
 }

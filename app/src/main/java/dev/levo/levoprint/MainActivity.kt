@@ -35,11 +35,43 @@ class MainActivity : AppCompatActivity() {
       inUrl.setText(it.url); inAnon.setText(it.anon); inDevice.setText(it.device)
       inPrefijo.setText(it.prefijo); inAncho.setText(it.ancho.toString())
     }
+    val btnBt = findViewById<android.widget.Button>(R.id.btnBt)
+    val txtBt = findViewById<TextView>(R.id.txtBt)
+
+    fun refrescarBt() {
+      val on = swBt.isChecked
+      val vis = if (on) android.view.View.VISIBLE else android.view.View.GONE
+      btnBt.visibility = vis
+      txtBt.visibility = vis
+      val nom = Prefs.getBtNombre(this)
+      txtBt.text = if (nom.isNotBlank()) "Impresora BT: $nom" else "Ninguna impresora BT elegida"
+    }
+
     swBt.isChecked = Prefs.getBluetooth(this)
     swBt.setOnCheckedChangeListener { _, on ->
       Prefs.setBluetooth(this, on)
       if (on && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) pedir(Manifest.permission.BLUETOOTH_CONNECT)
+      refrescarBt()
     }
+    btnBt.setOnClickListener {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) pedir(Manifest.permission.BLUETOOTH_CONNECT)
+      val disp = Bt.emparejadas()
+      if (disp.isEmpty()) {
+        android.app.AlertDialog.Builder(this)
+          .setTitle("Sin impresoras Bluetooth")
+          .setMessage("Empareja la impresora en Ajustes de Android (Bluetooth) y vuelve a intentar.")
+          .setPositiveButton("OK", null).show()
+        return@setOnClickListener
+      }
+      val nombres = disp.map { it.nombre }.toTypedArray()
+      android.app.AlertDialog.Builder(this)
+        .setTitle("Elige la impresora")
+        .setItems(nombres) { _, i ->
+          Prefs.setBt(this, disp[i].mac, disp[i].nombre)
+          refrescarBt()
+        }.show()
+    }
+    refrescarBt()
 
     fun refrescar() {
       val on = PrintService.activo

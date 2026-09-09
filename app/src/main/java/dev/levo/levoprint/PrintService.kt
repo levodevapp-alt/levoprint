@@ -53,10 +53,14 @@ class PrintService : Service() {
           val id = job.optString("id")
           try {
             val est = estaciones[job.optString("estacion")]
-            if (est?.ip == null) throw RuntimeException("estacion sin IP")
-            Agent.imprimir(est.ip, est.puerto, Agent.render(job, cfg.ancho))
+            val texto = Agent.render(job, cfg.ancho)
+            val btMac = Prefs.getBtMac(this)
+            when {
+              est?.ip != null -> { Agent.imprimirTcp(est.ip, est.puerto, texto); ultimoLog = "OK " + job.optString("tipo") + " -> " + est.nombre }
+              Prefs.getBluetooth(this) && btMac.isNotBlank() -> { Bt.imprimir(btMac, texto); ultimoLog = "OK " + job.optString("tipo") + " -> Bluetooth" }
+              else -> throw RuntimeException("estacion sin IP y sin Bluetooth")
+            }
             Agent.marcar(cfg, id, true)
-            ultimoLog = "OK " + job.optString("tipo") + " -> " + est.nombre
           } catch (e: Exception) {
             try { Agent.marcar(cfg, id, false, e.message) } catch (_: Exception) {}
             ultimoLog = "ERR " + id + ": " + e.message
