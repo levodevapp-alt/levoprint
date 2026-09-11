@@ -153,7 +153,7 @@ function renderComanda(pl) {
     if (it.nota) t += `   >> ${it.nota}\n`;
   }
   if (pl.nota) t += linea() + `NOTA: ${pl.nota}\n`;
-  t += linea('=') + CMD.centro + '\x1b\x21\x00<Levodev.app />\n' + CMD.corte;
+  t += linea('=') + CMD.centro + firma(pl) + CMD.corte;
   return t;
 }
 
@@ -172,7 +172,7 @@ function renderPrecuenta(pl) {
   t += linea('=') + CMD.centro;
   t += `[QR] ${pl.qr}\n`; // v1: texto; QR gráfico ESC/POS en F2 (el cajero escanea desde su celular)
   t += 'NO ES COMPROBANTE DE PAGO\n';
-  t += '\x1b\x21\x00<Levodev.app />\n' + CMD.corte;
+  t += firma(pl) + CMD.corte;
   return t;
 }
 
@@ -210,7 +210,7 @@ function renderTicket(pl) {
   t += linea('=') + CMD.negritaOn + fila('TOTAL', money(pl.total)) + CMD.negritaOff;
   for (const p of pl.pagos || []) t += fila('  ' + p.medio, money(p.monto));
   t += linea('=') + CMD.centro + 'NO ES COMPROBANTE DE PAGO\n';
-  t += '\x1b\x21\x00<Levodev.app />\n' + CMD.corte;
+  t += firma(pl) + CMD.corte;
   return t;
 }
 
@@ -273,7 +273,7 @@ function renderCpe(pl) {
   if (pl.qr) t += qrEscPos(pl.qr) + '\n';
   if (pl.hash) t += 'Hash: ' + String(pl.hash).slice(0, 28) + '\n';
   t += 'Representacion impresa del\ncomprobante electronico.\nConsulte en sunat.gob.pe\n';
-  t += '\x1b\x21\x00<Levodev.app />\n' + CMD.corte;
+  t += firma(pl) + CMD.corte;
   return t;
 }
 
@@ -283,8 +283,18 @@ function renderCartaQr(pl) {
   t += '\x1b\x21\x00' + (pl.sub || 'Escanea nuestra carta') + '\n\n';
   if (pl.url) t += qrEscPos(pl.url, 8) + '\n';
   t += '\x1b\x21\x00' + (pl.url || '') + '\n';
-  t += '<Levodev.app />\n' + CMD.corte;
+  t += firma(pl) + CMD.corte;
   return t;
+}
+
+function firma(pl){
+  const app=(pl&&pl.app)||process.env.LEVO_APP||"";
+  const lema=(pl&&pl.lema)||process.env.LEVO_LEMA||"";
+  let f=CMD.centro;
+  if(app) f+=CMD.negritaOn+String(app).toUpperCase()+"\n"+CMD.negritaOff;
+  if(lema) f+="\x1b\x21\x00"+lema+"\n";
+  f+="\x1b\x21\x00<Levodev.app />\n";
+  return f;
 }
 
 function render(job) {
