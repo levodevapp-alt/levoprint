@@ -1,5 +1,5 @@
 // ============================================================
-// LevoPrint · Agente de impresión v1.2 (firma del dueño al pie)  ⚡ by Levo.dev
+// LevoPrint · Agente de impresión v1.3 (marca del SaaS + CPE SUNAT)  ⚡ <Levodev.app />
 // Corre en la PC del local. Poll cada 2s a komo_print_tomar,
 // renderiza ESC/POS y lo manda a la IP:puerto de cada estación.
 // Se empaqueta a LevoPrint.exe (Node SEA). El dueño solo edita
@@ -356,6 +356,6 @@ async function ciclo() {
   }
 }
 
-console.log('KOMO agente de impresión v1 — ⚡ by Levo.dev');
+console.log('LevoPrint agente de impresion v1.3 — <Levodev.app />');
 console.log(MODO_CONSOLA ? 'MODO CONSOLA (sin impresoras reales)' : 'Modo impresión real');
 ciclo();
