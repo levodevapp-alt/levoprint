@@ -153,7 +153,7 @@ function renderComanda(pl) {
     if (it.nota) t += `   >> ${it.nota}\n`;
   }
   if (pl.nota) t += linea() + `NOTA: ${pl.nota}\n`;
-  t += linea('=') + CMD.centro + '\x1b\x21\x00Hecho con carino en Paracas\n<Levo.dev /> ' + String.fromCharCode(0xB7) + ' levodev.app\n' + CMD.corte;
+  t += linea('=') + CMD.centro + '\x1b\x21\x00<Levodev.app />\n' + CMD.corte;
   return t;
 }
 
@@ -172,7 +172,7 @@ function renderPrecuenta(pl) {
   t += linea('=') + CMD.centro;
   t += `[QR] ${pl.qr}\n`; // v1: texto; QR gráfico ESC/POS en F2 (el cajero escanea desde su celular)
   t += 'NO ES COMPROBANTE DE PAGO\n';
-  t += '\x1b\x21\x00Hecho con carino en Paracas\n<Levo.dev /> ' + String.fromCharCode(0xB7) + ' levodev.app\n' + CMD.corte;
+  t += '\x1b\x21\x00<Levodev.app />\n' + CMD.corte;
   return t;
 }
 
@@ -210,22 +210,51 @@ function renderTicket(pl) {
   t += linea('=') + CMD.negritaOn + fila('TOTAL', money(pl.total)) + CMD.negritaOff;
   for (const p of pl.pagos || []) t += fila('  ' + p.medio, money(p.monto));
   t += linea('=') + CMD.centro + 'NO ES COMPROBANTE DE PAGO\n';
-  t += '\x1b\x21\x00Hecho con carino en Paracas\n<Levo.dev /> ' + String.fromCharCode(0xB7) + ' levodev.app\n' + CMD.corte;
+  t += '\x1b\x21\x00<Levodev.app />\n' + CMD.corte;
   return t;
 }
 
 // [F4] Comprobante electrónico (boleta/factura) con QR SUNAT
+
+// --- Monto en letras (exigido por SUNAT en la representacion impresa) ---
+function numeroALetras(num){
+  const U=['','UNO','DOS','TRES','CUATRO','CINCO','SEIS','SIETE','OCHO','NUEVE','DIEZ','ONCE','DOCE','TRECE','CATORCE','QUINCE','DIECISEIS','DIECISIETE','DIECIOCHO','DIECINUEVE','VEINTE'];
+  const D=['','','','TREINTA','CUARENTA','CINCUENTA','SESENTA','SETENTA','OCHENTA','NOVENTA'];
+  const C=['','CIENTO','DOSCIENTOS','TRESCIENTOS','CUATROCIENTOS','QUINIENTOS','SEISCIENTOS','SETECIENTOS','OCHOCIENTOS','NOVECIENTOS'];
+  function centenas(n){ if(n===100) return 'CIEN'; let t='';
+    const c=Math.floor(n/100), r=n%100; if(c) t+=C[c]+' ';
+    if(r<=20) t+=U[r]; else { const d=Math.floor(r/10), u=r%10;
+      if(d===2) t+= (u? 'VEINTI'+U[u] : 'VEINTE');
+      else t+= D[d] + (u? ' Y '+U[u] : ''); }
+    return t.trim(); }
+  function seccion(n){ let t='';
+    const mill=Math.floor(n/1000000); n%=1000000;
+    if(mill) t+= (mill===1? 'UN MILLON ' : centenas(mill)+' MILLONES ');
+    const mil=Math.floor(n/1000); n%=1000;
+    if(mil) t+= (mil===1? 'MIL ' : centenas(mil)+' MIL ');
+    if(n) t+= centenas(n);
+    return t.trim() || 'CERO'; }
+  const e=Math.floor(Number(num||0)); const cent=Math.round((Number(num||0)-e)*100);
+  return seccion(e)+' CON '+String(cent).padStart(2,'0')+'/100 SOLES';
+}
+function denomCpe(tipo){ const t=String(tipo||'').toUpperCase();
+  if(t.includes('FACTURA')) return 'FACTURA ELECTRONICA';
+  if(t.includes('BOLETA')) return 'BOLETA DE VENTA ELECTRONICA';
+  if(t.includes('CREDITO')) return 'NOTA DE CREDITO ELECTRONICA';
+  if(t.includes('DEBITO')) return 'NOTA DE DEBITO ELECTRONICA';
+  return t || 'COMPROBANTE'; }
+
 function renderCpe(pl) {
   const e = pl.empresa || {}, c = pl.cliente || {}, tot = pl.totales || {};
   const numero = pl.serie + '-' + String(pl.numero).padStart(8, '0');
   let t = CMD.init + CMD.centro + CMD.negritaOn + (e.razonSocial || e.nombre || '') + '\n' + CMD.negritaOff;
   if (e.ruc) t += 'RUC ' + e.ruc + '\n';
   if (e.direccion) t += e.direccion + '\n';
-  t += linea('=') + CMD.negritaOn + (pl.tipo || 'COMPROBANTE') + '\n' + CMD.grande + numero + '\n' + CMD.normal + CMD.negritaOff;
+  t += linea('=') + CMD.negritaOn + denomCpe(pl.tipo) + '\n' + CMD.grande + numero + '\n' + CMD.normal + CMD.negritaOff;
   if (pl.estado === 'STUB') t += '*** MODO PRACTICA - SIN VALOR ***\n';
   t += CMD.izq + linea('=');
   t += fila('Fecha: ' + (pl.fecha || ''), '');
-  if (pl.mesa) t += fila('Mesa: ' + pl.mesa, pl.mozo ? 'Mozo: ' + pl.mozo : '');
+  // retail: el CPE no lleva mesa/mozo
   t += 'Cliente: ' + (c.nombre || 'CLIENTE VARIOS') + '\n';
   if (c.doc && c.doc !== '0') t += (c.tipoDoc || 'DOC') + ': ' + c.doc + '\n';
   if (c.direccion) t += c.direccion + '\n';
@@ -238,12 +267,13 @@ function renderCpe(pl) {
   if (n(tot.inafecta) > 0) t += fila('OP. INAFECTA', money(tot.inafecta));
   if (n(tot.igv) > 0) t += fila('IGV 18%', money(tot.igv));
   t += CMD.negritaOn + fila('TOTAL', money(pl.total)) + CMD.negritaOff;
+  t += CMD.izq + 'SON: ' + numeroALetras(pl.total) + '\n';
   for (const p of pl.pagos || []) t += fila('  ' + p.medio, money(p.monto));
   t += linea('=') + CMD.centro;
   if (pl.qr) t += qrEscPos(pl.qr) + '\n';
   if (pl.hash) t += 'Hash: ' + String(pl.hash).slice(0, 28) + '\n';
   t += 'Representacion impresa del\ncomprobante electronico.\nConsulte en sunat.gob.pe\n';
-  t += '\x1b\x21\x00Hecho con carino en Paracas\n<Levo.dev /> ' + String.fromCharCode(0xB7) + ' levodev.app\n' + CMD.corte;
+  t += '\x1b\x21\x00<Levodev.app />\n' + CMD.corte;
   return t;
 }
 
@@ -253,7 +283,7 @@ function renderCartaQr(pl) {
   t += '\x1b\x21\x00' + (pl.sub || 'Escanea nuestra carta') + '\n\n';
   if (pl.url) t += qrEscPos(pl.url, 8) + '\n';
   t += '\x1b\x21\x00' + (pl.url || '') + '\n';
-  t += 'Hecho con carino en Paracas\n<Levo.dev /> ' + String.fromCharCode(0xB7) + ' levodev.app\n' + CMD.corte;
+  t += '<Levodev.app />\n' + CMD.corte;
   return t;
 }
 
