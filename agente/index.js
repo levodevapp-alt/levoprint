@@ -192,9 +192,17 @@ function qrEscPos(texto, tam = 5) {
 
 // [F2] Ticket interno de cobro (no es comprobante)
 function renderTicket(pl) {
-  let t = CMD.init + CMD.centro + CMD.grande + 'COBRADO\n' + CMD.normal;
-  t += 'MESA ' + (pl.mesa || '-') + '\n' + CMD.izq + linea('=');
-  t += fila('Mozo: ' + (pl.mozo || '-'), pl.hora || '');
+  // Retail (KIPU) no manda mesa; restaurante (KOMO) sí. Un solo template
+  // sirve a ambos: con negocio + nota para la tienda, con mesa/mozo para el resto.
+  const retail = !pl.mesa;
+  let t = CMD.init + CMD.centro;
+  if (pl.negocio) t += CMD.negritaOn + CMD.grande + String(pl.negocio).toUpperCase() + '\n' + CMD.normal + CMD.negritaOff;
+  t += CMD.grande + (retail ? 'VENTA\n' : 'COBRADO\n') + CMD.normal;
+  if (!retail) t += CMD.grande + 'MESA ' + (pl.mesa || '-') + '\n' + CMD.normal;
+  t += CMD.izq + linea('=');
+  if (pl.nota) t += 'Nota: ' + pl.nota + '\n';
+  const quien = pl.vendedor || pl.mozo || '';
+  t += fila(quien ? ((retail ? 'Atendio: ' : 'Mozo: ') + quien) : '', pl.hora || '');
   t += linea();
   for (const it of pl.items || []) {
     t += fila((fmtCant(it.cantidad) + ' ' + it.nombre).slice(0, ANCHO - 9), money(it.cantidad * it.precio));
