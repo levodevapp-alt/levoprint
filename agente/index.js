@@ -1,5 +1,5 @@
 // ============================================================
-// LevoPrint · Agente de impresión v1.3 (marca del SaaS + CPE SUNAT)  ⚡ <Levodev.app />
+// LevoPrint · Agente de impresión v1.4 (RENDER EN SERVIDOR + respaldo local)  ⚡ <Levodev.app />
 // Corre en la PC del local. Poll cada 2s a komo_print_tomar,
 // renderiza ESC/POS y lo manda a la IP:puerto de cada estación.
 // Se empaqueta a LevoPrint.exe (Node SEA). El dueño solo edita
@@ -316,6 +316,22 @@ function imprimirRaw(ip, puerto, datos) {
   });
 }
 
+// Render SERVIDOR: el ticket se arma en la edge function `<prefijo>-print`
+// y aquí solo se imprime. Así los cambios de formato/firma se despliegan
+// sin re-instalar el agente. Si el endpoint falla, cae al render local.
+async function renderRemoto(job) {
+  const r = await fetch(`${URL_BASE}/functions/v1/${PREFIJO}-print`, {
+    signal: AbortSignal.timeout(8000),
+    method: 'POST',
+    headers: { apikey: ANON, Authorization: `Bearer ${ANON}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tipo: job.tipo, payload: job.payload, ancho: ANCHO }),
+  });
+  if (!r.ok) throw new Error('render remoto HTTP ' + r.status);
+  const j = await r.json();
+  if (!j || j.ok !== true || !j.esc) throw new Error('render remoto sin esc');
+  return Buffer.from(j.esc, 'base64').toString('binary');
+}
+
 // --- ciclo principal ---
 let estaciones = new Map(); // id -> {nombre, ip, puerto}
 let cicloConfig = 0;
@@ -334,7 +350,10 @@ async function ciclo() {
     for (const job of r.jobs || []) {
       const est = estaciones.get(job.estacion);
       try {
-        const texto = render(job);   // dentro del try: un payload roto se marca con error y no bloquea la cola
+        // Render en el SERVIDOR (formato siempre al día); respaldo local si cae.
+        let texto;
+        try { texto = await renderRemoto(job); }
+        catch (_) { texto = render(job); }
         if (MODO_CONSOLA || !est || !est.ip) {
           console.log(`\n--- JOB ${job.id} (${job.tipo}) -> ${est ? est.nombre : 'SIN ESTACION'} ---`);
           console.log(texto.replace(/[\x00-\x1f]/g, '').trim());
@@ -356,6 +375,6 @@ async function ciclo() {
   }
 }
 
-console.log('LevoPrint agente de impresion v1.3 — <Levodev.app />');
+console.log('LevoPrint agente de impresion v1.4 (render en servidor) — <Levodev.app />');
 console.log(MODO_CONSOLA ? 'MODO CONSOLA (sin impresoras reales)' : 'Modo impresión real');
 ciclo();
