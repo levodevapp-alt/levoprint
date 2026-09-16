@@ -15,6 +15,10 @@
   <!-- Bluetooth: opcional, para impresoras BT (se pide en runtime al activarlo). -->
   <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
   <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+  <!-- Camara: opcional, solo para el boton "Escanear QR" del emparejamiento
+       (se pide en runtime; el emparejamiento por codigo escrito funciona igual sin ella). -->
+  <uses-permission android:name="android.permission.CAMERA" />
+  <uses-feature android:name="android.hardware.camera" android:required="false" />
 
   <application
     android:allowBackup="true"
@@ -26,10 +30,18 @@
     <activity
       android:name=".MainActivity"
       android:exported="true"
+      android:launchMode="singleTask"
       android:label="@string/app_name">
       <intent-filter>
         <action android:name="android.intent.action.MAIN" />
         <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+      <!-- Emparejamiento por QR: la consola genera levoprint://emparejar?c=CODIGO -->
+      <intent-filter>
+        <action android:name="android.intent.action.VIEW" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <category android:name="android.intent.category.BROWSABLE" />
+        <data android:scheme="levoprint" android:host="emparejar" />
       </intent-filter>
     </activity>
     <service

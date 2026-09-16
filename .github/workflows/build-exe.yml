@@ -23,3 +23,19 @@ jobs:
           name: LevoPrint-exe
           path: agente/dist/LevoPrint.exe
           if-no-files-found: error
+
+      # Empaqueta el .exe en el ZIP que espera el boton "Descargar (PC)" de
+      # la consola y lo publica a la URL estable. Sin service key: no falla,
+      # solo deja el artifact.
+      - name: Publicar al bucket de descargas (si hay service key)
+        shell: pwsh
+        working-directory: agente
+        env:
+          SB_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          if (-not $env:SB_KEY) { Write-Host "Sin SUPABASE_SERVICE_KEY: no publico al bucket (queda solo el artifact)."; exit 0 }
+          Compress-Archive -Path dist/LevoPrint.exe -DestinationPath LevoPrint-Windows.zip -Force
+          Write-Host "Publicando LevoPrint-Windows.zip al bucket descargas/levoprint ..."
+          curl.exe -sS -X POST "https://krfljsososdakbatevci.supabase.co/storage/v1/object/descargas/levoprint/LevoPrint-Windows.zip" -H "Authorization: Bearer $env:SB_KEY" -H "x-upsert: true" -H "Content-Type: application/zip" --data-binary "@LevoPrint-Windows.zip"
+          if ($LASTEXITCODE -ne 0) { throw "Fallo la publicacion al bucket" }
+          Write-Host "EXE publicado a descargas/levoprint/LevoPrint-Windows.zip"

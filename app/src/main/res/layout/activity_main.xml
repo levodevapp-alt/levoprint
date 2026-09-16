@@ -13,6 +13,31 @@
         android:text="Gestor de impresoras · LevoDev" android:textColor="#8FB6D9"
         android:textSize="13sp" android:layout_marginBottom="18dp" />
 
+    <TextView style="@style/Etiqueta" android:text="Código de la consola (8 caracteres)" />
+    <EditText android:id="@+id/inCodigo" style="@style/Campo"
+        android:hint="ABCD1234" android:maxLength="8"
+        android:inputType="textCapCharacters|textNoSuggestions" />
+
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="horizontal" android:layout_marginTop="8dp">
+      <Button android:id="@+id/btnEmparejar" android:layout_width="0dp"
+          android:layout_height="wrap_content" android:layout_weight="1"
+          android:layout_marginEnd="6dp" android:text="Emparejar" android:textStyle="bold"
+          android:backgroundTint="@color/cian" android:textColor="@color/navy" />
+      <Button android:id="@+id/btnEscanear" android:layout_width="0dp"
+          android:layout_height="wrap_content" android:layout_weight="1"
+          android:layout_marginStart="6dp" android:text="Escanear QR" android:textStyle="bold"
+          android:backgroundTint="@color/oro" android:textColor="@color/navy" />
+    </LinearLayout>
+
+    <TextView android:id="@+id/txtEmparejar" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:layout_marginTop="8dp"
+        android:textColor="#8FB6D9" android:textSize="13sp" android:textStyle="bold" />
+
+    <View android:layout_width="match_parent" android:layout_height="1dp"
+        android:background="#14406C" android:layout_marginTop="18dp" android:layout_marginBottom="6dp" />
+    <TextView style="@style/Etiqueta" android:text="Configuración manual (avanzado)" />
+
     <TextView style="@style/Etiqueta" android:text="URL del backend" />
     <EditText android:id="@+id/inUrl" style="@style/Campo"
         android:hint="https://xxxx.supabase.co" android:inputType="textUri" />

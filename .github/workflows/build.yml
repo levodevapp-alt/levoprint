@@ -33,3 +33,22 @@ jobs:
           name: LevoPrint-apk
           path: LevoPrint.apk
           if-no-files-found: error
+
+      # Publica el APK a la URL estable que usan los botones de descarga de
+      # la consola (mi negocio > estaciones). Si no hay SUPABASE_SERVICE_KEY
+      # el paso NO falla: solo deja el artifact y avisa.
+      - name: Publicar al bucket de descargas (si hay service key)
+        env:
+          SB_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          if [ -z "$SB_KEY" ]; then echo "Sin SUPABASE_SERVICE_KEY: no publico al bucket (queda solo el artifact)."; exit 0; fi
+          echo "Publicando LevoPrint.apk al bucket descargas/levoprint ..."
+          code=$(curl -sS -o /tmp/r.txt -w "%{http_code}" -X POST \
+            "https://krfljsososdakbatevci.supabase.co/storage/v1/object/descargas/levoprint/LevoPrint.apk" \
+            -H "Authorization: Bearer $SB_KEY" \
+            -H "x-upsert: true" \
+            -H "Content-Type: application/vnd.android.package-archive" \
+            --data-binary @LevoPrint.apk)
+          echo "HTTP $code"; cat /tmp/r.txt; echo
+          [ "$code" = "200" ] || { echo "Fallo la publicacion al bucket"; exit 1; }
+          echo "APK publicado a descargas/levoprint/LevoPrint.apk"

@@ -8,3 +8,8 @@
 /captures
 *.apk
 _art/
+
+# Artefactos de build del agente (SEA)
+agente/dist/
+agente/sea-prep.blob
+agente/sea-prep.blob
