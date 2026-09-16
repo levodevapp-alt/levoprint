@@ -13,6 +13,11 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v4
+        with:
+          # El default del action incluye el paquete legacy 'tools' (ya
+          # eliminado de cmdline-tools) y rompe el setup. Solo platform-tools;
+          # el AGP baja compileSdk/build-tools segun necesite.
+          packages: 'platform-tools'
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
