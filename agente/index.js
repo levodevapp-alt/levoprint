@@ -65,7 +65,9 @@ const PREFIJO = (process.env.LEVO_PREFIJO || 'komo').trim();
 // token a mano — solo instala. url/anon (publicos) vienen en el txt.
 const CODIGO = (process.env.LEVO_CODIGO || '').trim();
 const MODO_CONSOLA = ((process.env.LEVO_MODO || process.env.KOMO_MODO) || '') === 'consola';
-const INTERVALO_MS = 2000;
+const INTERVALO_MS = 2000;      // con trabajo reciente: la comanda sale al toque
+const INTERVALO_MAX_MS = 6000;  // sin trabajo: se espacia de a poco hasta 6 s
+const CONFIG_CADA_MS = 60000;   // estaciones/impresoras: cada minuto
 let ANCHO = parseInt(process.env.LEVO_ANCHO || '48', 10) || 48; // columnas típicas de térmica 58mm (48) u 80mm (64/72)
 // [ventana] LEVO_SINVENTANA=1 (o corriendo como servicio de Windows): no abrir
 // navegador, pero la mini-GUI web se sigue sirviendo igual (soporte remoto).
@@ -354,7 +356,8 @@ async function renderRemoto(job) {
 
 // --- ciclo principal ---
 let estaciones = new Map(); // id -> {nombre, ip, puerto}
-let cicloConfig = 0;
+let cicloConfig = 0;            // ms de la última lectura de config
+let espera = INTERVALO_MS;
 
 // [gui] Estado en vivo que consume la mini-GUI web (GET /estado). Nada de
 // esto altera el ciclo de impresion: solo se lee/escribe para informar.
@@ -375,8 +378,11 @@ async function refrescarConfig() {
 
 async function ciclo() {
   try {
-    if (cicloConfig++ % 30 === 0) await refrescarConfig(); // config cada ~60s
+    if (Date.now() - cicloConfig >= CONFIG_CADA_MS) { await refrescarConfig(); cicloConfig = Date.now(); }
     const r = await rpc(`${PREFIJO}_print_tomar`, { device: DEVICE, limite: 10 });
+    // Espera progresiva: con trabajos vuelve a 2 s; vacío, suma 1 s hasta 6 s.
+    // (Antes 2 s fijos, las 24 h: 43 mil consultas al día por local.)
+    espera = (r.jobs && r.jobs.length) ? INTERVALO_MS : Math.min(INTERVALO_MAX_MS, espera + 1000);
     for (const job of r.jobs || []) {
       const est = estaciones.get(job.estacion);
       guiEstado.imprimiendo = true;
@@ -407,7 +413,7 @@ async function ciclo() {
     console.error('[ciclo]', e.message);
     guiEstado.ultimoError = { mensaje: e.message, ts: Date.now() };
   } finally {
-    setTimeout(ciclo, INTERVALO_MS);
+    setTimeout(ciclo, espera);
   }
 }
 
