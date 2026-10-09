@@ -322,8 +322,12 @@ function firma(pl){
 // Copia de un papel que SI salio: sello arriba (cocina no lo toma por pedido nuevo).
 function render(job) {
   const t = renderBase(job);
-  if (!(job.payload && job.payload.reimpresion) || !t.startsWith(CMD.init)) return t;
-  return CMD.init + CMD.centro + CMD.negritaOn + '*** REIMPRESION ***\n' + CMD.negritaOff + CMD.izq + t.slice(CMD.init.length);
+  const pl = job.payload || {};
+  if ((!pl.reimpresion && !pl.atrasada) || !t.startsWith(CMD.init)) return t;
+  let sello = CMD.centro;
+  if (pl.atrasada) sello += CMD.negritaOn + CMD.grande + '*** ATRASADA ***\n' + CMD.normal + 'Pedido de las ' + (pl.hora || '?') + '\n' + CMD.negritaOff;
+  if (pl.reimpresion) sello += CMD.negritaOn + '*** REIMPRESION ***\n' + CMD.negritaOff;
+  return CMD.init + sello + CMD.izq + t.slice(CMD.init.length);
 }
 
 function renderBase(job) {
