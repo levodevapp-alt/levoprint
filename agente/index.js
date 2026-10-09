@@ -319,7 +319,14 @@ function firma(pl){
   return f;
 }
 
+// Copia de un papel que SI salio: sello arriba (cocina no lo toma por pedido nuevo).
 function render(job) {
+  const t = renderBase(job);
+  if (!(job.payload && job.payload.reimpresion) || !t.startsWith(CMD.init)) return t;
+  return CMD.init + CMD.centro + CMD.negritaOn + '*** REIMPRESION ***\n' + CMD.negritaOff + CMD.izq + t.slice(CMD.init.length);
+}
+
+function renderBase(job) {
   if (job.tipo === 'CARTA_QR') return renderCartaQr(job.payload);
   if (job.tipo === 'COMANDA') return renderComanda(job.payload);
   if (job.tipo === 'PRECUENTA') return renderPrecuenta(job.payload);
