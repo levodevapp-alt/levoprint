@@ -1,5 +1,5 @@
 // ============================================================
-// LevoPrint · Agente de impresión v1.6 (ventana visual + emparejamiento por código + render servidor)  ⚡ <Levodev.app />
+// LevoPrint · Agente de impresión v1.7 (ventana visual + emparejamiento por código + render servidor)  ⚡ <Levodev.app />
 // Corre en la PC del local. Poll cada 2s a komo_print_tomar,
 // renderiza ESC/POS y lo manda a la IP:puerto de cada estación.
 // Se empaqueta a LevoPrint.exe (Node SEA). El dueño solo edita
@@ -61,7 +61,15 @@ console.error = (...a) => { _err(...a); alArchivo('ERR ', a); };
 const URL_BASE = process.env.LEVO_URL || process.env.KOMO_URL;
 const ANON = process.env.LEVO_ANON || process.env.KOMO_ANON;
 let DEVICE = process.env.LEVO_DEVICE || process.env.KOMO_DEVICE;   // let: el canje del codigo lo completa
-const PREFIJO = (process.env.LEVO_PREFIJO || 'komo').trim();
+// let: el canje lo fija segun la letra del codigo (K=komo, P=kipu) y lo
+// guarda en levoprint.txt junto con el device.
+let PREFIJO = (process.env.LEVO_PREFIJO || 'komo').trim();
+// [canje-v4] Codigo de estacion rev 4: <letra de la app> + 8 del alfabeto sin
+// ambiguos. La letra dice a que proyecto llamar (no se prueba a ciegas: cada
+// CODIGO_INVALIDO suma al freno por IP). T = reservada para KUTI.
+const CODIGO_FORMATO = /^[KPT][ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/;
+const PREFIJO_POR_LETRA = { K: 'komo', P: 'kipu' };
+const NOMBRE_APP = { K: 'KOMO', P: 'KIPU', T: 'KUTI' };
 // [emparejar] Si el "levoprint.txt" trae LEVO_CODIGO (lo pone el boton
 // "Descargar" de la consola) y AUN no hay device, se canjea una vez: el
 // agente pide su token al servidor y lo guarda. Asi el dueno no pega el
@@ -492,10 +500,12 @@ function desvincularAgente() {
 // abra el programa ya arranque solo. Devuelve {ok,...} para poder responder
 // tanto en consola como en el endpoint POST /vincular.
 // [canje-v3] Mensajes para el dueno (no tecnico), mismo mapa que la app
-// Android (Emparejamiento.mensajeError). "segundos" solo en DEMASIADOS_INTENTOS.
+// Android (Emparejamiento.mensajeError). "segundos" solo en DEMASIADOS_INTENTOS;
+// "app" (la letra) en OTRA_APP y CODIGO_RESERVADO.
 const MSG_REEMPLAZADO = 'Este equipo fue reemplazado o desactivado; vincúlalo de nuevo con un código de tu consola (Estaciones).';
-function mensajeCanje(err, segundos) {
+function mensajeCanje(err, segundos, app) {
   const seg = parseInt(segundos, 10) || 0;
+  const nomApp = NOMBRE_APP[String(app || '').toUpperCase()] || String(app || '').toUpperCase() || 'otra app';
   const txtEspera = seg > 0 ? `Espera ${seg} ${seg === 1 ? 'segundo' : 'segundos'} y vuelve a intentar.`
                             : 'Espera un momento y vuelve a intentar.';
   return ({
@@ -503,10 +513,13 @@ function mensajeCanje(err, segundos) {
     CODIGO_VENCIDO: 'El código venció (dura 15 min). Genera uno nuevo en tu consola (Estaciones).',
     CODIGO_USADO: 'Ese código ya se usó. Genera uno nuevo en tu consola (Estaciones).',
     DEMASIADOS_INTENTOS: 'Hubo demasiados intentos con códigos equivocados. ' + txtEspera,
-    AGENTE_YA_VINCULADO: 'Este local ya tiene otro equipo de impresión vinculado. En tu consola (Estaciones), genera un código nuevo y elige si este equipo reemplaza al anterior o se suma como adicional.',
-    IP_DESCONOCIDA: 'No pudimos verificar tu conexión. Revisa el internet (si usas VPN o proxy, apágalo) e intenta de nuevo.',
+    OTRA_APP: 'Este código es de ' + nomApp + '. Genera el código en la consola de la app donde quieres imprimir.',
+    AGENTE_YA_VINCULADO: 'Otro equipo se vinculó a este local mientras tanto. Genera un código nuevo en tu consola (Estaciones).',
+    IP_DESCONOCIDA: 'No se pudo identificar la conexión. Intenta de nuevo.',
     AGENTE_INVALIDO: MSG_REEMPLAZADO,
-    SIN_CODIGO: 'Escribe el código de 8 caracteres.',
+    CODIGO_FORMATO: 'El código tiene 9 caracteres y empieza con K (KOMO) o P (KIPU). Revisa que esté bien escrito.',
+    CODIGO_RESERVADO: 'Este código es de ' + nomApp + ', que esta versión de LevoPrint todavía no admite. Actualiza LevoPrint e intenta de nuevo.',
+    SIN_CODIGO: 'Escribe el código de 9 caracteres.',
   })[err] || ('No se pudo vincular (' + err + ').');
 }
 
@@ -516,17 +529,31 @@ async function canjearCodigo(codigoIn) {
   if (DEVICE) return { ok: false, error: 'YA_VINCULADO', mensaje: 'Este agente ya está vinculado.' };
   if (!URL_BASE || !ANON) return { ok: false, error: 'FALTA_URL_ANON', mensaje: 'Falta LEVO_URL/LEVO_ANON en levoprint.txt.' };
   if (!codigoIn) CODIGO = ''; // el del .txt se intenta UNA vez por sesion (el canje es de un uso)
-  console.log('Emparejando con el codigo ' + cod + '...');
+  // Formato y letra se revisan aqui: un codigo mal escrito no gasta un
+  // intento del freno del servidor.
+  if (!CODIGO_FORMATO.test(cod)) {
+    const msg = mensajeCanje('CODIGO_FORMATO');
+    console.error(msg);
+    return { ok: false, error: 'CODIGO_FORMATO', mensaje: msg };
+  }
+  const letra = cod.charAt(0);
+  const prefijoCod = PREFIJO_POR_LETRA[letra];
+  if (!prefijoCod) {
+    const msg = mensajeCanje('CODIGO_RESERVADO', 0, letra);
+    console.error(msg);
+    return { ok: false, error: 'CODIGO_RESERVADO', mensaje: msg };
+  }
+  console.log('Emparejando con el codigo ' + cod + ' (' + prefijoCod + ')...');
   let d;
   try {
-    d = await rpc(`${PREFIJO}_estacion_codigo_canjear`, { codigo: cod });
+    d = await rpc(`${prefijoCod}_estacion_codigo_canjear`, { codigo: cod });
   } catch (e) {
     console.error('No se pudo emparejar (revisa tu internet): ' + e.message);
     return { ok: false, error: 'RED', mensaje: 'No se pudo emparejar (revisa tu internet): ' + e.message };
   }
   if (!d || d.ok !== true) {
     const err = (d && d.error) || 'ERROR';
-    const msg = mensajeCanje(err, d && d.segundos);
+    const msg = mensajeCanje(err, d && d.segundos, d && d.app);
     console.error(msg);
     return { ok: false, error: err, mensaje: msg, segundos: (d && d.segundos) || undefined };
   }
@@ -537,20 +564,27 @@ async function canjearCodigo(codigoIn) {
   }
   DEVICE = d.device;
   process.env.LEVO_DEVICE = d.device;
+  // El prefijo del bundle manda; si no viene, el de la letra. Se guarda en el
+  // .txt para que al reabrir el ciclo llame al proyecto correcto.
+  PREFIJO = String(d.prefijo || prefijoCod).trim();
+  process.env.LEVO_PREFIJO = PREFIJO;
   try {
     const ruta = path.join(BASE_DIR, 'levoprint.txt');
     let txt = fs.existsSync(ruta) ? fs.readFileSync(ruta, 'utf8') : '';
     txt = txt.replace(/^[ \t]*LEVO_CODIGO[ \t]*=.*$/gim, '# LEVO_CODIGO usado');
     if (/^[ \t]*LEVO_DEVICE[ \t]*=/im.test(txt)) txt = txt.replace(/^[ \t]*LEVO_DEVICE[ \t]*=.*$/im, 'LEVO_DEVICE=' + d.device);
     else txt += (txt.endsWith('\n') ? '' : '\r\n') + 'LEVO_DEVICE=' + d.device + '\r\n';
+    if (/^[ \t]*LEVO_PREFIJO[ \t]*=/im.test(txt)) txt = txt.replace(/^[ \t]*LEVO_PREFIJO[ \t]*=.*$/im, 'LEVO_PREFIJO=' + PREFIJO);
+    else txt += (txt.endsWith('\n') ? '' : '\r\n') + 'LEVO_PREFIJO=' + PREFIJO + '\r\n';
     fs.writeFileSync(ruta, txt, 'utf8');
   } catch (_) { /* carpeta de solo lectura: queda en memoria esta sesion */ }
   guiEstado.desvinculado = null;
-  // modo/reemplazara (rev 3): el servidor apaga a los anteriores recien
-  // cuando ESTE agente se conecta por primera vez (primer ciclo).
-  const n = parseInt(d.reemplazara != null ? d.reemplazara : d.reemplazados, 10) || 0;
-  const aviso = (d.modo === 'reemplazar' && n > 0)
-    ? `Al conectarse reemplaza a ${n} ${n === 1 ? 'equipo anterior' : 'equipos anteriores'}.`
+  // modo/reemplazara (rev 4): el servidor apaga a los anteriores recien con
+  // el PRIMER trabajo IMPRESO de este agente; hasta entonces los dos imprimen.
+  // (reemplazados = los que ya se apagaron: vale 0 en el canje.)
+  const n = parseInt(d.reemplazara, 10) || 0;
+  const aviso = (d.modo === 'reemplazar' && n === 1) ? 'Cuando imprimas tu primera comanda, se apagará el equipo anterior.'
+    : (d.modo === 'reemplazar' && n > 1) ? `Cuando imprimas tu primera comanda, se apagarán los ${n} equipos anteriores.`
     : d.modo === 'adicional' ? 'Quedó como equipo adicional.' : '';
   console.log('Emparejado como: ' + (d.nombre || 'estacion') + '. Listo.' + (aviso ? ' ' + aviso : '') + (d.reintento ? ' (reintento)' : ''));
   return { ok: true, nombre: d.nombre, modo: d.modo || null, reemplazara: n, reintento: !!d.reintento, aviso };
@@ -603,7 +637,7 @@ function estadoActual() {
   else semaforo = 'conectado';
   return {
     ok: true,
-    version: '1.6',
+    version: '1.7',
     modoConsola: MODO_CONSOLA,
     ancho: ANCHO,
     prefijo: PREFIJO,
@@ -661,7 +695,7 @@ function paginaHtml() {
 
     <div id="vinculoBox" style="display:none">
       <div class="fila"><b>Vincular este agente</b></div>
-      <input id="codigo" type="text" maxlength="8" placeholder="CODIGO DE 8 CARACTERES">
+      <input id="codigo" type="text" maxlength="9" placeholder="CÓDIGO DE 9 CARACTERES">
       <button id="btnVincular">Vincular</button>
       <div id="msgVinculo" class="msg"></div>
     </div>
@@ -852,7 +886,7 @@ function iniciarGui() {
 async function arrancar() {
   await canjearCodigo();
   if (faltaUrlAnon()) { abortarSinConfig(); return; }
-  console.log('LevoPrint agente de impresion v1.6 (ventana visual + emparejamiento por codigo) — <Levodev.app />');
+  console.log('LevoPrint agente de impresion v1.7 (ventana visual + emparejamiento por codigo) — <Levodev.app />');
   console.log(MODO_CONSOLA ? 'MODO CONSOLA (sin impresoras reales)' : 'Modo impresión real');
   iniciarGui();
   if (!faltaConfig()) ciclo();

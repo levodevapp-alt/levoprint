@@ -13,9 +13,9 @@
         android:text="Gestor de impresoras · LevoDev" android:textColor="#8FB6D9"
         android:textSize="13sp" android:layout_marginBottom="18dp" />
 
-    <TextView style="@style/Etiqueta" android:text="Código de la consola (8 caracteres)" />
+    <TextView style="@style/Etiqueta" android:text="Código de la consola (9 caracteres)" />
     <EditText android:id="@+id/inCodigo" style="@style/Campo"
-        android:hint="ABCD1234" android:maxLength="8"
+        android:hint="KABCD2345" android:maxLength="9"
         android:inputType="textCapCharacters|textNoSuggestions" />
 
     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"

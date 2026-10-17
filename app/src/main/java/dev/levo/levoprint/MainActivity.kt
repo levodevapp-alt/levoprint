@@ -36,7 +36,7 @@ class MainActivity : AppCompatActivity() {
       alRecibirEmparejamiento?.invoke(datos.codigo, datos.prefijo, datos.url, datos.anon)
     } else {
       // No es un link levoprint:// conocido: asume que el QR trae el codigo pelado.
-      val cod = texto.trim().uppercase().filter { it.isLetterOrDigit() }.take(8)
+      val cod = texto.trim().uppercase().filter { it.isLetterOrDigit() }.take(9)
       alRecibirEmparejamiento?.invoke(cod, null, null, null)
     }
   }
@@ -146,13 +146,8 @@ class MainActivity : AppCompatActivity() {
               Prefs.guardar(this, r.cfg)
               inUrl.setText(r.cfg.url); inAnon.setText(r.cfg.anon); inDevice.setText(r.cfg.device)
               inPrefijo.setText(r.cfg.prefijo); inAncho.setText(r.cfg.ancho.toString())
-              txtEmparejar.text = "Emparejado como " + r.nombre + when {
-                // El servidor apaga a los anteriores recien cuando ESTE equipo se conecta.
-                r.modo == "reemplazar" && r.reemplazara > 0 ->
-                  ". Al conectarse reemplaza a " + r.reemplazara + (if (r.reemplazara == 1) " equipo anterior." else " equipos anteriores.")
-                r.modo == "adicional" -> ". Quedó como equipo adicional."
-                else -> "."
-              }
+              // El servidor apaga a los anteriores recien con el PRIMER trabajo impreso de este equipo.
+              txtEmparejar.text = Emparejamiento.textoExito(r)
               val i = Intent(this, PrintService::class.java)
               if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(i) else startService(i)
               h.postDelayed({ refrescar() }, 500)
