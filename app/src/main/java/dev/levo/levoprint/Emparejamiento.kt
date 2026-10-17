@@ -50,15 +50,16 @@ object Emparejamiento {
   // Mensajes para el dueno (no tecnico). "segundos" solo aplica a
   // DEMASIADOS_INTENTOS y "app" (la letra) a OTRA_APP / CODIGO_RESERVADO;
   // ambos vienen del servidor o del chequeo local.
-  fun mensajeError(err: String, segundos: Int = 0, app: String = ""): String = when (err) {
+  // "prefijo" elige el nombre de la seccion de la consola (consolaDe).
+  fun mensajeError(err: String, segundos: Int = 0, app: String = "", prefijo: String = ""): String = when (err) {
     "CODIGO_INVALIDO" -> "El código no es válido. Revisa que esté bien escrito."
-    "CODIGO_VENCIDO" -> "El código venció (dura 15 min). Genera uno nuevo en la consola (Estaciones)."
-    "CODIGO_USADO" -> "Ese código ya se usó. Genera uno nuevo en la consola (Estaciones)."
+    "CODIGO_VENCIDO" -> "El código venció (dura 15 min). Genera uno nuevo en " + consolaDe(prefijo) + "."
+    "CODIGO_USADO" -> "Ese código ya se usó. Genera uno nuevo en " + consolaDe(prefijo) + "."
     "OTRA_APP" -> "Este código es de " + nombreApp(app) + ". Genera el código en la consola de la app donde quieres imprimir."
-    "AGENTE_YA_VINCULADO" -> "Otro equipo se vinculó a este local mientras tanto. Genera un código nuevo en la consola (Estaciones)."
+    "AGENTE_YA_VINCULADO" -> "Otro equipo se vinculó a este local mientras tanto. Genera un código nuevo en " + consolaDe(prefijo) + "."
     "DEMASIADOS_INTENTOS" -> "Hubo demasiados intentos con códigos equivocados. " + textoEspera(segundos)
     "IP_DESCONOCIDA" -> "No se pudo identificar la conexión. Intenta de nuevo."
-    "AGENTE_INVALIDO" -> MSG_REEMPLAZADO
+    "AGENTE_INVALIDO" -> msgDesactivado(prefijo)
     "CODIGO_FORMATO" -> "El código tiene 9 caracteres y empieza con K (KOMO) o P (KIPU). Revisa que esté bien escrito."
     "CODIGO_RESERVADO" -> "Este código es de " + nombreApp(app) + ", que esta versión de LevoPrint todavía no admite. Actualiza LevoPrint e intenta de nuevo."
     "SIN_CODIGO" -> "Escribe el código de 9 caracteres."
@@ -67,7 +68,17 @@ object Emparejamiento {
     else -> "No se pudo emparejar ($err)."
   }
 
-  const val MSG_REEMPLAZADO = "Este equipo fue reemplazado o desactivado; vincúlalo de nuevo con un código de la consola (Estaciones)."
+  // [qa4] La seccion se llama "Estaciones" en KOMO e "Impresoras" en KIPU.
+  fun consolaDe(prefijo: String): String = when (prefijo.lowercase()) {
+    "komo" -> "tu consola de KOMO › Estaciones"
+    "kipu" -> "tu consola de KIPU › Impresoras"
+    else -> "tu consola"
+  }
+
+  // [qa4] AGENTE_INVALIDO: el token se conserva y el servicio reintenta solo.
+  fun msgDesactivado(prefijo: String): String =
+    "Este equipo está desactivado desde la consola; si lo reactivan vuelve a imprimir solo. " +
+      "Para vincularlo de nuevo, ingresa un código nuevo de " + consolaDe(prefijo) + "."
 
   private fun textoEspera(seg: Int): String =
     if (seg > 0) "Espera $seg ${if (seg == 1) "segundo" else "segundos"} y vuelve a intentar."
@@ -138,7 +149,7 @@ object Emparejamiento {
         )
       } else {
         val err = r.optString("error", "ERROR")
-        CanjeResultado.Error(err, mensajeError(err, r.optInt("segundos", 0), r.optString("app")))
+        CanjeResultado.Error(err, mensajeError(err, r.optInt("segundos", 0), r.optString("app"), p.prefijo))
       }
     } catch (e: Exception) {
       CanjeResultado.Error("RED", mensajeError("RED"))

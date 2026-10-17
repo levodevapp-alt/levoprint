@@ -9,22 +9,9 @@ object Prefs {
     ctx.getSharedPreferences(F, Context.MODE_PRIVATE).edit()
       .putString("url", c.url).putString("anon", c.anon).putString("device", c.device)
       .putString("prefijo", c.prefijo).putInt("ancho", c.ancho)
-      .putBoolean("reemplazado", false).apply() // config nueva: deja atras el aviso de reemplazo
+      .remove("reemplazado") // [qa4] marca de canje-v3 ya sin uso: se limpia
+      .apply()
   }
-
-  // [canje-v3] El servidor dijo AGENTE_INVALIDO (este equipo fue reemplazado
-  // o desactivado). Se borra SOLO el token del dispositivo: url/anon/prefijo/
-  // ancho y la impresora Bluetooth se conservan, para que el dueno vuelva a
-  // emparejar con un codigo nuevo sin tocar nada mas. Sin device, leer()
-  // devuelve null y ni el arranque automatico ni el BootReceiver reintentan
-  // con el token muerto.
-  fun desvincular(ctx: Context) {
-    ctx.getSharedPreferences(F, Context.MODE_PRIVATE).edit()
-      .remove("device").putBoolean("reemplazado", true).apply()
-  }
-
-  fun getReemplazado(ctx: Context): Boolean =
-    ctx.getSharedPreferences(F, Context.MODE_PRIVATE).getBoolean("reemplazado", false)
 
   fun leer(ctx: Context): Cfg? {
     val p = ctx.getSharedPreferences(F, Context.MODE_PRIVATE)
@@ -35,8 +22,8 @@ object Prefs {
     return Cfg(url, anon, device, p.getString("prefijo", "komo") ?: "komo", p.getInt("ancho", 48))
   }
 
-  // Para rellenar la pantalla aunque falte el device (tras desvincular):
-  // url/anon/prefijo/ancho siguen guardados y se muestran.
+  // Para rellenar la pantalla aunque falte algun dato (config a medias):
+  // lo que este guardado se muestra igual.
   fun leerSinDevice(ctx: Context): Cfg {
     val p = ctx.getSharedPreferences(F, Context.MODE_PRIVATE)
     return Cfg(p.getString("url", "") ?: "", p.getString("anon", "") ?: "", p.getString("device", "") ?: "",

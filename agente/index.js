@@ -397,7 +397,16 @@ async function renderRemoto(job) {
 let estaciones = new Map(); // id -> {nombre, ip, puerto}
 let cicloConfig = 0;            // ms de la última lectura de config
 let espera = INTERVALO_MS;
-let cicloVivo = false;          // [canje-v3] hay un setTimeout(ciclo) en curso
+// [qa4] Control del ciclo: un solo bucle vivo. cicloEnCurso = hay una vuelta
+// ejecutandose; cicloTimer = la proxima vuelta programada. despertarCiclo()
+// adelanta la proxima vuelta sin crear un segundo bucle.
+let cicloEnCurso = false;
+let cicloTimer = null;
+// [qa4] Desactivado desde la consola (AGENTE_INVALIDO): se CONSERVA el token
+// y se reintenta cada 45 s (punto medio de 30-60 s). Si el dueno lo reactiva,
+// la siguiente vuelta responde bien y retoma solo; si vincula un codigo
+// nuevo, el token se cambia recien cuando ese canje sale bien.
+const ESPERA_DESACTIVADO_MS = 45000;
 
 // [gui] Estado en vivo que consume la mini-GUI web (GET /estado). Nada de
 // esto altera el ciclo de impresion: solo se lee/escribe para informar.
@@ -406,11 +415,11 @@ const guiEstado = {
   ultimoError: null,        // { mensaje, ts } del ultimo job o ciclo fallido
   ultimoOk: null,           // ts del ultimo job impreso ok
   ultimaSync: null,         // ts de la ultima vez que refrescarConfig() respondio
-  desvinculado: null,       // [canje-v3] { mensaje, ts } si el servidor dio de baja este agente
+  desactivado: null,        // [qa4] { mensaje, ts } mientras el servidor responda AGENTE_INVALIDO
 };
 
-async function refrescarConfig() {
-  const cfg = await rpc(`${PREFIJO}_agente_config`, { device: DEVICE });
+async function refrescarConfig(dev, pfx) {
+  const cfg = await rpc(`${pfx}_agente_config`, { device: dev });
   estaciones = new Map((cfg.estaciones || []).map((e) => [e.id, e]));
   guiEstado.ultimaSync = Date.now();
   console.log(`[cfg] ${estaciones.size} estaciones:`,
@@ -418,11 +427,20 @@ async function refrescarConfig() {
 }
 
 async function ciclo() {
-  cicloVivo = true;
-  let seguir = true;
+  cicloTimer = null;
+  cicloEnCurso = true;
+  // Token de ESTA vuelta: si a media vuelta se canjea un codigo nuevo, los
+  // trabajos ya tomados se marcan con el token que los tomo, y un
+  // AGENTE_INVALIDO del token viejo no pisa el estado del nuevo.
+  const dev = DEVICE;
+  const pfx = PREFIJO;
   try {
-    if (Date.now() - cicloConfig >= CONFIG_CADA_MS) { await refrescarConfig(); cicloConfig = Date.now(); }
-    const r = await rpc(`${PREFIJO}_print_tomar`, { device: DEVICE, limite: 10 });
+    if (Date.now() - cicloConfig >= CONFIG_CADA_MS) { await refrescarConfig(dev, pfx); cicloConfig = Date.now(); }
+    const r = await rpc(`${pfx}_print_tomar`, { device: dev, limite: 10 });
+    if (guiEstado.desactivado && dev === DEVICE) {
+      console.log('[agente] el servidor volvio a aceptar este equipo: retomo la impresion.');
+      guiEstado.desactivado = null;
+    }
     // Espera progresiva: con trabajos vuelve a 2 s; vacío, suma 1 s hasta 6 s.
     // (Antes 2 s fijos, las 24 h: 43 mil consultas al día por local.)
     espera = (r.jobs && r.jobs.length) ? INTERVALO_MS : Math.min(INTERVALO_MAX_MS, espera + 1000);
@@ -442,56 +460,77 @@ async function ciclo() {
           await imprimirRaw(est.ip, est.puerto || 9100, texto);
           console.log(`[ok] job ${job.id} ${job.tipo} -> ${est.nombre} (${est.ip})`);
         }
-        await rpc(`${PREFIJO}_print_marcar`, { device: DEVICE, id: job.id, ok: true });
+        await rpc(`${pfx}_print_marcar`, { device: dev, id: job.id, ok: true });
         guiEstado.ultimoOk = Date.now();
       } catch (e) {
         console.error(`[err] job ${job.id}: ${e.message}`);
         guiEstado.ultimoError = { mensaje: e.message, ts: Date.now() };
-        await rpc(`${PREFIJO}_print_marcar`, { device: DEVICE, id: job.id, ok: false, error: e.message });
+        await rpc(`${pfx}_print_marcar`, { device: dev, id: job.id, ok: false, error: e.message });
       } finally {
         guiEstado.imprimiendo = false;
       }
     }
   } catch (e) {
     if (esAgenteInvalido(e)) {
-      // [canje-v3] Token muerto: reintentar no sirve. Se olvida el device y
-      // el ciclo se detiene; la mini-GUI vuelve a "sin vincular" y acepta un
-      // codigo nuevo (manejarVincular relanza el ciclo).
-      seguir = false;
-      desvincularAgente();
+      // [qa4] Desactivado o reemplazado en la consola. NO se olvida el token
+      // (el dueno puede reactivarlo): se pausa y se reintenta cada 45 s. La
+      // mini-GUI muestra el aviso y acepta un codigo nuevo.
+      if (dev === DEVICE) {
+        if (!guiEstado.desactivado) console.error('[agente] ' + msgDesactivado(pfx));
+        guiEstado.desactivado = { mensaje: msgDesactivado(pfx), ts: Date.now() };
+        espera = ESPERA_DESACTIVADO_MS;
+        cicloConfig = 0; // al volver, lo primero es releer estaciones
+      }
     } else {
       console.error('[ciclo]', e.message);
       guiEstado.ultimoError = { mensaje: e.message, ts: Date.now() };
     }
   } finally {
-    if (seguir) setTimeout(ciclo, espera);
-    else cicloVivo = false;
+    cicloEnCurso = false;
+    if (DEVICE) cicloTimer = setTimeout(ciclo, espera);
   }
 }
 
-// [canje-v3] Olvida el DEVICE (memoria + levoprint.txt). En el .txt solo se
-// comentan las lineas LEVO_DEVICE/KOMO_DEVICE: URL, ANON, PREFIJO, ANCHO y
-// el resto quedan intactos. Asi, al reabrir, el programa arranca directo en
-// "sin vincular" en vez de reintentar con el token dado de baja.
-function desvincularAgente() {
-  console.error('[agente] ' + MSG_REEMPLAZADO);
-  DEVICE = '';
-  delete process.env.LEVO_DEVICE;
-  delete process.env.KOMO_DEVICE;
-  estaciones = new Map();
+// Adelanta la proxima vuelta (tras un canje). Si hay una vuelta en curso, su
+// finally ya programa la siguiente con la espera corta.
+function despertarCiclo() {
   cicloConfig = 0;
   espera = INTERVALO_MS;
-  guiEstado.ultimoError = null;
-  guiEstado.desvinculado = { mensaje: MSG_REEMPLAZADO, ts: Date.now() };
-  try {
-    const ruta = path.join(BASE_DIR, 'levoprint.txt');
-    if (fs.existsSync(ruta)) {
-      const txt = fs.readFileSync(ruta, 'utf8');
-      const nuevo = txt.replace(/^([ \t]*)((?:LEVO|KOMO)_DEVICE[ \t]*=.*?)(\r?)$/gim,
-        '$1# $2 (dado de baja: vincula de nuevo con un codigo)$3');
-      if (nuevo !== txt) fs.writeFileSync(ruta, nuevo, 'utf8');
-    }
-  } catch (_) { /* carpeta de solo lectura: queda olvidado en memoria esta sesion */ }
+  if (cicloEnCurso) return;
+  if (cicloTimer) { clearTimeout(cicloTimer); cicloTimer = null; }
+  ciclo();
+}
+
+// [qa4] Edita levoprint.txt sin romper el BOM: el Bloc de notas puede dejar
+// un BOM UTF-8 al inicio y, si LEVO_DEVICE esta en la PRIMERA linea, el
+// regex ^LEVO_DEVICE no la veia (y se agregaba un segundo LEVO_DEVICE que al
+// releer perdia contra el primero). Se quita el BOM, se edita y se repone.
+function editarTxt(fn) {
+  const ruta = path.join(BASE_DIR, 'levoprint.txt');
+  const crudo = fs.existsSync(ruta) ? fs.readFileSync(ruta, 'utf8') : '';
+  const bom = crudo.charCodeAt(0) === 0xFEFF ? '\uFEFF' : '';
+  const txt = bom ? crudo.slice(1) : crudo;
+  const nuevo = fn(txt);
+  if (nuevo !== txt) fs.writeFileSync(ruta, bom + nuevo, 'utf8');
+}
+// Reemplaza CLAVE=... (primera aparicion) o la agrega al final.
+function ponerClave(txt, clave, valor) {
+  const re = new RegExp('^[ \\t]*' + clave + '[ \\t]*=.*$', 'im');
+  if (re.test(txt)) return txt.replace(re, clave + '=' + valor);
+  return txt + (txt.endsWith('\n') || txt === '' ? '' : '\r\n') + clave + '=' + valor + '\r\n';
+}
+
+// [qa4] Nombre de la seccion de la consola segun la app: KOMO la llama
+// "Estaciones" y KIPU "Impresoras".
+function consolaDe(prefijo) {
+  const pfx = String(prefijo || '').toLowerCase();
+  if (pfx === 'komo') return 'tu consola de KOMO › Estaciones';
+  if (pfx === 'kipu') return 'tu consola de KIPU › Impresoras';
+  return 'tu consola';
+}
+function msgDesactivado(prefijo) {
+  return 'Este equipo está desactivado desde la consola; si lo reactivan vuelve a imprimir solo. '
+       + 'Para vincularlo de nuevo, ingresa un código nuevo de ' + consolaDe(prefijo) + '.';
 }
 
 // [emparejar] Canjea un codigo (el de LEVO_CODIGO al arrancar, o el que el
@@ -501,22 +540,23 @@ function desvincularAgente() {
 // tanto en consola como en el endpoint POST /vincular.
 // [canje-v3] Mensajes para el dueno (no tecnico), mismo mapa que la app
 // Android (Emparejamiento.mensajeError). "segundos" solo en DEMASIADOS_INTENTOS;
-// "app" (la letra) en OTRA_APP y CODIGO_RESERVADO.
-const MSG_REEMPLAZADO = 'Este equipo fue reemplazado o desactivado; vincúlalo de nuevo con un código de tu consola (Estaciones).';
-function mensajeCanje(err, segundos, app) {
+// "app" (la letra) en OTRA_APP y CODIGO_RESERVADO; "prefijo" elige el nombre
+// de la seccion de la consola (consolaDe).
+function mensajeCanje(err, segundos, app, prefijo) {
+  const consola = consolaDe(prefijo);
   const seg = parseInt(segundos, 10) || 0;
   const nomApp = NOMBRE_APP[String(app || '').toUpperCase()] || String(app || '').toUpperCase() || 'otra app';
   const txtEspera = seg > 0 ? `Espera ${seg} ${seg === 1 ? 'segundo' : 'segundos'} y vuelve a intentar.`
                             : 'Espera un momento y vuelve a intentar.';
   return ({
     CODIGO_INVALIDO: 'El código no es válido. Revisa que esté bien escrito.',
-    CODIGO_VENCIDO: 'El código venció (dura 15 min). Genera uno nuevo en tu consola (Estaciones).',
-    CODIGO_USADO: 'Ese código ya se usó. Genera uno nuevo en tu consola (Estaciones).',
+    CODIGO_VENCIDO: 'El código venció (dura 15 min). Genera uno nuevo en ' + consola + '.',
+    CODIGO_USADO: 'Ese código ya se usó. Genera uno nuevo en ' + consola + '.',
     DEMASIADOS_INTENTOS: 'Hubo demasiados intentos con códigos equivocados. ' + txtEspera,
     OTRA_APP: 'Este código es de ' + nomApp + '. Genera el código en la consola de la app donde quieres imprimir.',
-    AGENTE_YA_VINCULADO: 'Otro equipo se vinculó a este local mientras tanto. Genera un código nuevo en tu consola (Estaciones).',
+    AGENTE_YA_VINCULADO: 'Otro equipo se vinculó a este local mientras tanto. Genera un código nuevo en ' + consola + '.',
     IP_DESCONOCIDA: 'No se pudo identificar la conexión. Intenta de nuevo.',
-    AGENTE_INVALIDO: MSG_REEMPLAZADO,
+    AGENTE_INVALIDO: msgDesactivado(prefijo),
     CODIGO_FORMATO: 'El código tiene 9 caracteres y empieza con K (KOMO) o P (KIPU). Revisa que esté bien escrito.',
     CODIGO_RESERVADO: 'Este código es de ' + nomApp + ', que esta versión de LevoPrint todavía no admite. Actualiza LevoPrint e intenta de nuevo.',
     SIN_CODIGO: 'Escribe el código de 9 caracteres.',
@@ -526,7 +566,9 @@ function mensajeCanje(err, segundos, app) {
 async function canjearCodigo(codigoIn) {
   const cod = normalizarCodigo(codigoIn || CODIGO);
   if (!cod) return { ok: false, error: 'SIN_CODIGO', mensaje: mensajeCanje('SIN_CODIGO') };
-  if (DEVICE) return { ok: false, error: 'YA_VINCULADO', mensaje: 'Este agente ya está vinculado.' };
+  // Con token vigente no se canjea; si esta DESACTIVADO, si (el token viejo
+  // se reemplaza solo si este canje sale bien).
+  if (DEVICE && !guiEstado.desactivado) return { ok: false, error: 'YA_VINCULADO', mensaje: 'Este agente ya está vinculado.' };
   if (!URL_BASE || !ANON) return { ok: false, error: 'FALTA_URL_ANON', mensaje: 'Falta LEVO_URL/LEVO_ANON en levoprint.txt.' };
   if (!codigoIn) CODIGO = ''; // el del .txt se intenta UNA vez por sesion (el canje es de un uso)
   // Formato y letra se revisan aqui: un codigo mal escrito no gasta un
@@ -553,7 +595,7 @@ async function canjearCodigo(codigoIn) {
   }
   if (!d || d.ok !== true) {
     const err = (d && d.error) || 'ERROR';
-    const msg = mensajeCanje(err, d && d.segundos, d && d.app);
+    const msg = mensajeCanje(err, d && d.segundos, d && d.app, prefijoCod);
     console.error(msg);
     return { ok: false, error: err, mensaje: msg, segundos: (d && d.segundos) || undefined };
   }
@@ -569,16 +611,14 @@ async function canjearCodigo(codigoIn) {
   PREFIJO = String(d.prefijo || prefijoCod).trim();
   process.env.LEVO_PREFIJO = PREFIJO;
   try {
-    const ruta = path.join(BASE_DIR, 'levoprint.txt');
-    let txt = fs.existsSync(ruta) ? fs.readFileSync(ruta, 'utf8') : '';
-    txt = txt.replace(/^[ \t]*LEVO_CODIGO[ \t]*=.*$/gim, '# LEVO_CODIGO usado');
-    if (/^[ \t]*LEVO_DEVICE[ \t]*=/im.test(txt)) txt = txt.replace(/^[ \t]*LEVO_DEVICE[ \t]*=.*$/im, 'LEVO_DEVICE=' + d.device);
-    else txt += (txt.endsWith('\n') ? '' : '\r\n') + 'LEVO_DEVICE=' + d.device + '\r\n';
-    if (/^[ \t]*LEVO_PREFIJO[ \t]*=/im.test(txt)) txt = txt.replace(/^[ \t]*LEVO_PREFIJO[ \t]*=.*$/im, 'LEVO_PREFIJO=' + PREFIJO);
-    else txt += (txt.endsWith('\n') ? '' : '\r\n') + 'LEVO_PREFIJO=' + PREFIJO + '\r\n';
-    fs.writeFileSync(ruta, txt, 'utf8');
+    editarTxt((txt) => {
+      txt = txt.replace(/^[ \t]*LEVO_CODIGO[ \t]*=.*$/gim, '# LEVO_CODIGO usado');
+      txt = ponerClave(txt, 'LEVO_DEVICE', d.device);
+      return ponerClave(txt, 'LEVO_PREFIJO', PREFIJO);
+    });
   } catch (_) { /* carpeta de solo lectura: queda en memoria esta sesion */ }
-  guiEstado.desvinculado = null;
+  guiEstado.desactivado = null;
+  guiEstado.ultimoError = null;
   // modo/reemplazara (rev 4): el servidor apaga a los anteriores recien con
   // el PRIMER trabajo IMPRESO de este agente; hasta entonces los dos imprimen.
   // (reemplazados = los que ya se apagaron: vale 0 en el canje.)
@@ -594,10 +634,7 @@ async function canjearCodigo(codigoIn) {
 function persistirAncho(valor) {
   try {
     const ruta = path.join(BASE_DIR, 'levoprint.txt');
-    let txt = fs.existsSync(ruta) ? fs.readFileSync(ruta, 'utf8') : '';
-    if (/^[ \t]*LEVO_ANCHO[ \t]*=/im.test(txt)) txt = txt.replace(/^[ \t]*LEVO_ANCHO[ \t]*=.*$/im, 'LEVO_ANCHO=' + valor);
-    else txt += (txt.endsWith('\n') || txt === '' ? '' : '\r\n') + 'LEVO_ANCHO=' + valor + '\r\n';
-    fs.writeFileSync(ruta, txt, 'utf8');
+    editarTxt((txt) => ponerClave(txt, 'LEVO_ANCHO', valor));
     return true;
   } catch (_) { return false; /* carpeta de solo lectura: queda en memoria esta sesion */ }
 }
@@ -632,6 +669,7 @@ function estadoActual() {
   let semaforo = 'sin_vincular';
   if (sinUrlAnon) semaforo = 'sin_configurar';
   else if (!vinculado) semaforo = 'sin_vincular';
+  else if (guiEstado.desactivado) semaforo = 'desactivado';
   else if (guiEstado.imprimiendo) semaforo = 'imprimiendo';
   else if (guiEstado.ultimoError && (!guiEstado.ultimoOk || guiEstado.ultimoError.ts > guiEstado.ultimoOk)) semaforo = 'sin_impresora';
   else semaforo = 'conectado';
@@ -648,7 +686,7 @@ function estadoActual() {
     ultimoError: guiEstado.ultimoError,
     ultimoOk: guiEstado.ultimoOk,
     ultimaSync: guiEstado.ultimaSync,
-    desvinculado: guiEstado.desvinculado ? guiEstado.desvinculado.mensaje : null,
+    desactivado: guiEstado.desactivado ? guiEstado.desactivado.mensaje : null,
   };
 }
 
@@ -740,11 +778,12 @@ async function refrescar() {
     conectado: ['ok', 'Conectado — listo para imprimir'],
   };
   let [clase, texto] = mapa[e.semaforo] || ['info', 'Estado desconocido'];
-  if (e.semaforo === 'sin_vincular' && e.desvinculado) { clase = 'bad'; texto = e.desvinculado; }
+  if (e.semaforo === 'desactivado') { clase = 'bad'; texto = e.desactivado || 'Equipo desactivado desde la consola'; }
   sem.classList.add(clase);
   semTxt.textContent = texto;
 
-  document.getElementById('vinculoBox').style.display = (e.vinculado || e.sinUrlAnon) ? 'none' : 'block';
+  // Desactivado: se puede vincular con un codigo nuevo sin perder el actual.
+  document.getElementById('vinculoBox').style.display = (e.sinUrlAnon || (e.vinculado && !e.desactivado)) ? 'none' : 'block';
 
   const box = document.getElementById('estacionesBox');
   if (!e.estaciones || !e.estaciones.length) {
@@ -824,10 +863,9 @@ async function manejarVincular(req, res) {
   const r = await canjearCodigo(body.codigo);
   if (r.ok) {
     console.log('[gui] vinculado desde la ventana web. Arrancando ciclo de impresion...');
-    // Recien ahora hay DEVICE: arranca el loop (el de arrancar() no inicio, o
-    // se detuvo por AGENTE_INVALIDO). Config fresca con el token nuevo.
-    cicloConfig = 0; espera = INTERVALO_MS;
-    if (!cicloVivo) ciclo();
+    // Token nuevo: vuelta inmediata con config fresca (arranca el bucle si
+    // arrancar() no lo inicio, o corta la pausa de 45 s si estaba desactivado).
+    despertarCiclo();
   }
   return responderJson(res, r.ok ? 200 : 400, r);
 }

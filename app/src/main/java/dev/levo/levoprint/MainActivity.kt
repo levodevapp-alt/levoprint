@@ -67,8 +67,7 @@ class MainActivity : AppCompatActivity() {
     val btnEscanear = findViewById<Button>(R.id.btnEscanear)
     val txtEmparejar = findViewById<TextView>(R.id.txtEmparejar)
 
-    // leerSinDevice: tras un AGENTE_INVALIDO el device se borro, pero url/
-    // anon/prefijo/ancho se siguen mostrando.
+    // leerSinDevice: muestra lo guardado aunque la config este a medias.
     Prefs.leerSinDevice(this).let {
       inUrl.setText(it.url); inAnon.setText(it.anon); inDevice.setText(it.device)
       inPrefijo.setText(it.prefijo); inAncho.setText(it.ancho.toString())
@@ -114,17 +113,16 @@ class MainActivity : AppCompatActivity() {
     fun refrescar() {
       val on = PrintService.activo
       btn.text = if (on) "Detener" else "Guardar y arrancar"
-      // [canje-v3] Si el servidor lo dio de baja (AGENTE_INVALIDO), se dice
-      // claro y se vacia el campo device: asi "Guardar y arrancar" no vuelve
-      // a guardar el token muerto, y el dueno solo escanea/escribe un codigo nuevo.
-      val reemplazado = !on && Prefs.getReemplazado(this)
-      if (reemplazado) {
-        if (inDevice.text.isNotBlank()) inDevice.setText("")
-        if (txtEmparejar.text.isBlank() || txtEmparejar.text.startsWith("Emparejado")) txtEmparejar.text = Emparejamiento.MSG_REEMPLAZADO
-      }
+      // [qa4] Desactivado desde la consola (AGENTE_INVALIDO): el servicio
+      // conserva el token y reintenta solo cada 60 s. Se avisa claro y el
+      // dueno puede escanear/escribir un codigo nuevo cuando quiera.
+      val desact = on && PrintService.desactivado
+      val msg = if (desact) Emparejamiento.msgDesactivado(Prefs.leer(this)?.prefijo ?: "") else ""
+      if (desact && (txtEmparejar.text.isBlank() || txtEmparejar.text.startsWith("Emparejado")))
+        txtEmparejar.text = msg
       estado.text = when {
+        desact -> msg
         on -> "Activo · escuchando impresion"
-        reemplazado -> Emparejamiento.MSG_REEMPLAZADO
         else -> "Detenido"
       }
     }
@@ -194,7 +192,9 @@ class MainActivity : AppCompatActivity() {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) pedir(Manifest.permission.POST_NOTIFICATIONS)
 
     // Arranque automático si ya hay configuración (tras reinicio/reapertura).
-    if (Prefs.leer(this) != null && !PrintService.activo) {
+    // Si el servicio corre pero esta desactivado, abrir la app lo despierta
+    // para reintentar al instante (onStartCommand).
+    if (Prefs.leer(this) != null && (!PrintService.activo || PrintService.desactivado)) {
       val i = Intent(this, PrintService::class.java)
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(i) else startService(i)
     }
