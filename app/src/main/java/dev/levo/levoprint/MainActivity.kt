@@ -114,11 +114,11 @@ class MainActivity : AppCompatActivity() {
       val on = PrintService.activo
       btn.text = if (on) "Detener" else "Guardar y arrancar"
       // [qa4] Desactivado desde la consola (AGENTE_INVALIDO): el servicio
-      // conserva el token y reintenta solo cada 60 s. Se avisa claro y el
-      // dueno puede escanear/escribir un codigo nuevo cuando quiera.
+      // conserva el token y reintenta solo (backoff 60 s / 5 min / 15 min).
+      // Se avisa claro y el dueno puede escanear/escribir un codigo nuevo.
       val desact = on && PrintService.desactivado
-      val msg = if (desact) Emparejamiento.msgDesactivado(Prefs.leer(this)?.prefijo ?: "") else ""
-      if (desact && (txtEmparejar.text.isBlank() || txtEmparejar.text.startsWith("Emparejado")))
+      val msg = if (desact) Emparejamiento.textoDesactivado(Prefs.leer(this)?.prefijo ?: "", PrintService.desactivadoDesde) else ""
+      if (desact && (txtEmparejar.text.isBlank() || txtEmparejar.text.startsWith("Emparejado") || txtEmparejar.text.startsWith("Este equipo está desactivado")))
         txtEmparejar.text = msg
       estado.text = when {
         desact -> msg

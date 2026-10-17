@@ -87,6 +87,15 @@ object Emparejamiento {
     }
   }
 
+  // [qa5] Texto visible del modo desactivado: aviso base y, pasada una hora,
+  // cuanto lleva (equipo olvidado).
+  fun textoDesactivado(prefijo: String, desde: Long): String {
+    val horas = if (desde > 0) ((System.currentTimeMillis() - desde) / 3600000L).toInt() else 0
+    return msgDesactivado(prefijo) + if (horas >= 1)
+      " Lleva $horas ${if (horas == 1) "hora" else "horas"} desactivado; si ya no se usa, puedes cerrar LevoPrint."
+    else ""
+  }
+
   // [qa4] AGENTE_INVALIDO: el token se conserva y el servicio reintenta solo.
   fun msgDesactivado(prefijo: String): String =
     "Este equipo está desactivado desde la consola; si lo reactivan vuelve a imprimir solo. " +

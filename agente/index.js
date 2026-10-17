@@ -380,8 +380,9 @@ function imprimirRaw(ip, puerto, datos) {
 // Render SERVIDOR: el ticket se arma en la edge function `<prefijo>-print`
 // y aquí solo se imprime. Así los cambios de formato/firma se despliegan
 // sin re-instalar el agente. Si el endpoint falla, cae al render local.
-async function renderRemoto(job) {
-  const r = await fetch(`${URL_BASE}/functions/v1/${PREFIJO}-print`, {
+// [qa5] pfx = prefijo capturado por la vuelta del ciclo (igual que las RPC).
+async function renderRemoto(job, pfx) {
+  const r = await fetch(`${URL_BASE}/functions/v1/${pfx || PREFIJO}-print`, {
     signal: AbortSignal.timeout(8000),
     method: 'POST',
     headers: { apikey: ANON, Authorization: `Bearer ${ANON}`, 'Content-Type': 'application/json' },
@@ -403,10 +404,28 @@ let espera = INTERVALO_MS;
 let cicloEnCurso = false;
 let cicloTimer = null;
 // [qa4] Desactivado desde la consola (AGENTE_INVALIDO): se CONSERVA el token
-// y se reintenta cada 45 s (punto medio de 30-60 s). Si el dueno lo reactiva,
-// la siguiente vuelta responde bien y retoma solo; si vincula un codigo
-// nuevo, el token se cambia recien cuando ese canje sale bien.
-const ESPERA_DESACTIVADO_MS = 45000;
+// y se reintenta. Si el dueno lo reactiva, la siguiente vuelta responde bien
+// y retoma solo; si vincula un codigo nuevo, el token se cambia recien
+// cuando ese canje sale bien.
+// [qa5] Backoff para el "equipo olvidado": 45 s la primera hora, luego cada
+// 5 min y, pasadas 24 h, cada 15 min. Abrir la ventana o vincular un codigo
+// despierta el ciclo al instante.
+const HORA_MS = 3600000;
+function esperaDesactivado(desdeTs) {
+  const t = Date.now() - desdeTs;
+  if (t < HORA_MS) return 45000;
+  if (t < 24 * HORA_MS) return 5 * 60000;
+  return 15 * 60000;
+}
+// Texto visible: el aviso base y, si ya paso al menos una hora, cuanto lleva.
+function textoDesactivado(d) {
+  if (!d) return null;
+  const horas = Math.floor((Date.now() - d.desde) / HORA_MS);
+  return msgDesactivado(d.prefijo) + (horas >= 1
+    ? ` Lleva ${horas} ${horas === 1 ? 'hora' : 'horas'} desactivado; si ya no se usa, puedes cerrar LevoPrint.`
+    : '');
+}
+let ultimoDespertarGui = 0;
 
 // [gui] Estado en vivo que consume la mini-GUI web (GET /estado). Nada de
 // esto altera el ciclo de impresion: solo se lee/escribe para informar.
@@ -450,7 +469,7 @@ async function ciclo() {
       try {
         // Render en el SERVIDOR (formato siempre al día); respaldo local si cae.
         let texto;
-        try { texto = await renderRemoto(job); }
+        try { texto = await renderRemoto(job, pfx); }
         catch (_) { texto = render(job); }
         if (MODO_CONSOLA || !est || !est.ip) {
           console.log(`\n--- JOB ${job.id} (${job.tipo}) -> ${est ? est.nombre : 'SIN ESTACION'} ---`);
@@ -476,9 +495,12 @@ async function ciclo() {
       // (el dueno puede reactivarlo): se pausa y se reintenta cada 45 s. La
       // mini-GUI muestra el aviso y acepta un codigo nuevo.
       if (dev === DEVICE) {
-        if (!guiEstado.desactivado) console.error('[agente] ' + msgDesactivado(pfx));
-        guiEstado.desactivado = { mensaje: msgDesactivado(pfx), ts: Date.now() };
-        espera = ESPERA_DESACTIVADO_MS;
+        if (!guiEstado.desactivado) {
+          console.error('[agente] ' + msgDesactivado(pfx));
+          guiEstado.desactivado = { prefijo: pfx, desde: Date.now(), ts: Date.now() };
+        }
+        guiEstado.desactivado.ts = Date.now(); // ultimo intento
+        espera = esperaDesactivado(guiEstado.desactivado.desde);
         cicloConfig = 0; // al volver, lo primero es releer estaciones
       }
     } else {
@@ -695,7 +717,7 @@ function estadoActual() {
     ultimoError: guiEstado.ultimoError,
     ultimoOk: guiEstado.ultimoOk,
     ultimaSync: guiEstado.ultimaSync,
-    desactivado: guiEstado.desactivado ? guiEstado.desactivado.mensaje : null,
+    desactivado: textoDesactivado(guiEstado.desactivado),
   };
 }
 
@@ -904,6 +926,12 @@ function iniciarGui() {
   const servidor = http.createServer((req, res) => {
     const url = (req.url || '/').split('?')[0];
     if (req.method === 'GET' && url === '/') {
+      // [qa5] Abrir la ventana con el equipo desactivado = reintento ya (con
+      // tope de uno cada 10 s; /estado, que se sondea, NO despierta).
+      if (guiEstado.desactivado && Date.now() - ultimoDespertarGui > 10000) {
+        ultimoDespertarGui = Date.now();
+        despertarCiclo();
+      }
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       return res.end(paginaHtml());
     }

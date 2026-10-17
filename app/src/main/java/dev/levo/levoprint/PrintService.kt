@@ -1,48 +1,98 @@
 package dev.levo.levoprint
 
+import android.app.AlarmManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 
 // Servicio en primer plano: mantiene vivo el bucle de impresion aunque
 // la pantalla se apague (celular dedicado, enchufado en la red del local).
 //
 // [qa4] Desactivado desde la consola (AGENTE_INVALIDO): el token NO se
 // borra (el dueno puede reactivarlo). El servicio sigue vivo pero en modo
-// ahorro: consulta cada 60 s (en vez de cada 2 s) y SUELTA el wake lock, asi
-// el CPU duerme entre consultas (con bateria, Doze puede espaciarlas mas;
-// enchufado, van a tiempo). Si lo reactivan, la siguiente consulta responde
-// bien y retoma solo. Si el dueno vincula un codigo nuevo, MainActivity
-// guarda la config y llama otra vez al servicio: onStartCommand toma el
-// token nuevo y despierta el bucle al instante, sin reiniciar el servicio.
-// Abrir la app tambien despierta el bucle (reintento inmediato).
+// ahorro: SUELTA el wake lock permanente y reintenta con baja frecuencia.
+// Si lo reactivan, el siguiente reintento responde bien y retoma solo. Si el
+// dueno vincula un codigo nuevo, MainActivity guarda la config y llama otra
+// vez al servicio: onStartCommand toma el token nuevo y despierta el bucle
+// al instante, sin reiniciar el servicio. Abrir la app tambien lo despierta.
+//
+// [qa5] Sin wake lock, el CPU se suspende con la pantalla apagada (ESTE
+// enchufado o no: cargar evita Doze, pero no la suspension del CPU), y un
+// Object.wait(60 s) puede no avanzar en horas. Por eso cada reintento lo
+// dispara una alarma AlarmManager.setAndAllowWhileIdle:
+//   · No pide permiso (setExactAndAllowWhileIdle exige SCHEDULE_EXACT_ALARM,
+//     que en Android 12+ el usuario debe conceder a mano y esta app no tiene).
+//   · Despierta el CPU incluso en Doze. Es inexacta: en Doze profundo el
+//     sistema la limita a ~1 cada 9 min por app; con el backoff de abajo
+//     (60 s la primera hora, luego 5 y 15 min) solo afecta la primera hora.
+//   · Mantener el wake lock "solo enchufado" se descarto: con bateria el
+//     equipo quedaria igual de dormido y enchufado gastaria CPU sin motivo.
+// La alarma llega a un receptor interno que toma un wake lock CORTO (60 s
+// maximo) para que el reintento alcance a hacer su consulta.
+//
+// Backoff "equipo olvidado": 60 s la primera hora, 5 min hasta las 24 h y
+// luego cada 15 min.
 class PrintService : Service() {
   @Volatile private var corriendo = false
   private var hilo: Thread? = null
   private var wake: PowerManager.WakeLock? = null
+  private var wakeCorto: PowerManager.WakeLock? = null
   @Volatile private var cfgActual: Cfg? = null
   @Volatile private var forzarConfig = true
   private val dormidero = Object()
+  private var receptorRegistrado = false
 
   companion object {
     const val CANAL = "levoprint"
+    private const val ACCION_REINTENTO = "dev.levo.levoprint.REINTENTO_DESACTIVADO"
     private const val TXT_ACTIVO = "Escuchando trabajos de impresion"
     private const val TXT_DESACTIVADO = "Desactivado desde la consola"
     private const val ESPERA_MS = 2000L
-    private const val ESPERA_DESACTIVADO_MS = 60000L
+    private const val HORA_MS = 3600000L
     @Volatile var activo = false
     @Volatile var desactivado = false
+    @Volatile var desactivadoDesde = 0L // System.currentTimeMillis() del primer AGENTE_INVALIDO
     @Volatile var ultimoLog = "Detenido"
+
+    fun esperaDesactivado(desde: Long): Long {
+      val t = System.currentTimeMillis() - desde
+      return when {
+        t < HORA_MS -> 60000L
+        t < 24 * HORA_MS -> 5 * 60000L
+        else -> 15 * 60000L
+      }
+    }
+  }
+
+  // Alarma de reintento: wake lock corto y despierta el bucle.
+  private val receptor = object : BroadcastReceiver() {
+    override fun onReceive(ctx: Context?, i: Intent?) {
+      tomarWakeCorto()
+      despertar()
+    }
   }
 
   override fun onBind(i: Intent?): IBinder? = null
+
+  override fun onCreate() {
+    super.onCreate()
+    try {
+      ContextCompat.registerReceiver(this, receptor, IntentFilter(ACCION_REINTENTO), ContextCompat.RECEIVER_NOT_EXPORTED)
+      receptorRegistrado = true
+    } catch (_: Exception) {}
+  }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     if (corriendo) {
@@ -53,9 +103,10 @@ class PrintService : Service() {
         // Codigo nuevo canjeado: se usa el token nuevo desde la proxima vuelta.
         cfgActual = nueva
         forzarConfig = true
-        if (desactivado) { desactivado = false; tomarWake(); notificar(TXT_ACTIVO) }
+        if (desactivado) salirDeDesactivado()
       }
-      despertar() // reintento inmediato (app abierta o config nueva)
+      if (desactivado) tomarWakeCorto() // app abierta: reintento ya, con CPU despierto
+      despertar()
       return START_STICKY
     }
     val cfg = Prefs.leer(this) ?: run { stopSelf(); return START_NOT_STICKY }
@@ -78,7 +129,10 @@ class PrintService : Service() {
       val cfg = cfgActual ?: break
       var espera = ESPERA_MS
       try {
-        if (forzarConfig || ciclo++ % 30 == 0) {
+        // [qa5] El contador avanza SIEMPRE (antes "forzar || ciclo++" lo
+        // saltaba por cortocircuito cuando forzarConfig era true).
+        val tocaConfig = ciclo++ % 30 == 0
+        if (forzarConfig || tocaConfig) {
           estaciones = Agent.estaciones(cfg)
           forzarConfig = false
           ultimoLog = "Config: " + estaciones.size + " estaciones"
@@ -86,9 +140,7 @@ class PrintService : Service() {
         val jobs = Agent.tomar(cfg)
         if (desactivado && cfg == cfgActual) {
           // Lo reactivaron en la consola: vuelve al ritmo normal.
-          desactivado = false
-          tomarWake()
-          notificar(TXT_ACTIVO)
+          salirDeDesactivado()
           ultimoLog = "Reactivado: imprimiendo de nuevo"
         }
         for (i in 0 until jobs.length()) {
@@ -114,10 +166,15 @@ class PrintService : Service() {
           // [qa4] Desactivado/reemplazado: se conserva el token y se reintenta
           // con baja frecuencia. Si entretanto llego un token nuevo, se ignora.
           if (cfg == cfgActual) {
-            if (!desactivado) { desactivado = true; soltarWake(); notificar(TXT_DESACTIVADO) }
-            ultimoLog = Emparejamiento.msgDesactivado(cfg.prefijo)
+            if (!desactivado) {
+              desactivado = true
+              desactivadoDesde = System.currentTimeMillis()
+              soltarWake()
+              notificar(TXT_DESACTIVADO)
+            }
+            ultimoLog = Emparejamiento.textoDesactivado(cfg.prefijo, desactivadoDesde)
             forzarConfig = true // al volver, lo primero es releer estaciones
-            espera = ESPERA_DESACTIVADO_MS
+            espera = esperaDesactivado(desactivadoDesde)
           }
         } else {
           ultimoLog = "ciclo: " + e.message
@@ -125,8 +182,44 @@ class PrintService : Service() {
       } catch (e: Exception) {
         ultimoLog = "ciclo: " + e.message
       }
-      if (!dormir(espera)) break
+      if (desactivado) {
+        // [qa5] La alarma despierta el CPU para el proximo intento; el wake
+        // lock corto de este intento se suelta y el CPU puede dormir. Se usa
+        // el backoff aunque el fallo de esta vuelta haya sido de red.
+        val ms = esperaDesactivado(desactivadoDesde)
+        programarReintento(ms)
+        soltarWakeCorto()
+        // Respaldo: si el CPU sigue despierto, el wait vence solo (la alarma
+        // ya avisara; un despertar de mas solo adelanta un intento).
+        if (!dormir(ms + 5000)) break
+      } else {
+        if (!dormir(espera)) break
+      }
     }
+  }
+
+  private fun salirDeDesactivado() {
+    desactivado = false
+    desactivadoDesde = 0L
+    cancelarReintento()
+    tomarWake()
+    soltarWakeCorto()
+    notificar(TXT_ACTIVO)
+  }
+
+  private fun pendienteReintento(): PendingIntent =
+    PendingIntent.getBroadcast(this, 7, Intent(ACCION_REINTENTO).setPackage(packageName),
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+
+  private fun programarReintento(ms: Long) {
+    try {
+      val am = getSystemService(AlarmManager::class.java)
+      am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + ms, pendienteReintento())
+    } catch (_: Exception) {}
+  }
+
+  private fun cancelarReintento() {
+    try { getSystemService(AlarmManager::class.java).cancel(pendienteReintento()) } catch (_: Exception) {}
   }
 
   // Espera interrumpible por despertar(); false si el hilo fue interrumpido (onDestroy).
@@ -146,6 +239,20 @@ class PrintService : Service() {
 
   @Synchronized private fun soltarWake() {
     try { wake?.let { if (it.isHeld) it.release() } } catch (_: Exception) {}
+  }
+
+  // Wake lock del reintento: no acumulativo y con tope de 60 s por si algo falla.
+  @Synchronized private fun tomarWakeCorto() {
+    try {
+      val w = wakeCorto ?: (getSystemService(Context.POWER_SERVICE) as PowerManager)
+        .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "levoprint:reintento")
+        .also { it.setReferenceCounted(false); wakeCorto = it }
+      w.acquire(60000L)
+    } catch (_: Exception) {}
+  }
+
+  @Synchronized private fun soltarWakeCorto() {
+    try { wakeCorto?.let { if (it.isHeld) it.release() } } catch (_: Exception) {}
   }
 
   private fun notificacion(texto: String) = NotificationCompat.Builder(this, CANAL)
@@ -176,9 +283,13 @@ class PrintService : Service() {
     corriendo = false
     activo = false
     desactivado = false
+    desactivadoDesde = 0L
     ultimoLog = "Detenido"
     hilo?.interrupt()
+    cancelarReintento()
+    if (receptorRegistrado) { try { unregisterReceiver(receptor) } catch (_: Exception) {} }
     soltarWake()
+    soltarWakeCorto()
     super.onDestroy()
   }
 }
