@@ -50,13 +50,13 @@ object Emparejamiento {
   // Mensajes para el dueno (no tecnico). "segundos" solo aplica a
   // DEMASIADOS_INTENTOS y "app" (la letra) a OTRA_APP / CODIGO_RESERVADO;
   // ambos vienen del servidor o del chequeo local.
-  // "prefijo" elige el nombre de la seccion de la consola (consolaDe).
-  fun mensajeError(err: String, segundos: Int = 0, app: String = "", prefijo: String = ""): String = when (err) {
+  // "prefijo" y "seccion" (rev 5) arman el nombre de la consola (consolaDe).
+  fun mensajeError(err: String, segundos: Int = 0, app: String = "", prefijo: String = "", seccion: String = ""): String = when (err) {
     "CODIGO_INVALIDO" -> "El código no es válido. Revisa que esté bien escrito."
-    "CODIGO_VENCIDO" -> "El código venció (dura 15 min). Genera uno nuevo en " + consolaDe(prefijo) + "."
-    "CODIGO_USADO" -> "Ese código ya se usó. Genera uno nuevo en " + consolaDe(prefijo) + "."
+    "CODIGO_VENCIDO" -> "El código venció (dura 15 min). Genera uno nuevo en " + consolaDe(prefijo, seccion) + "."
+    "CODIGO_USADO" -> "Ese código ya se usó. Genera uno nuevo en " + consolaDe(prefijo, seccion) + "."
     "OTRA_APP" -> "Este código es de " + nombreApp(app) + ". Genera el código en la consola de la app donde quieres imprimir."
-    "AGENTE_YA_VINCULADO" -> "Otro equipo se vinculó a este local mientras tanto. Genera un código nuevo en " + consolaDe(prefijo) + "."
+    "AGENTE_YA_VINCULADO" -> "Otro equipo se vinculó a este local mientras tanto. Genera un código nuevo en " + consolaDe(prefijo, seccion) + "."
     "DEMASIADOS_INTENTOS" -> "Hubo demasiados intentos con códigos equivocados. " + textoEspera(segundos)
     "IP_DESCONOCIDA" -> "No se pudo identificar la conexión. Intenta de nuevo."
     "AGENTE_INVALIDO" -> msgDesactivado(prefijo)
@@ -68,11 +68,23 @@ object Emparejamiento {
     else -> "No se pudo emparejar ($err)."
   }
 
-  // [qa4] La seccion se llama "Estaciones" en KOMO e "Impresoras" en KIPU.
-  fun consolaDe(prefijo: String): String = when (prefijo.lowercase()) {
-    "komo" -> "tu consola de KOMO › Estaciones"
-    "kipu" -> "tu consola de KIPU › Impresoras"
-    else -> "tu consola"
+  // [qa4] La pantalla se llama "Estaciones" en KOMO e "Impresoras" en KIPU.
+  // Rev 5: toda respuesta de canjear trae "seccion"; manda esa. Si no viene
+  // (o el mensaje no sale de un canje, como el de desactivado), se usa la
+  // ultima vista para ese prefijo mientras viva el proceso o, si no, la conocida.
+  private val seccionVista = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+  fun consolaDe(prefijo: String, seccion: String = ""): String {
+    val pfx = prefijo.lowercase()
+    val app = when (pfx) { "komo" -> "KOMO"; "kipu" -> "KIPU"; else -> pfx.uppercase() }
+    val sec = seccion.trim().ifBlank {
+      seccionVista[pfx] ?: when (pfx) { "komo" -> "Estaciones"; "kipu" -> "Impresoras"; else -> "" }
+    }
+    return when {
+      app.isNotBlank() && sec.isNotBlank() -> "tu consola de $app › $sec"
+      app.isNotBlank() -> "tu consola de $app"
+      else -> "tu consola"
+    }
   }
 
   // [qa4] AGENTE_INVALIDO: el token se conserva y el servicio reintenta solo.
@@ -131,6 +143,8 @@ object Emparejamiento {
     return try {
       val sonda = Cfg(p.url, p.anon, "", p.prefijo, 48)
       val r = Agent.rpc(sonda, p.prefijo + "_estacion_codigo_canjear", JSONObject().put("codigo", cod))
+      val seccion = r.optString("seccion").trim()
+      if (seccion.isNotBlank()) seccionVista[p.prefijo.lowercase()] = seccion
       if (r.optBoolean("ok")) {
         val ancho = r.optString("ancho", "48").toIntOrNull() ?: 48
         val cfg = Cfg(
@@ -149,7 +163,7 @@ object Emparejamiento {
         )
       } else {
         val err = r.optString("error", "ERROR")
-        CanjeResultado.Error(err, mensajeError(err, r.optInt("segundos", 0), r.optString("app"), p.prefijo))
+        CanjeResultado.Error(err, mensajeError(err, r.optInt("segundos", 0), r.optString("app"), p.prefijo, seccion))
       }
     } catch (e: Exception) {
       CanjeResultado.Error("RED", mensajeError("RED"))

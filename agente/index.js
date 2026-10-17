@@ -520,12 +520,19 @@ function ponerClave(txt, clave, valor) {
   return txt + (txt.endsWith('\n') || txt === '' ? '' : '\r\n') + clave + '=' + valor + '\r\n';
 }
 
-// [qa4] Nombre de la seccion de la consola segun la app: KOMO la llama
-// "Estaciones" y KIPU "Impresoras".
-function consolaDe(prefijo) {
+// [qa4] Nombre de la pantalla de la consola segun la app. Rev 5: toda
+// respuesta de canjear trae "seccion" (KOMO "Estaciones", KIPU "Impresoras");
+// manda esa, y si no viene (o el mensaje no sale de un canje) se usa la
+// ultima vista para ese prefijo en esta sesion o, si no, la conocida.
+const APP_POR_PREFIJO = { komo: 'KOMO', kipu: 'KIPU' };
+const SECCION_POR_PREFIJO = { komo: 'Estaciones', kipu: 'Impresoras' };
+const seccionVista = {}; // prefijo -> seccion que devolvio el servidor
+function consolaDe(prefijo, seccion) {
   const pfx = String(prefijo || '').toLowerCase();
-  if (pfx === 'komo') return 'tu consola de KOMO › Estaciones';
-  if (pfx === 'kipu') return 'tu consola de KIPU › Impresoras';
+  const app = APP_POR_PREFIJO[pfx] || pfx.toUpperCase();
+  const sec = String(seccion || seccionVista[pfx] || SECCION_POR_PREFIJO[pfx] || '').trim();
+  if (app && sec) return 'tu consola de ' + app + ' › ' + sec;
+  if (app) return 'tu consola de ' + app;
   return 'tu consola';
 }
 function msgDesactivado(prefijo) {
@@ -541,9 +548,9 @@ function msgDesactivado(prefijo) {
 // [canje-v3] Mensajes para el dueno (no tecnico), mismo mapa que la app
 // Android (Emparejamiento.mensajeError). "segundos" solo en DEMASIADOS_INTENTOS;
 // "app" (la letra) en OTRA_APP y CODIGO_RESERVADO; "prefijo" elige el nombre
-// de la seccion de la consola (consolaDe).
-function mensajeCanje(err, segundos, app, prefijo) {
-  const consola = consolaDe(prefijo);
+// de la app y "seccion" (rev 5) el de la pantalla de la consola (consolaDe).
+function mensajeCanje(err, segundos, app, prefijo, seccion) {
+  const consola = consolaDe(prefijo, seccion);
   const seg = parseInt(segundos, 10) || 0;
   const nomApp = NOMBRE_APP[String(app || '').toUpperCase()] || String(app || '').toUpperCase() || 'otra app';
   const txtEspera = seg > 0 ? `Espera ${seg} ${seg === 1 ? 'segundo' : 'segundos'} y vuelve a intentar.`
@@ -593,9 +600,10 @@ async function canjearCodigo(codigoIn) {
     console.error('No se pudo emparejar (revisa tu internet): ' + e.message);
     return { ok: false, error: 'RED', mensaje: 'No se pudo emparejar (revisa tu internet): ' + e.message };
   }
+  if (d && d.seccion) seccionVista[prefijoCod] = String(d.seccion).trim();
   if (!d || d.ok !== true) {
     const err = (d && d.error) || 'ERROR';
-    const msg = mensajeCanje(err, d && d.segundos, d && d.app, prefijoCod);
+    const msg = mensajeCanje(err, d && d.segundos, d && d.app, prefijoCod, d && d.seccion);
     console.error(msg);
     return { ok: false, error: err, mensaje: msg, segundos: (d && d.segundos) || undefined };
   }
@@ -610,6 +618,7 @@ async function canjearCodigo(codigoIn) {
   // .txt para que al reabrir el ciclo llame al proyecto correcto.
   PREFIJO = String(d.prefijo || prefijoCod).trim();
   process.env.LEVO_PREFIJO = PREFIJO;
+  if (d.seccion) seccionVista[PREFIJO.toLowerCase()] = String(d.seccion).trim();
   try {
     editarTxt((txt) => {
       txt = txt.replace(/^[ \t]*LEVO_CODIGO[ \t]*=.*$/gim, '# LEVO_CODIGO usado');
