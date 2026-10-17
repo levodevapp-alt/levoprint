@@ -53,6 +53,7 @@ class PrintService : Service() {
   @Volatile private var forzarConfig = true
   private val dormidero = Object()
   private var receptorRegistrado = false
+  private var ultimoDespertarApp = 0L // [qa6] tope del reintento al abrir la app
 
   companion object {
     const val CANAL = "levoprint"
@@ -100,13 +101,19 @@ class PrintService : Service() {
       try { arrancarForeground(if (desactivado) TXT_DESACTIVADO else TXT_ACTIVO) } catch (_: Exception) {}
       val nueva = Prefs.leer(this)
       if (nueva != null && nueva != cfgActual) {
-        // Codigo nuevo canjeado: se usa el token nuevo desde la proxima vuelta.
+        // Codigo nuevo canjeado: se usa el token nuevo desde la proxima vuelta
+        // (siempre al instante, sin tope).
         cfgActual = nueva
         forzarConfig = true
         if (desactivado) salirDeDesactivado()
+        despertar()
+      } else if (desactivado && SystemClock.elapsedRealtime() - ultimoDespertarApp > 10000L) {
+        // [qa6] App abierta con el equipo desactivado: reintento ya, con CPU
+        // despierto, pero a lo sumo uno cada 10 s (mismo tope que el exe).
+        ultimoDespertarApp = SystemClock.elapsedRealtime()
+        tomarWakeCorto()
+        despertar()
       }
-      if (desactivado) tomarWakeCorto() // app abierta: reintento ya, con CPU despierto
-      despertar()
       return START_STICKY
     }
     val cfg = Prefs.leer(this) ?: run { stopSelf(); return START_NOT_STICKY }
