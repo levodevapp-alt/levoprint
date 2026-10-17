@@ -8,45 +8,69 @@ import org.json.JSONObject
 // "<prefijo>_estacion_codigo_canjear", ver levoprint.sql seccion 3):
 //   POST <url>/rest/v1/rpc/<prefijo>_estacion_codigo_canjear
 //   body {"p":{"codigo":"XXXXXXXX"}}
-//   -> { ok, url, anon, prefijo, device, ancho, nombre }
-//   -> { ok:false, error: CODIGO_INVALIDO | CODIGO_VENCIDO | CODIGO_USADO }
+//   -> { ok, url, anon, prefijo, device, ancho, nombre, modo?, reemplazara?, reintento? }
+//   -> { ok:false, error: CODIGO_INVALIDO | CODIGO_VENCIDO | CODIGO_USADO |
+//        AGENTE_YA_VINCULADO | IP_DESCONOCIDA | DEMASIADOS_INTENTOS (+ segundos) }
 //
-// El QR de la consola hoy es "levoprint://emparejar?c=XXXXXXXX" (SOLO el
-// codigo). Como el APK es GENERICO (sirve para KOMO, KIPU, etc.), necesita
-// saber que prefijo/url/anon usar ANTES de poder llamar la RPC. Se resuelve
-// asi:
-//   1) Si el link ya trae &p=<prefijo>&u=<url>&a=<anon> (recomendado a
-//      futuro: pedirle a consola/backend que los agregue al armar el QR en
-//      __PREFIX___estacion_codigo_crear), se usan directo, sin adivinar.
-//      NO se aplico ese cambio de backend desde aca — queda pendiente de
-//      coordinar con consola.
-//   2) Si no, se prueba el codigo contra cada "proyecto conocido" (hoy KOMO
-//      y KIPU comparten el mismo Supabase, asi que en la practica esto
-//      SIEMPRE funciona sin pedirle nada al usuario) hasta que uno responda
-//      ok=true. CODIGO_VENCIDO/CODIGO_USADO no dependen del prefijo asi que
-//      ahi se corta la busqueda; CODIGO_INVALIDO sigue probando el resto.
+// [canje-v3] Contrato rev 3 del modulo levoprint:
+//   · DEMASIADOS_INTENTOS trae "segundos" (espera real que calcula el freno
+//     por IP o el tope global); se muestra tal cual al dueno.
+//   · Exito: "modo" (nuevo|reemplazar|adicional) y "reemplazara" = cuantos
+//     equipos anteriores se apagaran cuando ESTE se conecte por primera vez.
+//     "reintento": true si es el recanje idempotente (misma IP, 3 min).
+//   · El QR de la consola ya trae &p=<prefijo>: parseLink lo lee y canjear
+//     va DIRECTO a ese proyecto (un solo intento). Importa porque cada
+//     CODIGO_INVALIDO suma al freno por IP del proyecto: probar komo y luego
+//     kipu "a ciegas" gastaria intentos en el proyecto equivocado.
+//
+// Resolucion del proyecto ANTES de llamar la RPC (el APK es GENERICO):
+//   1) Link con &p=<prefijo> (y opcional &u=<url>&a=<anon>): se usa directo,
+//      sin adivinar. Es el caso normal desde la rev 3 (QR de la consola).
+//   2) Codigo tecleado a mano (sin pistas): se prueba contra cada "proyecto
+//      conocido" (KOMO y KIPU comparten Supabase) hasta que uno responda
+//      ok=true. Cualquier error distinto de CODIGO_INVALIDO corta la busqueda
+//      (vencido/usado/freno/IP no dependen del prefijo).
 sealed class CanjeResultado {
-  data class Ok(val cfg: Cfg, val nombre: String) : CanjeResultado()
+  data class Ok(
+    val cfg: Cfg, val nombre: String,
+    val modo: String = "", val reemplazara: Int = 0, val reintento: Boolean = false
+  ) : CanjeResultado()
   data class Error(val codigo: String, val mensaje: String) : CanjeResultado()
 }
 
 data class DatosLink(val codigo: String, val prefijo: String?, val url: String?, val anon: String?)
 
 object Emparejamiento {
-  fun mensajeError(err: String): String = when (err) {
+  // Mensajes para el dueno (no tecnico). "segundos" solo aplica a
+  // DEMASIADOS_INTENTOS (viene del servidor).
+  fun mensajeError(err: String, segundos: Int = 0): String = when (err) {
     "CODIGO_INVALIDO" -> "El código no es válido. Revisa que esté bien escrito."
     "CODIGO_VENCIDO" -> "El código venció (dura 15 min). Genera uno nuevo en la consola (Estaciones)."
     "CODIGO_USADO" -> "Ese código ya se usó. Genera uno nuevo en la consola (Estaciones)."
+    "DEMASIADOS_INTENTOS" -> "Hubo demasiados intentos con códigos equivocados. " + textoEspera(segundos)
+    "AGENTE_YA_VINCULADO" -> "Este local ya tiene otro equipo de impresión vinculado. En la consola (Estaciones), genera un código nuevo y elige si este equipo reemplaza al anterior o se suma como adicional."
+    "IP_DESCONOCIDA" -> "No pudimos verificar tu conexión. Revisa el internet (si usas VPN o proxy, apágalo) e intenta de nuevo."
+    "AGENTE_INVALIDO" -> MSG_REEMPLAZADO
     "SIN_CODIGO" -> "Escribe el código de 8 caracteres."
     "RED" -> "No se pudo conectar. Revisa tu internet e intenta de nuevo."
     "RESPUESTA_INCOMPLETA" -> "El servidor respondió sin los datos necesarios. Intenta de nuevo."
     else -> "No se pudo emparejar ($err)."
   }
 
+  const val MSG_REEMPLAZADO = "Este equipo fue reemplazado o desactivado; vincúlalo de nuevo con un código de la consola (Estaciones)."
+
+  private fun textoEspera(seg: Int): String =
+    if (seg > 0) "Espera $seg ${if (seg == 1) "segundo" else "segundos"} y vuelve a intentar."
+    else "Espera un momento y vuelve a intentar."
+
+  // Codigo normalizado igual que el servidor: mayusculas y sin espacios
+  // (incluye saltos de linea CR/LF de un copiar/pegar).
+  fun normalizar(codigo: String): String = codigo.uppercase().filter { !it.isWhitespace() }
+
   // "levoprint://emparejar?c=XXXXXXXX" (o el equivalente https, por si la
   // consola cambia el esquema del QR) -> DatosLink. null si no trae codigo.
   fun parseLink(uri: Uri): DatosLink? {
-    val c = uri.getQueryParameter("c")?.trim()?.uppercase()
+    val c = uri.getQueryParameter("c")?.let { normalizar(it) }
     if (c.isNullOrBlank()) return null
     fun q(k: String) = uri.getQueryParameter(k)?.trim()?.ifBlank { null }
     return DatosLink(codigo = c, prefijo = q("p"), url = q("u"), anon = q("a"))
@@ -58,14 +82,15 @@ object Emparejamiento {
     urlForzada: String? = null,
     anonForzado: String? = null
   ): CanjeResultado {
-    val cod = codigoIn.trim().uppercase()
+    val cod = normalizar(codigoIn)
     if (cod.isBlank()) return CanjeResultado.Error("SIN_CODIGO", mensajeError("SIN_CODIGO"))
 
     val candidatos: List<ProyectoLP> = when {
-      // Deep-link ya trae url+anon+prefijo completos (futuro, coordinar backend): un solo intento.
+      // Deep-link trae url+anon+prefijo completos: un solo intento.
       urlForzada != null && anonForzado != null ->
         listOf(ProyectoLP(prefijoForzado ?: "komo", prefijoForzado ?: "komo", urlForzada, anonForzado))
-      // Deep-link trae solo el prefijo: usa ese prefijo con el proyecto conocido (o url/anon compartidos si es uno nuevo).
+      // Deep-link trae solo el prefijo (QR rev 3): UN solo candidato, el de ese
+      // prefijo (o url/anon compartidos si es un proyecto que este build no conoce).
       prefijoForzado != null ->
         Proyectos.conocidos.filter { it.prefijo.equals(prefijoForzado, ignoreCase = true) }
           .ifEmpty { listOf(ProyectoLP(prefijoForzado, prefijoForzado, Proyectos.conocidos.first().url, Proyectos.conocidos.first().anon)) }
@@ -89,16 +114,22 @@ object Emparejamiento {
             ancho = ancho
           )
           if (cfg.device.isBlank()) return CanjeResultado.Error("RESPUESTA_INCOMPLETA", mensajeError("RESPUESTA_INCOMPLETA"))
-          return CanjeResultado.Ok(cfg, r.optString("nombre").ifBlank { "Estación" })
+          return CanjeResultado.Ok(
+            cfg, r.optString("nombre").ifBlank { "Estación" },
+            modo = r.optString("modo"),
+            // rev 3 lo llama "reemplazara"; se acepta "reemplazados" por si el contrato cambia de nombre.
+            reemplazara = r.optInt("reemplazara", r.optInt("reemplazados", 0)),
+            reintento = r.optBoolean("reintento", false)
+          )
         } else {
           val err = r.optString("error", "ERROR")
           ultimoErr = err
-          ultimoMsg = mensajeError(err)
-          if (err != "CODIGO_INVALIDO") break // vencido/usado: no depende del prefijo, no sigas probando otros
+          ultimoMsg = mensajeError(err, r.optInt("segundos", 0))
+          if (err != "CODIGO_INVALIDO") break // vencido/usado/freno/IP: no depende del prefijo, no sigas probando otros
         }
       } catch (e: Exception) {
         ultimoErr = "RED"
-        ultimoMsg = "No se pudo conectar: " + (e.message ?: "error de red")
+        ultimoMsg = mensajeError("RED")
       }
     }
     return CanjeResultado.Error(ultimoErr, ultimoMsg)

@@ -67,7 +67,9 @@ class MainActivity : AppCompatActivity() {
     val btnEscanear = findViewById<Button>(R.id.btnEscanear)
     val txtEmparejar = findViewById<TextView>(R.id.txtEmparejar)
 
-    Prefs.leer(this)?.let {
+    // leerSinDevice: tras un AGENTE_INVALIDO el device se borro, pero url/
+    // anon/prefijo/ancho se siguen mostrando.
+    Prefs.leerSinDevice(this).let {
       inUrl.setText(it.url); inAnon.setText(it.anon); inDevice.setText(it.device)
       inPrefijo.setText(it.prefijo); inAncho.setText(it.ancho.toString())
     }
@@ -112,12 +114,24 @@ class MainActivity : AppCompatActivity() {
     fun refrescar() {
       val on = PrintService.activo
       btn.text = if (on) "Detener" else "Guardar y arrancar"
-      estado.text = if (on) "Activo · escuchando impresion" else "Detenido"
+      // [canje-v3] Si el servidor lo dio de baja (AGENTE_INVALIDO), se dice
+      // claro y se vacia el campo device: asi "Guardar y arrancar" no vuelve
+      // a guardar el token muerto, y el dueno solo escanea/escribe un codigo nuevo.
+      val reemplazado = !on && Prefs.getReemplazado(this)
+      if (reemplazado) {
+        if (inDevice.text.isNotBlank()) inDevice.setText("")
+        if (txtEmparejar.text.isBlank() || txtEmparejar.text.startsWith("Emparejado")) txtEmparejar.text = Emparejamiento.MSG_REEMPLAZADO
+      }
+      estado.text = when {
+        on -> "Activo · escuchando impresion"
+        reemplazado -> Emparejamiento.MSG_REEMPLAZADO
+        else -> "Detenido"
+      }
     }
 
     // ---- Emparejamiento por codigo (tecleado o via QR) ----
     fun intentarEmparejar(codigo: String, prefijo: String?, url: String?, anon: String?) {
-      if (codigo.isBlank()) { txtEmparejar.text = "Escribe el código de 8 caracteres."; return }
+      if (codigo.isBlank()) { txtEmparejar.text = Emparejamiento.mensajeError("SIN_CODIGO"); return }
       inCodigo.setText(codigo)
       txtEmparejar.text = "Emparejando..."
       btnEmparejar.isEnabled = false
@@ -132,7 +146,13 @@ class MainActivity : AppCompatActivity() {
               Prefs.guardar(this, r.cfg)
               inUrl.setText(r.cfg.url); inAnon.setText(r.cfg.anon); inDevice.setText(r.cfg.device)
               inPrefijo.setText(r.cfg.prefijo); inAncho.setText(r.cfg.ancho.toString())
-              txtEmparejar.text = "Emparejado como " + r.nombre
+              txtEmparejar.text = "Emparejado como " + r.nombre + when {
+                // El servidor apaga a los anteriores recien cuando ESTE equipo se conecta.
+                r.modo == "reemplazar" && r.reemplazara > 0 ->
+                  ". Al conectarse reemplaza a " + r.reemplazara + (if (r.reemplazara == 1) " equipo anterior." else " equipos anteriores.")
+                r.modo == "adicional" -> ". Quedó como equipo adicional."
+                else -> "."
+              }
               val i = Intent(this, PrintService::class.java)
               if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(i) else startService(i)
               h.postDelayed({ refrescar() }, 500)

@@ -66,6 +66,18 @@ class PrintService : Service() {
             ultimoLog = "ERR " + id + ": " + e.message
           }
         }
+      } catch (e: RpcError) {
+        if (e.agenteInvalido) {
+          // [canje-v3] Token muerto (reemplazado/desactivado): reintentar no
+          // sirve. Se olvida el device y se detiene el servicio; la pantalla
+          // principal muestra el aviso y deja emparejar de nuevo.
+          Prefs.desvincular(this)
+          ultimoLog = Emparejamiento.MSG_REEMPLAZADO
+          corriendo = false
+          stopSelf()
+          break
+        }
+        ultimoLog = "ciclo: " + e.message
       } catch (e: Exception) {
         ultimoLog = "ciclo: " + e.message
       }
@@ -94,7 +106,7 @@ class PrintService : Service() {
   override fun onDestroy() {
     corriendo = false
     activo = false
-    ultimoLog = "Detenido"
+    ultimoLog = if (Prefs.getReemplazado(this)) Emparejamiento.MSG_REEMPLAZADO else "Detenido"
     hilo?.interrupt()
     try { wake?.let { if (it.isHeld) it.release() } } catch (_: Exception) {}
     super.onDestroy()

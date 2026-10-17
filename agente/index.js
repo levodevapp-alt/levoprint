@@ -47,7 +47,10 @@ console.error = (...a) => { _err(...a); alArchivo('ERR ', a); };
   for (const nombre of candidatos) {
     const f = path.join(BASE_DIR, nombre);
     if (!fs.existsSync(f)) continue;
-    for (const linea of fs.readFileSync(f, 'utf8').split(/\r?\n/)) {
+    // [canje-v3] El .txt viene del Bloc de notas: CRLF y a veces BOM UTF-8
+    // al inicio (que pegaria al primer nombre de clave). Se limpian ambos.
+    const crudo = fs.readFileSync(f, 'utf8').replace(/^\uFEFF/, '');
+    for (const linea of crudo.split(/\r\n|\r|\n/)) {
       if (/^\s*(#|$)/.test(linea)) continue;              // comentarios y vacias
       const m = linea.match(/^\s*([A-Z0-9_]+)\s*=\s*(.+?)\s*$/);
       if (m && !(m[1] in process.env)) process.env[m[1]] = m[2];
@@ -63,7 +66,9 @@ const PREFIJO = (process.env.LEVO_PREFIJO || 'komo').trim();
 // "Descargar" de la consola) y AUN no hay device, se canjea una vez: el
 // agente pide su token al servidor y lo guarda. Asi el dueno no pega el
 // token a mano — solo instala. url/anon (publicos) vienen en el txt.
-const CODIGO = (process.env.LEVO_CODIGO || '').trim();
+// let: se consume (vacia) tras el primer canje para no reintentarlo luego.
+// Normalizado como el servidor: sin espacios ni \r\n, en mayusculas.
+let CODIGO = normalizarCodigo(process.env.LEVO_CODIGO);
 const MODO_CONSOLA = ((process.env.LEVO_MODO || process.env.KOMO_MODO) || '') === 'consola';
 const INTERVALO_MS = 2000;      // con trabajo reciente: la comanda sale al toque
 const INTERVALO_MAX_MS = 6000;  // sin trabajo: se espacia de a poco hasta 6 s
@@ -134,6 +139,15 @@ function abortarSinConfig() {
   pausarYSalir(1);
 }
 
+function normalizarCodigo(c) {
+  return String(c || '').replace(/[\s\uFEFF]+/g, '').toUpperCase();
+}
+
+// [canje-v3] Error HTTP con el "message" de Postgres en e.pg. Las RPC del
+// agente pasan por __SCHEMA__._agente(device), que hace raise
+// 'AGENTE_INVALIDO' si el token no existe o el dispositivo esta inactivo
+// (p. ej. lo REEMPLAZO otro equipo al conectarse). PostgREST responde
+// HTTP 400 {"message":"AGENTE_INVALIDO"}.
 async function rpc(fn, p) {
   const r = await fetch(`${URL_BASE}/rest/v1/rpc/${fn}`, {
     signal: AbortSignal.timeout(12000),
@@ -141,9 +155,15 @@ async function rpc(fn, p) {
     headers: { apikey: ANON, Authorization: `Bearer ${ANON}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ p }),
   });
-  if (!r.ok) throw new Error(`${fn} HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  if (!r.ok) {
+    const txt = await r.text();
+    const e = new Error(`${fn} HTTP ${r.status}: ${txt.slice(0, 200)}`);
+    try { e.pg = String((JSON.parse(txt) || {}).message || '').trim(); } catch { e.pg = ''; }
+    throw e;
+  }
   return r.json();
 }
+const esAgenteInvalido = (e) => !!(e && e.pg === 'AGENTE_INVALIDO');
 
 // --- ESC/POS ---
 const ESC = '\x1b', GS = '\x1d';
@@ -369,6 +389,7 @@ async function renderRemoto(job) {
 let estaciones = new Map(); // id -> {nombre, ip, puerto}
 let cicloConfig = 0;            // ms de la última lectura de config
 let espera = INTERVALO_MS;
+let cicloVivo = false;          // [canje-v3] hay un setTimeout(ciclo) en curso
 
 // [gui] Estado en vivo que consume la mini-GUI web (GET /estado). Nada de
 // esto altera el ciclo de impresion: solo se lee/escribe para informar.
@@ -377,6 +398,7 @@ const guiEstado = {
   ultimoError: null,        // { mensaje, ts } del ultimo job o ciclo fallido
   ultimoOk: null,           // ts del ultimo job impreso ok
   ultimaSync: null,         // ts de la ultima vez que refrescarConfig() respondio
+  desvinculado: null,       // [canje-v3] { mensaje, ts } si el servidor dio de baja este agente
 };
 
 async function refrescarConfig() {
@@ -388,6 +410,8 @@ async function refrescarConfig() {
 }
 
 async function ciclo() {
+  cicloVivo = true;
+  let seguir = true;
   try {
     if (Date.now() - cicloConfig >= CONFIG_CADA_MS) { await refrescarConfig(); cicloConfig = Date.now(); }
     const r = await rpc(`${PREFIJO}_print_tomar`, { device: DEVICE, limite: 10 });
@@ -421,11 +445,45 @@ async function ciclo() {
       }
     }
   } catch (e) {
-    console.error('[ciclo]', e.message);
-    guiEstado.ultimoError = { mensaje: e.message, ts: Date.now() };
+    if (esAgenteInvalido(e)) {
+      // [canje-v3] Token muerto: reintentar no sirve. Se olvida el device y
+      // el ciclo se detiene; la mini-GUI vuelve a "sin vincular" y acepta un
+      // codigo nuevo (manejarVincular relanza el ciclo).
+      seguir = false;
+      desvincularAgente();
+    } else {
+      console.error('[ciclo]', e.message);
+      guiEstado.ultimoError = { mensaje: e.message, ts: Date.now() };
+    }
   } finally {
-    setTimeout(ciclo, espera);
+    if (seguir) setTimeout(ciclo, espera);
+    else cicloVivo = false;
   }
+}
+
+// [canje-v3] Olvida el DEVICE (memoria + levoprint.txt). En el .txt solo se
+// comentan las lineas LEVO_DEVICE/KOMO_DEVICE: URL, ANON, PREFIJO, ANCHO y
+// el resto quedan intactos. Asi, al reabrir, el programa arranca directo en
+// "sin vincular" en vez de reintentar con el token dado de baja.
+function desvincularAgente() {
+  console.error('[agente] ' + MSG_REEMPLAZADO);
+  DEVICE = '';
+  delete process.env.LEVO_DEVICE;
+  delete process.env.KOMO_DEVICE;
+  estaciones = new Map();
+  cicloConfig = 0;
+  espera = INTERVALO_MS;
+  guiEstado.ultimoError = null;
+  guiEstado.desvinculado = { mensaje: MSG_REEMPLAZADO, ts: Date.now() };
+  try {
+    const ruta = path.join(BASE_DIR, 'levoprint.txt');
+    if (fs.existsSync(ruta)) {
+      const txt = fs.readFileSync(ruta, 'utf8');
+      const nuevo = txt.replace(/^([ \t]*)((?:LEVO|KOMO)_DEVICE[ \t]*=.*?)(\r?)$/gim,
+        '$1# $2 (dado de baja: vincula de nuevo con un codigo)$3');
+      if (nuevo !== txt) fs.writeFileSync(ruta, nuevo, 'utf8');
+    }
+  } catch (_) { /* carpeta de solo lectura: queda olvidado en memoria esta sesion */ }
 }
 
 // [emparejar] Canjea un codigo (el de LEVO_CODIGO al arrancar, o el que el
@@ -433,11 +491,31 @@ async function ciclo() {
 // es de un uso) y lo persiste en levoprint.txt, para que la proxima vez que
 // abra el programa ya arranque solo. Devuelve {ok,...} para poder responder
 // tanto en consola como en el endpoint POST /vincular.
+// [canje-v3] Mensajes para el dueno (no tecnico), mismo mapa que la app
+// Android (Emparejamiento.mensajeError). "segundos" solo en DEMASIADOS_INTENTOS.
+const MSG_REEMPLAZADO = 'Este equipo fue reemplazado o desactivado; vincúlalo de nuevo con un código de tu consola (Estaciones).';
+function mensajeCanje(err, segundos) {
+  const seg = parseInt(segundos, 10) || 0;
+  const txtEspera = seg > 0 ? `Espera ${seg} ${seg === 1 ? 'segundo' : 'segundos'} y vuelve a intentar.`
+                            : 'Espera un momento y vuelve a intentar.';
+  return ({
+    CODIGO_INVALIDO: 'El código no es válido. Revisa que esté bien escrito.',
+    CODIGO_VENCIDO: 'El código venció (dura 15 min). Genera uno nuevo en tu consola (Estaciones).',
+    CODIGO_USADO: 'Ese código ya se usó. Genera uno nuevo en tu consola (Estaciones).',
+    DEMASIADOS_INTENTOS: 'Hubo demasiados intentos con códigos equivocados. ' + txtEspera,
+    AGENTE_YA_VINCULADO: 'Este local ya tiene otro equipo de impresión vinculado. En tu consola (Estaciones), genera un código nuevo y elige si este equipo reemplaza al anterior o se suma como adicional.',
+    IP_DESCONOCIDA: 'No pudimos verificar tu conexión. Revisa el internet (si usas VPN o proxy, apágalo) e intenta de nuevo.',
+    AGENTE_INVALIDO: MSG_REEMPLAZADO,
+    SIN_CODIGO: 'Escribe el código de 8 caracteres.',
+  })[err] || ('No se pudo vincular (' + err + ').');
+}
+
 async function canjearCodigo(codigoIn) {
-  const cod = String(codigoIn || CODIGO || '').trim();
-  if (!cod) return { ok: false, error: 'SIN_CODIGO', mensaje: 'Falta el codigo.' };
-  if (DEVICE) return { ok: false, error: 'YA_VINCULADO', mensaje: 'Este agente ya esta vinculado.' };
+  const cod = normalizarCodigo(codigoIn || CODIGO);
+  if (!cod) return { ok: false, error: 'SIN_CODIGO', mensaje: mensajeCanje('SIN_CODIGO') };
+  if (DEVICE) return { ok: false, error: 'YA_VINCULADO', mensaje: 'Este agente ya está vinculado.' };
   if (!URL_BASE || !ANON) return { ok: false, error: 'FALTA_URL_ANON', mensaje: 'Falta LEVO_URL/LEVO_ANON en levoprint.txt.' };
+  if (!codigoIn) CODIGO = ''; // el del .txt se intenta UNA vez por sesion (el canje es de un uso)
   console.log('Emparejando con el codigo ' + cod + '...');
   let d;
   try {
@@ -448,13 +526,14 @@ async function canjearCodigo(codigoIn) {
   }
   if (!d || d.ok !== true) {
     const err = (d && d.error) || 'ERROR';
-    const msg = {
-      CODIGO_INVALIDO: 'El codigo no es valido.',
-      CODIGO_VENCIDO: 'El codigo vencio (dura 15 min). Genera uno nuevo en tu consola (Estaciones).',
-      CODIGO_USADO: 'Ese codigo ya se uso. Genera uno nuevo en tu consola (Estaciones).'
-    }[err] || ('No se pudo emparejar: ' + err);
+    const msg = mensajeCanje(err, d && d.segundos);
     console.error(msg);
-    return { ok: false, error: err, mensaje: msg };
+    return { ok: false, error: err, mensaje: msg, segundos: (d && d.segundos) || undefined };
+  }
+  if (!d.device) {
+    const msg = 'El servidor respondió sin los datos necesarios. Intenta de nuevo.';
+    console.error(msg);
+    return { ok: false, error: 'RESPUESTA_INCOMPLETA', mensaje: msg };
   }
   DEVICE = d.device;
   process.env.LEVO_DEVICE = d.device;
@@ -466,8 +545,15 @@ async function canjearCodigo(codigoIn) {
     else txt += (txt.endsWith('\n') ? '' : '\r\n') + 'LEVO_DEVICE=' + d.device + '\r\n';
     fs.writeFileSync(ruta, txt, 'utf8');
   } catch (_) { /* carpeta de solo lectura: queda en memoria esta sesion */ }
-  console.log('Emparejado como: ' + (d.nombre || 'estacion') + '. Listo.');
-  return { ok: true, nombre: d.nombre };
+  guiEstado.desvinculado = null;
+  // modo/reemplazara (rev 3): el servidor apaga a los anteriores recien
+  // cuando ESTE agente se conecta por primera vez (primer ciclo).
+  const n = parseInt(d.reemplazara != null ? d.reemplazara : d.reemplazados, 10) || 0;
+  const aviso = (d.modo === 'reemplazar' && n > 0)
+    ? `Al conectarse reemplaza a ${n} ${n === 1 ? 'equipo anterior' : 'equipos anteriores'}.`
+    : d.modo === 'adicional' ? 'Quedó como equipo adicional.' : '';
+  console.log('Emparejado como: ' + (d.nombre || 'estacion') + '. Listo.' + (aviso ? ' ' + aviso : '') + (d.reintento ? ' (reintento)' : ''));
+  return { ok: true, nombre: d.nombre, modo: d.modo || null, reemplazara: n, reintento: !!d.reintento, aviso };
 }
 
 // Persiste LEVO_ANCHO en levoprint.txt (mismo patron que LEVO_DEVICE arriba).
@@ -528,6 +614,7 @@ function estadoActual() {
     ultimoError: guiEstado.ultimoError,
     ultimoOk: guiEstado.ultimoOk,
     ultimaSync: guiEstado.ultimaSync,
+    desvinculado: guiEstado.desvinculado ? guiEstado.desvinculado.mensaje : null,
   };
 }
 
@@ -618,7 +705,8 @@ async function refrescar() {
     sin_impresora: ['bad', 'Sin impresora / error en el ultimo trabajo'],
     conectado: ['ok', 'Conectado — listo para imprimir'],
   };
-  const [clase, texto] = mapa[e.semaforo] || ['info', 'Estado desconocido'];
+  let [clase, texto] = mapa[e.semaforo] || ['info', 'Estado desconocido'];
+  if (e.semaforo === 'sin_vincular' && e.desvinculado) { clase = 'bad'; texto = e.desvinculado; }
   sem.classList.add(clase);
   semTxt.textContent = texto;
 
@@ -644,7 +732,7 @@ document.getElementById('btnVincular').addEventListener('click', async function 
   if (!codigo) { msg.textContent = 'Escribe el codigo.'; msg.className = 'msg err'; return; }
   msg.textContent = 'Vinculando...'; msg.className = 'msg';
   const r = await j('/vincular', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ codigo: codigo }) });
-  if (r && r.ok) { msg.textContent = 'Vinculado como ' + (r.nombre || 'estacion') + '.'; msg.className = 'msg ok'; }
+  if (r && r.ok) { msg.textContent = 'Vinculado como ' + (r.nombre || 'estación') + '.' + (r.aviso ? ' ' + r.aviso : ''); msg.className = 'msg ok'; }
   else { msg.textContent = (r && r.mensaje) || 'No se pudo vincular.'; msg.className = 'msg err'; }
   refrescar();
 });
@@ -702,7 +790,10 @@ async function manejarVincular(req, res) {
   const r = await canjearCodigo(body.codigo);
   if (r.ok) {
     console.log('[gui] vinculado desde la ventana web. Arrancando ciclo de impresion...');
-    ciclo(); // recien ahora hay DEVICE: arranca el loop que arrancar() no pudo iniciar
+    // Recien ahora hay DEVICE: arranca el loop (el de arrancar() no inicio, o
+    // se detuvo por AGENTE_INVALIDO). Config fresca con el token nuevo.
+    cicloConfig = 0; espera = INTERVALO_MS;
+    if (!cicloVivo) ciclo();
   }
   return responderJson(res, r.ok ? 200 : 400, r);
 }

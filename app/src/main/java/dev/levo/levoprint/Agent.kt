@@ -16,6 +16,16 @@ data class Cfg(
 
 data class Estacion(val id: String, val nombre: String, val ip: String?, val puerto: Int)
 
+// [canje-v3] Error HTTP de una RPC con el "message" de Postgres ya leido.
+// Las RPC del agente (agente_config / print_tomar / print_marcar) pasan por
+// __SCHEMA__._agente(device), que hace raise 'AGENTE_INVALIDO' si el token no
+// existe o el dispositivo esta inactivo (p. ej. lo REEMPLAZO otro equipo al
+// conectarse). PostgREST lo devuelve como HTTP 400 {"message":"AGENTE_INVALIDO"}.
+class RpcError(val fn: String, val http: Int, val pgMensaje: String, cuerpo: String) :
+  RuntimeException(fn + " HTTP " + http + ": " + cuerpo.take(180)) {
+  val agenteInvalido: Boolean get() = pgMensaje == "AGENTE_INVALIDO"
+}
+
 object Agent {
   // ESC/POS con codigos de caracter (sin bytes de control crudos en el
   // fuente). Se construye TODO como String de chars 0..255 y se envia en
@@ -50,7 +60,10 @@ object Agent {
     val s = if (code in 200..299) con.inputStream else con.errorStream
     val txt = s?.bufferedReader()?.use { r -> r.readText() } ?: ""
     con.disconnect()
-    if (code !in 200..299) throw RuntimeException(fn + " HTTP " + code + ": " + txt.take(180))
+    if (code !in 200..299) {
+      val pg = try { JSONObject(txt).optString("message") } catch (_: Exception) { "" }
+      throw RpcError(fn, code, pg.trim(), txt)
+    }
     return if (txt.isBlank()) JSONObject() else JSONObject(txt)
   }
 
