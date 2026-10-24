@@ -47,4 +47,7 @@ dependencies {
   // Escaner QR para el emparejamiento (boton "Escanear QR"). Liviano: trae su
   // propia Activity de camara (CameraX/ZXing por dentro), sin Play Services.
   implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+  // Pruebas de unidad del render (org.json real: el de android.jar en las pruebas es un stub).
+  testImplementation("junit:junit:4.13.2")
+  testImplementation("org.json:json:20240303")
 }

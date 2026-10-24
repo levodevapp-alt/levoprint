@@ -247,15 +247,20 @@ function renderTicket(pl) {
   const retail = !pl.mesa;
   let t = CMD.init + CMD.centro;
   if (pl.negocio) t += CMD.negritaOn + CMD.grande + String(pl.negocio).toUpperCase() + '\n' + CMD.normal + CMD.negritaOff;
-  t += CMD.grande + (retail ? 'VENTA\n' : 'COBRADO\n') + CMD.normal;
+  // [kuti] local (si el negocio tiene varios) y titulo del alquiler de silla; KOMO/KIPU no mandan local ni refTipo.
+  if (pl.local) t += String(pl.local) + '\n';
+  t += CMD.grande + (retail ? (pl.refTipo === 'ALQUILER' ? 'ALQUILER DE SILLA\n' : 'VENTA\n') : 'COBRADO\n') + CMD.normal;
   if (!retail) t += CMD.grande + 'MESA ' + (pl.mesa || '-') + '\n' + CMD.normal;
   t += CMD.izq + linea('=');
   if (pl.nota) t += 'Nota: ' + pl.nota + '\n';
   const quien = pl.vendedor || pl.mozo || '';
   t += fila(quien ? ((retail ? 'Atendio: ' : 'Mozo: ') + quien) : '', pl.hora || '');
+  // [kuti] cliente (en alquiler, el profesional) y el profesional de cada servicio en su propia linea.
+  if (pl.cliente) t += 'Cliente: ' + pl.cliente + '\n';
   t += linea();
   for (const it of pl.items || []) {
     t += fila((fmtCant(it.cantidad) + ' ' + it.nombre).slice(0, ANCHO - 9), money(it.cantidad * it.precio));
+    if (it.profesional) t += '   - ' + it.profesional + '\n';
   }
   t += linea('=') + CMD.negritaOn + fila('TOTAL', money(pl.total)) + CMD.negritaOff;
   for (const p of pl.pagos || []) t += fila('  ' + p.medio, money(p.monto));

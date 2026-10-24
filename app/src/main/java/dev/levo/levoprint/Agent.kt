@@ -160,6 +160,9 @@ object Agent {
   }
 
   private fun renderTicket(pl: JSONObject, ancho: Int): String {
+    // [kuti] KUTI manda "refTipo" (KOMO/KIPU no): su nota de venta va aparte y
+    // lo de KOMO/KIPU sale byte a byte igual que antes (AgentRenderTest).
+    if (pl.has("refTipo")) return renderTicketKuti(pl, ancho)
     val b = StringBuilder(INIT + CENTRO + GRANDE + "COBRADO" + NL + NORMAL)
     b.append("MESA " + pl.optString("mesa", "-") + NL + IZQ + linea(ancho, "="))
     b.append(fila("Mozo: " + pl.optString("mozo", "-"), pl.optString("hora", ""), ancho) + linea(ancho))
@@ -175,13 +178,47 @@ object Agent {
       val p = pg.getJSONObject(i)
       b.append(fila("  " + p.optString("medio"), money(p.optDouble("monto", 0.0)), ancho))
     }
-    // [kuti] Propinas APARTE (no suman al total). KOMO/KIPU no mandan "propinas".
+    b.append(linea(ancho, "=") + CENTRO + "NO ES COMPROBANTE DE PAGO" + NL + PIE)
+    return b.toString()
+  }
+
+  // Texto de un campo que puede venir null en el JSON (optString daria "null").
+  private fun txt(o: JSONObject, k: String): String = if (o.isNull(k)) "" else o.optString(k)
+
+  // [kuti] Nota de venta de KUTI (misma forma que la rama retail del .exe):
+  // negocio, local, VENTA o ALQUILER DE SILLA, nota, quien atendio, cliente
+  // (en alquiler, el profesional), servicios con su profesional en una segunda
+  // linea, TOTAL, pagos y propinas APARTE (no suman al total).
+  private fun renderTicketKuti(pl: JSONObject, ancho: Int): String {
+    val b = StringBuilder(INIT + CENTRO)
+    if (txt(pl, "negocio").isNotBlank()) b.append(NEG_ON + GRANDE + txt(pl, "negocio").uppercase() + NL + NORMAL + NEG_OFF)
+    if (txt(pl, "local").isNotBlank()) b.append(txt(pl, "local") + NL)
+    b.append(GRANDE + (if (txt(pl, "refTipo") == "ALQUILER") "ALQUILER DE SILLA" else "VENTA") + NL + NORMAL)
+    b.append(IZQ + linea(ancho, "="))
+    if (txt(pl, "nota").isNotBlank()) b.append("Nota: " + txt(pl, "nota") + NL)
+    val quien = txt(pl, "vendedor")
+    b.append(fila(if (quien.isNotBlank()) "Atendio: " + quien else "", txt(pl, "hora"), ancho))
+    if (txt(pl, "cliente").isNotBlank()) b.append("Cliente: " + txt(pl, "cliente") + NL)
+    b.append(linea(ancho))
+    val its = items(pl)
+    for (i in 0 until its.length()) {
+      val it = its.getJSONObject(i)
+      b.append(fila((cant(it.optDouble("cantidad", 1.0)) + " " + txt(it, "nombre")).take(ancho - 9),
+        money(it.optDouble("cantidad", 1.0) * it.optDouble("precio", 0.0)), ancho))
+      if (txt(it, "profesional").isNotBlank()) b.append("   - " + txt(it, "profesional") + NL)
+    }
+    b.append(linea(ancho, "=") + NEG_ON + fila("TOTAL", money(pl.optDouble("total", 0.0)), ancho) + NEG_OFF)
+    val pg = pagos(pl)
+    for (i in 0 until pg.length()) {
+      val p = pg.getJSONObject(i)
+      b.append(fila("  " + txt(p, "medio"), money(p.optDouble("monto", 0.0)), ancho))
+    }
     val pr = pl.optJSONArray("propinas") ?: JSONArray()
     if (pr.length() > 0) {
       b.append(linea(ancho) + "PROPINAS (aparte, no suman al total)" + NL)
       for (i in 0 until pr.length()) {
         val p = pr.getJSONObject(i)
-        b.append(fila(("  " + p.optString("profesional") + " (" + p.optString("medio") + ")").take(ancho - 12), money(p.optDouble("monto", 0.0)), ancho))
+        b.append(fila(("  " + txt(p, "profesional") + " (" + txt(p, "medio") + ")").take(ancho - 12), money(p.optDouble("monto", 0.0)), ancho))
       }
     }
     b.append(linea(ancho, "=") + CENTRO + "NO ES COMPROBANTE DE PAGO" + NL + PIE)
