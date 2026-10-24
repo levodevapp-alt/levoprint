@@ -15,8 +15,8 @@ import org.json.JSONObject
 //        DEMASIADOS_INTENTOS (+ segundos) }
 //
 // [canje-v4] Formato del codigo: <letra de la app> + 8 del alfabeto sin
-// ambiguos (31 simbolos, sin 0/O/1/I/L). K = KOMO, P = KIPU, T = reservada
-// para KUTI. La LETRA dice a que proyecto llamar: ya no se prueba komo y
+// ambiguos (31 simbolos, sin 0/O/1/I/L). K = KOMO, P = KIPU, T = KUTI
+// (desde la 1.4.0). La LETRA dice a que proyecto llamar: ya no se prueba komo y
 // luego kipu. Importa porque cada CODIGO_INVALIDO suma al freno por IP del
 // proyecto. Un codigo con formato malo (o letra que este build no conoce)
 // se rechaza AQUI, sin gastar un intento en el servidor.
@@ -60,7 +60,7 @@ object Emparejamiento {
     "DEMASIADOS_INTENTOS" -> "Hubo demasiados intentos con códigos equivocados. " + textoEspera(segundos)
     "IP_DESCONOCIDA" -> "No se pudo identificar la conexión. Intenta de nuevo."
     "AGENTE_INVALIDO" -> msgDesactivado(prefijo)
-    "CODIGO_FORMATO" -> "El código tiene 9 caracteres y empieza con K (KOMO) o P (KIPU). Revisa que esté bien escrito."
+    "CODIGO_FORMATO" -> "El código tiene 9 caracteres y empieza con K (KOMO), P (KIPU) o T (KUTI). Revisa que esté bien escrito."
     "CODIGO_RESERVADO" -> "Este código es de " + nombreApp(app) + ", que esta versión de LevoPrint todavía no admite. Actualiza LevoPrint e intenta de nuevo."
     "SIN_CODIGO" -> "Escribe el código de 9 caracteres."
     "RED" -> "No se pudo conectar. Revisa tu internet e intenta de nuevo."
@@ -76,9 +76,9 @@ object Emparejamiento {
 
   fun consolaDe(prefijo: String, seccion: String = ""): String {
     val pfx = prefijo.lowercase()
-    val app = when (pfx) { "komo" -> "KOMO"; "kipu" -> "KIPU"; else -> pfx.uppercase() }
+    val app = when (pfx) { "komo" -> "KOMO"; "kipu" -> "KIPU"; "kuti" -> "KUTI"; else -> pfx.uppercase() }
     val sec = seccion.trim().ifBlank {
-      seccionVista[pfx] ?: when (pfx) { "komo" -> "Estaciones"; "kipu" -> "Impresoras"; else -> "" }
+      seccionVista[pfx] ?: when (pfx) { "komo" -> "Estaciones"; "kipu" -> "Impresoras"; "kuti" -> "Impresoras"; else -> "" }
     }
     return when {
       app.isNotBlank() && sec.isNotBlank() -> "tu consola de $app › $sec"

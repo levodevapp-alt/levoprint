@@ -66,9 +66,9 @@ let DEVICE = process.env.LEVO_DEVICE || process.env.KOMO_DEVICE;   // let: el ca
 let PREFIJO = (process.env.LEVO_PREFIJO || 'komo').trim();
 // [canje-v4] Codigo de estacion rev 4: <letra de la app> + 8 del alfabeto sin
 // ambiguos. La letra dice a que proyecto llamar (no se prueba a ciegas: cada
-// CODIGO_INVALIDO suma al freno por IP). T = reservada para KUTI.
+// CODIGO_INVALIDO suma al freno por IP). T = KUTI.
 const CODIGO_FORMATO = /^[KPT][ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/;
-const PREFIJO_POR_LETRA = { K: 'komo', P: 'kipu' };
+const PREFIJO_POR_LETRA = { K: 'komo', P: 'kipu', T: 'kuti' };
 const NOMBRE_APP = { K: 'KOMO', P: 'KIPU', T: 'KUTI' };
 // [emparejar] Si el "levoprint.txt" trae LEVO_CODIGO (lo pone el boton
 // "Descargar" de la consola) y AUN no hay device, se canjea una vez: el
@@ -259,6 +259,11 @@ function renderTicket(pl) {
   }
   t += linea('=') + CMD.negritaOn + fila('TOTAL', money(pl.total)) + CMD.negritaOff;
   for (const p of pl.pagos || []) t += fila('  ' + p.medio, money(p.monto));
+  // [kuti] Propinas APARTE (no suman al total). KOMO/KIPU no mandan "propinas".
+  if (Array.isArray(pl.propinas) && pl.propinas.length) {
+    t += linea() + 'PROPINAS (aparte, no suman al total)\n';
+    for (const p of pl.propinas) t += fila(('  ' + p.profesional + ' (' + p.medio + ')').slice(0, ANCHO - 12), money(p.monto));
+  }
   t += linea('=') + CMD.centro + 'NO ES COMPROBANTE DE PAGO\n';
   t += firma(pl) + CMD.corte;
   return t;
@@ -353,9 +358,25 @@ function render(job) {
   const pl = job.payload || {};
   if ((!pl.reimpresion && !pl.atrasada) || !t.startsWith(CMD.init)) return t;
   let sello = CMD.centro;
+  // [kuti] KUTI marca toda reimpresion con "copia": el sello dice COPIA.
+  if (pl.copia) return CMD.init + sello + CMD.negritaOn + CMD.grande + '*** COPIA ***\n' + CMD.normal + CMD.negritaOff + CMD.izq + t.slice(CMD.init.length);
   if (pl.atrasada) sello += CMD.negritaOn + CMD.grande + '*** ATRASADA ***\n' + CMD.normal + 'Pedido de las ' + (pl.hora || '?') + '\n' + CMD.negritaOff;
   if (pl.reimpresion) sello += CMD.negritaOn + '*** REIMPRESION ***\n' + CMD.negritaOff;
   return CMD.init + sello + CMD.izq + t.slice(CMD.init.length);
+}
+
+function renderCierre(pl) {
+  let t = CMD.init + CMD.centro;
+  if (pl.negocio) t += CMD.negritaOn + String(pl.negocio).toUpperCase() + '\n' + CMD.negritaOff;
+  t += CMD.grande + 'CORTE DE CAJA\n' + CMD.normal + CMD.izq + linea('=');
+  for (const l of pl.lineas) {
+    if (l && l.sep) { t += linea(String(l.sep).slice(0, 1) || '-'); continue; }
+    const der = String((l && l.der) || '');
+    const f = fila(String((l && l.izq) || '').slice(0, Math.max(1, ANCHO - der.length - 1)), der);
+    t += l && l.negrita ? CMD.negritaOn + f + CMD.negritaOff : f;
+  }
+  t += linea('=') + CMD.centro + firma(pl) + CMD.corte;
+  return t;
 }
 
 function renderBase(job) {
@@ -364,6 +385,8 @@ function renderBase(job) {
   if (job.tipo === 'PRECUENTA') return renderPrecuenta(job.payload);
   if (job.tipo === 'TICKET') return renderTicket(job.payload);
   if (job.tipo === 'CPE') return renderCpe(job.payload);
+  // [kuti] Corte con lineas ya formateadas por la base (KOMO/KIPU: JSON como antes).
+  if (job.tipo === 'CIERRE' && Array.isArray((job.payload || {}).lineas)) return renderCierre(job.payload);
   if (job.tipo === 'PRUEBA') return CMD.init + CMD.centro + 'PRUEBA LEVOPRINT OK\n' + CMD.corte;
   return CMD.init + JSON.stringify(job.payload, null, 1) + CMD.corte;
 }
@@ -546,8 +569,8 @@ function ponerClave(txt, clave, valor) {
 // respuesta de canjear trae "seccion" (KOMO "Estaciones", KIPU "Impresoras");
 // manda esa, y si no viene (o el mensaje no sale de un canje) se usa la
 // ultima vista para ese prefijo en esta sesion o, si no, la conocida.
-const APP_POR_PREFIJO = { komo: 'KOMO', kipu: 'KIPU' };
-const SECCION_POR_PREFIJO = { komo: 'Estaciones', kipu: 'Impresoras' };
+const APP_POR_PREFIJO = { komo: 'KOMO', kipu: 'KIPU', kuti: 'KUTI' };
+const SECCION_POR_PREFIJO = { komo: 'Estaciones', kipu: 'Impresoras', kuti: 'Impresoras' };
 const seccionVista = {}; // prefijo -> seccion que devolvio el servidor
 function consolaDe(prefijo, seccion) {
   const pfx = String(prefijo || '').toLowerCase();
@@ -586,7 +609,7 @@ function mensajeCanje(err, segundos, app, prefijo, seccion) {
     AGENTE_YA_VINCULADO: 'Otro equipo se vinculó a este local mientras tanto. Genera un código nuevo en ' + consola + '.',
     IP_DESCONOCIDA: 'No se pudo identificar la conexión. Intenta de nuevo.',
     AGENTE_INVALIDO: msgDesactivado(prefijo),
-    CODIGO_FORMATO: 'El código tiene 9 caracteres y empieza con K (KOMO) o P (KIPU). Revisa que esté bien escrito.',
+    CODIGO_FORMATO: 'El código tiene 9 caracteres y empieza con K (KOMO), P (KIPU) o T (KUTI). Revisa que esté bien escrito.',
     CODIGO_RESERVADO: 'Este código es de ' + nomApp + ', que esta versión de LevoPrint todavía no admite. Actualiza LevoPrint e intenta de nuevo.',
     SIN_CODIGO: 'Escribe el código de 9 caracteres.',
   })[err] || ('No se pudo vincular (' + err + ').');

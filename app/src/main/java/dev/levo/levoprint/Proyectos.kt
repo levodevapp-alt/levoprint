@@ -5,14 +5,14 @@ package dev.levo.levoprint
 // prefijo ANTES de canjear: desde la rev 4 lo dice la PRIMERA LETRA del
 // codigo (ver porLetra y Emparejamiento.kt), tecleado o por QR.
 //
-// Hoy KOMO y KIPU comparten el MISMO proyecto Supabase (url/anon PUBLICOS,
+// Hoy KOMO, KIPU y KUTI comparten el MISMO proyecto Supabase (url/anon PUBLICOS,
 // identicos: ver levoprint.sql "lp_supabase_url"/"lp_anon_key"). Si algun
 // dia una app nueva (p. ej. KUTI, letra T) usa otro Supabase, se agrega su
 // fila aca con su letra; mientras no este, su codigo se rechaza con un
 // mensaje claro en vez de llamar al proyecto equivocado.
 // [canje-v4] "letra": primera letra del codigo de estacion de esa app
-// (apps.json -> __LP_COD__ en levodev-modules). T queda reservada (KUTI) y
-// no se lista hasta que exista su proyecto.
+// (apps.json -> __LP_COD__ en levodev-modules). [kuti] T = KUTI desde la 1.4.0
+// (modulos impresion_base + levoprint en el esquema kuti).
 data class ProyectoLP(val prefijo: String, val nombre: String, val url: String, val anon: String, val letra: String)
 
 object Proyectos {
@@ -22,7 +22,8 @@ object Proyectos {
 
   val conocidos = listOf(
     ProyectoLP("komo", "KOMO", URL_COMPARTIDA, ANON_COMPARTIDO, "K"),
-    ProyectoLP("kipu", "KIPU", URL_COMPARTIDA, ANON_COMPARTIDO, "P")
+    ProyectoLP("kipu", "KIPU", URL_COMPARTIDA, ANON_COMPARTIDO, "P"),
+    ProyectoLP("kuti", "KUTI", URL_COMPARTIDA, ANON_COMPARTIDO, "T")
   )
 
   fun porLetra(letra: String): ProyectoLP? = conocidos.firstOrNull { it.letra.equals(letra, ignoreCase = true) }

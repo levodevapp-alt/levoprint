@@ -175,7 +175,34 @@ object Agent {
       val p = pg.getJSONObject(i)
       b.append(fila("  " + p.optString("medio"), money(p.optDouble("monto", 0.0)), ancho))
     }
+    // [kuti] Propinas APARTE (no suman al total). KOMO/KIPU no mandan "propinas".
+    val pr = pl.optJSONArray("propinas") ?: JSONArray()
+    if (pr.length() > 0) {
+      b.append(linea(ancho) + "PROPINAS (aparte, no suman al total)" + NL)
+      for (i in 0 until pr.length()) {
+        val p = pr.getJSONObject(i)
+        b.append(fila(("  " + p.optString("profesional") + " (" + p.optString("medio") + ")").take(ancho - 12), money(p.optDouble("monto", 0.0)), ancho))
+      }
+    }
     b.append(linea(ancho, "=") + CENTRO + "NO ES COMPROBANTE DE PAGO" + NL + PIE)
+    return b.toString()
+  }
+
+  // [kuti] Corte de caja: las lineas {izq, der, sep, negrita} ya vienen formateadas
+  // desde la base. Sin "lineas" (KOMO/KIPU) sigue el render generico de siempre.
+  private fun renderCierre(pl: JSONObject, ancho: Int): String {
+    val ls = pl.optJSONArray("lineas") ?: return renderGenerico("CIERRE", pl, ancho)
+    val b = StringBuilder(INIT + CENTRO)
+    if (pl.optString("negocio").isNotBlank()) b.append(NEG_ON + pl.optString("negocio").uppercase() + NL + NEG_OFF)
+    b.append(GRANDE + "CORTE DE CAJA" + NL + NORMAL + IZQ + linea(ancho, "="))
+    for (i in 0 until ls.length()) {
+      val l = ls.optJSONObject(i) ?: continue
+      if (l.optString("sep").isNotBlank()) { b.append(linea(ancho, l.optString("sep").take(1))); continue }
+      val der = l.optString("der")
+      val f = fila(l.optString("izq").take(maxOf(1, ancho - der.length - 1)), der, ancho)
+      b.append(if (l.optBoolean("negrita")) NEG_ON + f + NEG_OFF else f)
+    }
+    b.append(linea(ancho, "=") + CENTRO + PIE)
     return b.toString()
   }
 
@@ -241,15 +268,19 @@ object Agent {
   fun render(job: JSONObject, ancho: Int): String {
     val tipo = job.optString("tipo")
     val pl = job.optJSONObject("payload") ?: JSONObject()
-    return when (tipo) {
+    val t = when (tipo) {
       "PRUEBA" -> INIT + CENTRO + "PRUEBA LEVOPRINT OK" + NL + PIE
       "COMANDA" -> renderComanda(pl, ancho)
       "PRECUENTA" -> renderPrecuenta(pl, ancho)
       "TICKET" -> renderTicket(pl, ancho)
       "CPE" -> renderCpe(pl, ancho)
       "CARTA_QR" -> renderCartaQr(pl, ancho)
+      "CIERRE" -> renderCierre(pl, ancho)
       else -> renderGenerico(tipo.ifBlank { "COMPROBANTE" }, pl, ancho)
     }
+    // [kuti] Toda reimpresion de KUTI trae "copia": sello arriba. KOMO/KIPU no lo mandan.
+    if (!pl.optBoolean("copia") || !t.startsWith(INIT)) return t
+    return INIT + CENTRO + NEG_ON + GRANDE + "*** COPIA ***" + NL + NORMAL + NEG_OFF + IZQ + t.substring(INIT.length)
   }
 
   // Bytes a enviar a la impresora: latin1 (ISO-8859-1), como el .exe.
