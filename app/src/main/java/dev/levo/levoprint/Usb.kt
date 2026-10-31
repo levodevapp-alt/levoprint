@@ -68,9 +68,9 @@ object Usb {
   }
 
   fun imprimir(ctx: Context, destino: String, datos: ByteArray) {
-    val um = ctx.getSystemService(Context.USB_SERVICE) as? UsbManager ?: throw RuntimeException("este equipo no tiene USB host (OTG)")
-    val d = buscar(um, destino) ?: throw RuntimeException("impresora USB $destino no conectada (revisa el cable OTG)")
-    if (!um.hasPermission(d)) { pedirPermiso(ctx, destino); throw RuntimeException("falta el permiso USB: abre LevoPrint y toca Permitir") }
+    val um = ctx.getSystemService(Context.USB_SERVICE) as? UsbManager ?: throw SinEnviar("este equipo no tiene USB host (OTG)")
+    val d = buscar(um, destino) ?: throw SinEnviar("impresora USB $destino no conectada (revisa el cable OTG)")
+    if (!um.hasPermission(d)) { pedirPermiso(ctx, destino); throw SinEnviar("falta el permiso USB: abre LevoPrint y toca Permitir") }
     // Interfaz de impresora primero; si no, cualquiera con BULK OUT.
     var itf: android.hardware.usb.UsbInterface? = null
     var ep: android.hardware.usb.UsbEndpoint? = null
@@ -82,17 +82,17 @@ object Usb {
         if (y.type == UsbConstants.USB_ENDPOINT_XFER_BULK && y.direction == UsbConstants.USB_DIR_OUT) { itf = x; ep = y; break@loop }
       }
     }
-    if (itf == null || ep == null) throw RuntimeException("la impresora USB no tiene salida de datos (BULK OUT)")
-    val con = um.openDevice(d) ?: throw RuntimeException("no se pudo abrir la impresora USB")
+    if (itf == null || ep == null) throw SinEnviar("la impresora USB no tiene salida de datos (BULK OUT)")
+    val con = um.openDevice(d) ?: throw SinEnviar("no se pudo abrir la impresora USB")
     try {
-      if (!con.claimInterface(itf, true)) throw RuntimeException("otra app tiene tomada la impresora USB")
+      if (!con.claimInterface(itf, true)) throw SinEnviar("otra app tiene tomada la impresora USB")
       var off = 0
       while (off < datos.size) {
         val n = minOf(16384, datos.size - off)
         // bulkTransfer con offset existe desde API 28; en 26-27 se copia el trozo.
         val escritos = if (android.os.Build.VERSION.SDK_INT >= 28) con.bulkTransfer(ep, datos, off, n, 5000)
           else con.bulkTransfer(ep, datos.copyOfRange(off, off + n), n, 5000)
-        if (escritos <= 0) throw RuntimeException("la impresora USB no acepto los datos (timeout)")
+        if (escritos <= 0) throw if (off == 0) SinEnviar("la impresora USB no acepto los datos (timeout)") else RuntimeException("la impresora USB dejo de aceptar datos a mitad del papel")
         off += escritos
       }
       try { con.releaseInterface(itf) } catch (_: Exception) {}

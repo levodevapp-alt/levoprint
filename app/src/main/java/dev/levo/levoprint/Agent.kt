@@ -86,16 +86,28 @@ object Agent {
   // Si la base aun no tiene la RPC (plantilla impresion_local), RpcError 404.
   fun latidoLan(c: Cfg, ips: List<String>, puerto: Int, impresos: List<Diario.Entrada>): JSONObject {
     val arr = JSONArray()
-    for (x in impresos) arr.put(JSONObject().put("clave", x.k).put("estacion", x.est).put("ts", java.time.Instant.ofEpochMilli(x.ts).toString()))
+    // [QA F2 MEDIO-2] Cada impreso es (jobId, estacion).
+    for (x in impresos) arr.put(JSONObject().put("clave", x.j).put("estacion", x.est).put("ts", java.time.Instant.ofEpochMilli(x.ts).toString()))
     val p = JSONObject().put("device", c.device).put("version", BuildConfig.VERSION_NAME).put("android", true)
-      .put("lan", JSONObject().put("ips", JSONArray(ips)).put("puerto", puerto)).put("impresos", arr)
+      .put("lan", if (ips.isEmpty()) JSONObject.NULL else JSONObject().put("ips", JSONArray(ips)).put("puerto", puerto)).put("impresos", arr)
     return rpc(c, c.prefijo + "_agente_lan", p)
   }
 
-  fun asignar(c: Cfg, estacion: String, transporte: String, destino: String) {
+  fun asignar(c: Cfg, estacion: String, transporte: String, destino: String): JSONObject =
     rpc(c, c.prefijo + "_agente_asignar", JSONObject().put("device", c.device).put("estacion", estacion)
       .put("transporte", transporte).put("destino", destino))
-  }
+
+  // [QA F2 ALTO-1] Avisa a la nube una asignacion hecha en este equipo. Si la
+  // acepta, se borra la local (desde ahi manda la nube); si la base no tiene la
+  // RPC o la rechaza, queda solo local; sin internet, queda pendiente y el
+  // latido la reintenta. Devuelve true si quedo en la nube.
+  fun avisarAsignacion(c: Cfg, estacion: String, r: Motor.Ruta): Boolean = try {
+    val x = asignar(c, estacion, r.transporte, r.destino)
+    if (x.optBoolean("ok", true)) { Motor.confirmarNube(estacion); true } else { Motor.quedarSoloLocal(estacion); false }
+  } catch (e: RpcError) {
+    if (e.http == 404) Motor.quedarSoloLocal(estacion)
+    false
+  } catch (_: Exception) { false }
 
   fun tomar(c: Cfg): JSONArray {
     val r = rpc(c, c.prefijo + "_print_tomar", JSONObject().put("device", c.device).put("limite", 10))
@@ -351,7 +363,8 @@ object Agent {
   // ---- Impresion por TCP (impresora de red ESC/POS :9100) ----
   fun imprimirTcp(ip: String, puerto: Int, texto: String) {
     Socket().use { s ->
-      s.connect(InetSocketAddress(ip, puerto), 5000)
+      // [QA F2 MEDIO-1] Si no conecta, es seguro que no salio nada (SinEnviar).
+      try { s.connect(InetSocketAddress(ip, puerto), 5000) } catch (e: Exception) { throw SinEnviar("no conecto con $ip:$puerto", causa = e) }
       s.soTimeout = 10000
       s.getOutputStream().use { out ->
         out.write(bytes(texto))

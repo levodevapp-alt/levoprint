@@ -132,7 +132,9 @@ class PrintService : Service() {
     val cfg = Prefs.leer(this) ?: run { stopSelf(); return START_NOT_STICKY }
     try { arrancarForeground(TXT_ACTIVO) } catch (e: Exception) { ultimoLog = "foreground: " + e.message }
     Motor.iniciar(this)
-    servidor = ServidorLocal(this, PUERTO_LAN) { forzarConfig = true; despertar() }.also { it.iniciar() }
+    // [QA F2 MEDIO-3] Se crea pero NO se abre: revisarLan() lo abre solo con
+    // "Activar impresion sin internet" (PIN vigente) o equipos emparejados.
+    servidor = ServidorLocal(this, PUERTO_LAN) { forzarConfig = true; despertar() }
     cfgActual = cfg
     forzarConfig = true
     desactivado = false
@@ -150,6 +152,7 @@ class PrintService : Service() {
       // Config de ESTA vuelta: los trabajos tomados se marcan con el mismo token.
       val cfg = cfgActual ?: break
       var espera = ESPERA_MS
+      revisarLan()
       try {
         // [qa5] El contador avanza SIEMPRE (antes "forzar || ciclo++" lo
         // saltaba por cortocircuito cuando forzarConfig era true).
@@ -175,7 +178,7 @@ class PrintService : Service() {
           val job = jobs.getJSONObject(i)
           trabajadores.submit {
             val id = job.optString("id")
-            val r = Motor.procesar(Diario.claveDeNube(job), "NUBE", job.optString("estacion").ifBlank { null },
+            val r = Motor.procesar(Diario.jobIdDeNube(job), "NUBE", job.optString("estacion").ifBlank { null },
               job.optString("tipo"), job.optJSONObject("payload") ?: org.json.JSONObject(), cfg.ancho)
             ultimoLog = (if (r.ok) "OK " else "ERR ") + job.optString("tipo") + " -> " + (r.via ?: "-") +
               (if (r.duplicado) " (ya habia salido)" else "") + (if (r.ok) "" else ": " + r.error)
@@ -183,14 +186,19 @@ class PrintService : Service() {
           }
         }
         for (t in tareas) try { t.get() } catch (_: Exception) {}
-        // Latido LAN: cada ~60 s, o ~16 s si hay impresos por la LAN sin reportar.
-        val hayPorReportar = Motor.diario.sinReportar(1).isNotEmpty()
+        // Latido LAN: cada ~60 s, o ~16 s si hay impresos por la LAN sin reportar
+        // o asignaciones de este equipo sin avisar a la nube (ALTO-1).
+        val pendAsig = Motor.pendientesNube()
+        val hayPorReportar = Motor.diario.sinReportar(1).isNotEmpty() || pendAsig.isNotEmpty()
         val ahora = System.currentTimeMillis()
-        if (ahora > lanNoExisteHasta && ahora - ultimoLatido > (if (hayPorReportar) 16000L else 60000L)) {
+        if (ahora - ultimoLatido > (if (hayPorReportar) 16000L else 60000L)) {
           ultimoLatido = ahora
+          for ((id, ruta) in pendAsig) Agent.avisarAsignacion(cfg, id, ruta)
+        }
+        if (ahora > lanNoExisteHasta && ultimoLatido == ahora) {
           try {
             val imp = Motor.diario.sinReportar(200)
-            val r = Agent.latidoLan(cfg, Red.ipsLocales(), PUERTO_LAN, imp)
+            val r = Agent.latidoLan(cfg, if (servidor?.escuchando == true) Red.ipsLocales() else emptyList(), PUERTO_LAN, imp)
             Motor.ponerTransportes(r.optJSONArray("estaciones"))
             if (imp.isNotEmpty()) Motor.diario.marcarReportados(imp.map { it.k })
           } catch (e: RpcError) {
@@ -232,6 +240,17 @@ class PrintService : Service() {
         if (!dormir(espera)) break
       }
     }
+  }
+
+  // [QA F2 MEDIO-3] El 9120 solo abierto si hace falta: PIN vigente
+  // ("Activar impresion sin internet") o equipos emparejados.
+  private fun revisarLan() {
+    val s = servidor ?: return
+    val falta = Emparejador.pinVigente() != null || Emparejador.equipos(this).isNotEmpty()
+    if (falta && !s.abierto) s.iniciar()
+    else if (!falta && s.abierto) s.detener()
+    lanEscuchando = s.escuchando
+    lanError = s.error
   }
 
   private fun salirDeDesactivado() {

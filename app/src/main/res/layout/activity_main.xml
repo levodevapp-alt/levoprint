@@ -103,7 +103,7 @@
         android:orientation="horizontal" android:layout_marginTop="8dp">
       <Button android:id="@+id/btnPinLan" android:layout_width="0dp"
           android:layout_height="wrap_content" android:layout_weight="1"
-          android:layout_marginEnd="6dp" android:text="Emparejar un equipo"
+          android:layout_marginEnd="6dp" android:text="Activar impresión sin internet"
           android:backgroundTint="#14406C" android:textColor="#EAF4FF" />
       <Button android:id="@+id/btnBuscar" android:layout_width="0dp"
           android:layout_height="wrap_content" android:layout_weight="1"

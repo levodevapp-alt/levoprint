@@ -19,15 +19,24 @@ import java.util.concurrent.Executors
 // HTTP/1.1 minimo hecho a mano (sin dependencias): una peticion por conexion
 // (Connection: close), cuerpo maximo 256 KB, 8 hilos.
 // Seguridad: IP privada, Host permitido, Origin *.levodev.app, token por
-// equipo (Emparejador). Aqui no hay certificados ni llaves del cliente.
+// equipo (Emparejador, vence a los 90 dias sin uso). Aqui no hay
+// certificados ni llaves del cliente.
+// [QA F2] Solo escucha si hace falta (PrintService.revisarLan: PIN vigente o
+// equipos emparejados); 423 si la consola desactivo este LevoPrint; tope
+// TOTAL de 20 s por conexion (corta a quien manda las cabeceras de a gotas).
+// Riesgo aceptado y documentado: HTTP en claro dentro de la red del local.
 class ServidorLocal(private val ctx: Context, private val puerto: Int = 9120, private val alPedirRefresco: () -> Unit) {
   @Volatile private var server: ServerSocket? = null
   @Volatile var escuchando = false
   @Volatile var error: String? = null
   private val pool = Executors.newFixedThreadPool(8)
+  private val reloj = Executors.newSingleThreadScheduledExecutor()
 
-  fun iniciar() {
-    if (server != null) return
+  @Volatile private var arrancado = false
+
+  @Synchronized fun iniciar() {
+    if (arrancado) return
+    arrancado = true
     Thread {
       try {
         val s = ServerSocket(puerto, 32, InetAddress.getByName("0.0.0.0"))
@@ -39,11 +48,13 @@ class ServidorLocal(private val ctx: Context, private val puerto: Int = 9120, pr
         }
       } catch (e: Exception) {
         error = if (e is java.net.BindException) "el puerto $puerto esta ocupado" else e.message
-      } finally { escuchando = false; server = null }
+      } finally { escuchando = false; server = null; arrancado = false }
     }.also { it.isDaemon = true; it.start() }
   }
 
-  fun detener() { try { server?.close() } catch (_: Exception) {}; server = null; escuchando = false }
+  @Synchronized fun detener() { try { server?.close() } catch (_: Exception) {}; server = null; escuchando = false }
+
+  val abierto: Boolean get() = arrancado
 
   private class Pedido(val metodo: String, val ruta: String, val cab: Map<String, String>, val cuerpo: String)
 
@@ -96,6 +107,8 @@ class ServidorLocal(private val ctx: Context, private val puerto: Int = 9120, pr
   private fun err(e: String, m: String? = null) = JSONObject().put("ok", false).put("error", e).also { if (m != null) it.put("mensaje", m) }
 
   private fun atender(sock: Socket) {
+    // Plazo total de la conexion (no solo por lectura): pasado, se cierra.
+    val corte = reloj.schedule({ try { sock.close() } catch (_: Exception) {} }, 20, java.util.concurrent.TimeUnit.SECONDS)
     sock.use { s ->
       try {
         s.soTimeout = 15000
@@ -109,7 +122,9 @@ class ServidorLocal(private val ctx: Context, private val puerto: Int = 9120, pr
         val b = try { if (p.cuerpo.isBlank()) JSONObject() else JSONObject(p.cuerpo) } catch (_: Exception) { return responder(s, p, 400, err("JSON_INVALIDO")) }
 
         if (p.metodo == "GET" && p.ruta == "/v1/hola")
-          return responder(s, p, 200, JSONObject().put("ok", true).put("levoprint", true).put("version", BuildConfig.VERSION_NAME).put("prefijo", Prefs.leer(ctx)?.prefijo).put("android", true))
+          return responder(s, p, 200, JSONObject().put("ok", true).put("levoprint", true).put("version", BuildConfig.VERSION_NAME).put("android", true))
+        if (PrintService.desactivado)
+          return responder(s, p, 423, err("AGENTE_DESACTIVADO", "Este LevoPrint esta desactivado en la consola. Activalo o vincula otro."))
         if (p.metodo == "POST" && p.ruta == "/v1/emparejar") {
           val r = Emparejador.intentar(ctx, b.optString("pin"), b.optString("nombre"), ip)
           return responder(s, p, if (r.optBoolean("ok")) 200 else if (r.optString("error") == "ESPERA") 429 else 401, r)
@@ -122,7 +137,11 @@ class ServidorLocal(private val ctx: Context, private val puerto: Int = 9120, pr
         when {
           p.metodo == "GET" && p.ruta == "/v1/estado" -> {
             val arr = JSONArray()
-            for (e in Motor.estaciones.values) { val r = Motor.ruta(e.id); arr.put(JSONObject().put("id", e.id).put("nombre", e.nombre).put("via", Motor.describir(r)).put("transporte", r?.transporte).put("cola", Motor.enCola(r))) }
+            for (e in Motor.estaciones.values) {
+              val r = Motor.ruta(e.id)
+              arr.put(JSONObject().put("id", e.id).put("nombre", e.nombre).put("via", Motor.describir(r)).put("transporte", r?.transporte)
+                .put("fuente", Motor.fuente(e.id)).put("pendienteNube", Motor.asignacion(e.id)?.pendienteNube == true).put("cola", Motor.enCola(r)))
+            }
             responder(s, p, 200, JSONObject().put("ok", true).put("version", BuildConfig.VERSION_NAME).put("prefijo", Prefs.leer(ctx)?.prefijo).put("ancho", ancho)
               .put("equipo", equipo.nombre).put("nube", JSONObject().put("enLinea", System.currentTimeMillis() - PrintService.nubeOkTs < 30000).put("okTs", PrintService.nubeOkTs)).put("estaciones", arr))
           }
@@ -140,7 +159,7 @@ class ServidorLocal(private val ctx: Context, private val puerto: Int = 9120, pr
             try {
               Motor.enviar(r, Agent.render(JSONObject().put("tipo", "PRUEBA").put("payload", JSONObject()), ancho))
               responder(s, p, 200, JSONObject().put("ok", true).put("aviso", "Prueba enviada a " + Motor.describir(r) + "."))
-            } catch (e: Exception) { responder(s, p, 502, err("IMPRESION", e.message)) }
+            } catch (e: Exception) { PrintService.ultimoLog = "ERR prueba: " + e.message; responder(s, p, 502, err("IMPRESION", Motor.mensajePublico(e))) }
           }
           p.metodo == "POST" && p.ruta == "/v1/imprimir" -> {
             val jobId = b.optString("jobId")
@@ -152,11 +171,12 @@ class ServidorLocal(private val ctx: Context, private val puerto: Int = 9120, pr
             val r = Motor.procesar(jobId, "LAN", est, tipo, b.optJSONObject("payload") ?: JSONObject(), ancho)
             PrintService.ultimoLog = (if (r.ok) "OK LAN " else "ERR LAN ") + tipo + " -> " + (r.via ?: "-") + (if (r.duplicado) " (repetido)" else "")
             if (r.ok) responder(s, p, 200, JSONObject().put("ok", true).put("jobId", jobId).put("via", r.via).put("duplicado", r.duplicado).put("equipo", equipo.nombre))
-            else responder(s, p, 502, err("IMPRESION", r.error).put("via", r.via))
+            else responder(s, p, 502, err("IMPRESION", r.error).put("via", r.via).put("dudoso", r.dudoso))
           }
           else -> responder(s, p, 404, err("NO_ENCONTRADO"))
         }
-      } catch (_: Exception) {}
+      } catch (_: Exception) {
+      } finally { corte.cancel(false) }
     }
   }
 }

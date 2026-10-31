@@ -201,6 +201,7 @@ class MainActivity : AppCompatActivity() {
       txtLan.text = when {
         !PrintService.activo -> "Arranca LevoPrint para recibir impresiones por la WiFi del local."
         PrintService.lanError != null -> "Red del local: " + PrintService.lanError
+        !PrintService.lanEscuchando -> "Cerrado: toca Activar impresion sin internet para abrirlo en la red del local."
         ips.isEmpty() -> "Escuchando en este equipo (127.0.0.1:" + PrintService.PUERTO_LAN + "). Conecta la WiFi del local para los demas equipos."
         else -> "Escuchando en " + ips.joinToString(" · ") { "http://$it:" + PrintService.PUERTO_LAN } +
           " · " + Emparejador.equipos(this).size + " equipos emparejados"
@@ -211,7 +212,7 @@ class MainActivity : AppCompatActivity() {
     }
     findViewById<Button>(R.id.btnPinLan).setOnClickListener {
       Emparejador.nuevoPin()
-      txtBuscar.text = "En la app: Estaciones > LevoPrint en esta red > escribe este PIN (vence en 10 min, sirve una vez)."
+      txtBuscar.text = "Impresion sin internet activada. En la app: Estaciones > Imprimir sin internet > escribe este PIN (vence en 10 min, sirve una vez)."
       refrescarLan?.invoke()
     }
     findViewById<Button>(R.id.btnBuscar).setOnClickListener { b ->
@@ -269,10 +270,15 @@ class MainActivity : AppCompatActivity() {
           }.start()
         } else {
           val est = ests[j - 1]
-          Motor.asignar(est.id, ruta)
+          // [QA F2 ALTO-1] Nace local y pendiente (imprime ya, aun sin internet).
+          // Si la nube la acepta, la local se borra y manda la nube; si no hay
+          // internet, el servicio la reintenta en cada latido.
+          try { Motor.asignar(est.id, ruta, true) } catch (e: IllegalArgumentException) { txt.text = "No se pudo asignar: " + e.message; return@setItems }
           txt.text = "Listo: " + hz.nombre + " imprime para " + est.nombre + "."
-          // Se avisa a la nube si hay internet (si no, queda en este equipo).
-          Thread { try { Prefs.leer(this)?.let { Agent.asignar(it, est.id, ruta.transporte, ruta.destino) } } catch (_: Exception) {} }.start()
+          Thread {
+            val enNube = Prefs.leer(this)?.let { Agent.avisarAsignacion(it, est.id, ruta) } ?: false
+            if (!enNube) h.post { txt.text = "Listo: " + hz.nombre + " imprime para " + est.nombre + " (guardado en este equipo; se avisara a la nube cuando haya internet)." }
+          }.start()
         }
       }.show()
     }.show()

@@ -25,7 +25,8 @@ object Bt {
     val sock = dev.createRfcommSocketToServiceRecord(SPP)
     try {
       try { a.cancelDiscovery() } catch (_: SecurityException) {}
-      sock.connect()
+      // [QA F2 MEDIO-1] Sin conexion no salio nada (SinEnviar).
+      try { sock.connect() } catch (e: Exception) { throw SinEnviar("no conecto con la impresora Bluetooth", causa = e) }
       sock.outputStream.use { it.write(Agent.bytes(texto)); it.flush(); try { Thread.sleep(900) } catch (_: InterruptedException) {} }
     } finally {
       try { sock.close() } catch (_: Exception) {}

@@ -23,8 +23,10 @@
        igual en equipos sin USB host. -->
   <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
+  <!-- [QA F2] allowBackup=false: el respaldo de Android no debe copiar a la nube
+       los tokens de los equipos emparejados ni el diario de impresion. -->
   <application
-    android:allowBackup="true"
+    android:allowBackup="false"
     android:icon="@mipmap/ic_launcher"
     android:roundIcon="@mipmap/ic_launcher_round"
     android:label="@string/app_name"
