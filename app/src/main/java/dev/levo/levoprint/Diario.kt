@@ -49,7 +49,8 @@ class Diario(private val archivo: File) {
     try {
       val tmp = File(archivo.path + ".tmp")
       tmp.writeText(mapa.values.joinToString("") { json(it).toString() + "\n" })
-      tmp.renameTo(archivo)
+      // Files.move reemplaza el archivo viejo (renameTo no lo hace en todos los sistemas).
+      java.nio.file.Files.move(tmp.toPath(), archivo.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
     } catch (_: Exception) {}
   }
 

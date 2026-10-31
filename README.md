@@ -22,3 +22,11 @@ Se compila solo en **GitHub Actions** (pestaña *Actions* → último run → *A
 - **APK (Android)** — carpeta `app/`. CI: workflow *build-apk* → artifact `LevoPrint-debug-apk`.
 - **.exe (Windows/PC)** — carpeta `agente/` (Node SEA). CI: workflow *build-exe* → artifact `LevoPrint-exe`.
 Ambos son **genéricos**: el mismo binario sirve para cualquier app de LevoDev cambiando el *prefijo* (`komo`, etc.).
+
+## F2 · Impresión sin internet (red del local) y USB
+Desde la 1.8 (.exe) y el APK con F2, LevoPrint también escucha en la **red del local**
+(`http://<ip>:9120`): la caja y los mozos imprimen aunque se caiga el internet, sin que
+ningún papel salga dos veces al volver (diario por `jobId`). Suma **USB** (cola de Windows
+en PC, OTG en Android) y el asistente **Buscar impresoras** (USB, red, Bluetooth).
+Diseño, seguridad, compilación y la **prueba obligatoria con hardware real**:
+[`docs/F2_IMPRESION_LOCAL.md`](docs/F2_IMPRESION_LOCAL.md).

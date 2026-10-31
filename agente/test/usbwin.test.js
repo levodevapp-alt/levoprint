@@ -4,7 +4,7 @@
 // (DOC_INFO_1.pOutputFile, sin dialogo): prueba que el helper compila, que
 // OpenPrinter/StartDocPrinter(RAW)/WritePrinter aceptan los bytes y que la
 // cola queda limpia. El driver PDF descarta el RAW (el archivo sale vacio):
-// el papel real se prueba a mano con la ticketera (docs/PRUEBA_F2_HARDWARE.md).
+// el papel real se prueba a mano con la ticketera (docs/F2_IMPRESION_LOCAL.md §5).
 // Solo corre en Windows y con LP_USB=1 (abre PowerShell, ~2 s).
 // ============================================================
 'use strict';

@@ -334,13 +334,16 @@ object Agent {
       else -> renderGenerico(tipo.ifBlank { "COMPROBANTE" }, pl, ancho)
     }
     // [kuti] Toda reimpresion de KUTI trae "copia": sello arriba. KOMO/KIPU no lo mandan.
-    // [F2] "reimpresion" (como el .exe): sello REIMPRESION arriba; lo usa el
-    // diario cuando un trabajo quedo DUDOSO (la app murio a mitad).
-    if (!pl.optBoolean("copia") && pl.optBoolean("reimpresion") && t.startsWith(INIT))
-      return INIT + CENTRO + NEG_ON + "*** REIMPRESION ***" + NL + NEG_OFF + IZQ + t.substring(INIT.length)
     if (!pl.optBoolean("copia") || !t.startsWith(INIT)) return t
     return INIT + CENTRO + NEG_ON + GRANDE + "*** COPIA ***" + NL + NORMAL + NEG_OFF + IZQ + t.substring(INIT.length)
   }
+
+  // [F2] Sello REIMPRESION arriba (como el .exe). Solo lo usa el Motor cuando
+  // el diario dice DUDOSO (la app murio a mitad de ese papel): la cocina no lo
+  // toma por pedido nuevo. render() NO cambia: el APK sigue sacando lo mismo
+  // que canje-v3 (AgentRenderTest).
+  fun conSelloReimpresion(t: String): String =
+    if (t.startsWith(INIT)) INIT + CENTRO + NEG_ON + "*** REIMPRESION ***" + NL + NEG_OFF + IZQ + t.substring(INIT.length) else t
 
   // Bytes a enviar a la impresora: latin1 (ISO-8859-1), como el .exe.
   fun bytes(texto: String): ByteArray = texto.toByteArray(Charsets.ISO_8859_1)

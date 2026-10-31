@@ -159,7 +159,7 @@ object Motor {
     if (previo == "IMPRESO") return Resultado(true, duplicado = true)
     val payload = JSONObject(payloadIn.toString())
     // DUDOSO: la app murio a mitad; si vuelve, sale con sello (no como pedido nuevo).
-    if (previo == "DUDOSO" && !payload.optBoolean("reimpresion")) payload.put("reimpresion", true)
+    val dudoso = previo == "DUDOSO"
     val job = JSONObject().put("tipo", tipo).put("payload", payload)
     val r = ruta(estId)
     if (r == null) {
@@ -170,7 +170,8 @@ object Motor {
     val via = describir(r)
     pendientes.merge(k, 1, Int::plus)
     val tarea = ejecutor(k).submit<Unit> {
-      val texto = (try { renderRemoto?.invoke(job) } catch (_: Exception) { null }) ?: Agent.render(job, ancho)
+      val base = (try { renderRemoto?.invoke(job) } catch (_: Exception) { null }) ?: Agent.render(job, ancho)
+      val texto = if (dudoso) Agent.conSelloReimpresion(base) else base
       diario.poner(clave, e = "IMPRIMIENDO", o = origen, est = estId, t = tipo)
       enviar(r, texto)
     }
