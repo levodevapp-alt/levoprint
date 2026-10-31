@@ -13,6 +13,11 @@ const AQUI = dirname(fileURLToPath(import.meta.url));
 const FUSE = 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2';
 const salida = join(AQUI, 'dist', 'LevoPrint.exe');
 
+// [F2] El agente esta partido en lib/: primero se junta en un solo archivo
+// (dist/levoprint.bundle.js, ver empaquetar.mjs) y ESE es el main del SEA.
+console.log('0/3  Empaquetando index.js + lib/...');
+execFileSync(process.execPath, [join(AQUI, 'empaquetar.mjs')], { stdio: 'inherit', cwd: AQUI });
+
 console.log('1/3  Generando el blob SEA...');
 execFileSync(process.execPath, ['--experimental-sea-config', join(AQUI, 'sea-config.json')], { stdio: 'inherit', cwd: AQUI });
 

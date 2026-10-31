@@ -13,3 +13,10 @@ _art/
 agente/dist/
 agente/sea-prep.blob
 agente/sea-prep.blob
+
+# [F2] Datos locales del agente al correrlo con node index.js (diario, equipos, estaciones)
+agente/levoprint-*.json
+agente/levoprint-*.jsonl
+agente/levoprint*.tmp
+agente/levoprint.log
+agente/levoprint.txt

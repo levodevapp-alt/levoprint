@@ -1,5 +1,5 @@
 // ============================================================
-// LevoPrint · Agente de impresión v1.7 (ventana visual + emparejamiento por código + render servidor)  ⚡ <Levodev.app />
+// LevoPrint · Agente de impresión v1.8 (F2: servidor LAN :9120 + USB por la cola de Windows + diario anti-duplicado)  ⚡ <Levodev.app />
 // Corre en la PC del local. Poll cada 2s a komo_print_tomar,
 // renderiza ESC/POS y lo manda a la IP:puerto de cada estación.
 // Se empaqueta a LevoPrint.exe (Node SEA). El dueño solo edita
@@ -9,6 +9,24 @@
 //   LEVO_DEVICE=<token uuid del dispositivo AGENTE>
 //   LEVO_MODO=consola   (opcional: imprime a consola, sin impresora)
 // Sin dependencias: Node >= 18 (fetch + net nativos).
+//
+// [F2 offline] (PLAN_OFFLINE_E_IMPRESION §4 y §6 F2):
+//   · Servidor LAN en :9120 (lib/servidorLan): la caja/el mozo mandan el papel
+//     DIRECTO por la red del local, sin internet. Solo IP privada, equipos
+//     emparejados con PIN (lib/emparejar) y CORS solo *.levodev.app.
+//   · USB en Windows por la cola de impresion, RAW (lib/usbwin).
+//   · Diario de trabajos (lib/diario): el mismo jobId nunca sale dos veces,
+//     venga por la LAN o, al volver internet, desde la nube.
+//   · Una cola por impresora con tope de tiempo (lib/colas): una atascada ya
+//     no frena a las demas.
+//   · Asistente "Buscar impresoras" (lib/buscar): USB, red (:9100 + mDNS), BT.
+//   · Latido <p>_agente_lan: publica la IP LAN del agente y reporta lo impreso
+//     por la LAN (si la RPC no existe aun, se ignora: compatible hacia atras).
+//   · Estaciones guardadas en disco: arranca e imprime por la LAN sin internet.
+// Opcionales en levoprint.txt: LEVO_LAN=0 (apaga el servidor LAN),
+// LEVO_PUERTO_LAN=9120, LEVO_ORIGENES=http://localhost:5173 (desarrollo),
+// LEVO_DIR=<carpeta de datos> (pruebas).
+// El .exe se arma con empaquetar.mjs (un solo archivo para Node SEA).
 // ============================================================
 'use strict';
 const net = require('net');
@@ -16,6 +34,15 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const { exec } = require('child_process');
+const { renderPara } = require('./lib/render');
+const { Diario, claveDeNube, jobIdValido } = require('./lib/diario');
+const { Colas } = require('./lib/colas');
+const { Motor } = require('./lib/motor');
+const { Emparejador } = require('./lib/emparejar');
+const { crearServidorLan } = require('./lib/servidorLan');
+const { buscarTodo } = require('./lib/buscar');
+const transportes = require('./lib/transportes');
+const red = require('./lib/red');
 
 // --- ¿corro como .exe (SEA) o como `node index.js`? ---
 // Empaquetado como Single Executable App, `__dirname` no apunta a una
@@ -23,7 +50,10 @@ const { exec } = require('child_process');
 // ejecutable). En desarrollo (`node index.js`) sí vale `__dirname`.
 let esExe = false;
 try { esExe = require('node:sea').isSea(); } catch { esExe = false; }
-const BASE_DIR = esExe ? path.dirname(process.execPath)
+// [F2] LEVO_DIR: carpeta de datos aparte (pruebas automaticas: config,
+// diario y log fuera del repo).
+const BASE_DIR = process.env.LEVO_DIR ? path.resolve(process.env.LEVO_DIR)
+                       : esExe ? path.dirname(process.execPath)
                        : (typeof __dirname === 'string' ? __dirname : process.cwd());
 
 // --- log a archivo (para soporte remoto) ---
@@ -86,6 +116,11 @@ let ANCHO = parseInt(process.env.LEVO_ANCHO || '48', 10) || 48; // columnas típ
 // navegador, pero la mini-GUI web se sigue sirviendo igual (soporte remoto).
 const SIN_VENTANA = /^(1|true|si|s[ií])$/i.test(String(process.env.LEVO_SINVENTANA || ''));
 const PUERTO_GUI_BASE = parseInt(process.env.LEVO_PUERTO_GUI || '9110', 10) || 9110;
+// [F2] Servidor LAN (ver cabecera). VERSION la ve la app en /v1/hola.
+const VERSION = '1.8.0';
+const LAN_ACTIVO = !/^(0|false|no)$/i.test(String(process.env.LEVO_LAN || '1'));
+const PUERTO_LAN = parseInt(process.env.LEVO_PUERTO_LAN || '9120', 10) || 9120;
+const ORIGENES_EXTRA = red.leerOrigenesExtra(process.env.LEVO_ORIGENES);
 
 // Plantilla que se crea sola la primera vez, para que el dueño solo
 // tenga que pegar sus 3 datos y volver a abrir el programa.
@@ -174,244 +209,17 @@ async function rpc(fn, p) {
 const esAgenteInvalido = (e) => !!(e && e.pg === 'AGENTE_INVALIDO');
 
 // --- ESC/POS ---
-const ESC = '\x1b', GS = '\x1d';
-const CMD = {
-  init: ESC + '@',
-  centro: ESC + 'a\x01', izq: ESC + 'a\x00',
-  negritaOn: ESC + 'E\x01', negritaOff: ESC + 'E\x00',
-  grande: GS + '!\x11', normal: GS + '!\x00',
-  corte: '\n\n\n' + GS + 'V\x00',
-};
-const linea = (c = '-') => c.repeat(ANCHO) + '\n';
-const fila = (izq, der) => {
-  izq = String(izq); der = String(der);
-  const esp = Math.max(1, ANCHO - izq.length - der.length);
-  return izq + ' '.repeat(esp) + der + '\n';
-};
-const money = (n) => 'S/ ' + Number(n).toFixed(2);
-
-function renderComanda(pl) {
-  const titulo = pl.correccion ? '*** CORRECCION ***' : 'COMANDA';
-  let t = CMD.init + CMD.centro + CMD.grande + titulo + '\n' + CMD.normal;
-  t += CMD.grande + `MESA ${pl.mesa}\n` + CMD.normal + CMD.izq + linea('=');
-  t += fila(`Mozo: ${pl.mozo || '-'}`, pl.hora || '');
-  if (pl.ronda) t += fila(`Ronda ${pl.ronda}`, '');
-  t += linea('=');
-  if (pl.mensaje) t += CMD.negritaOn + CMD.grande + pl.mensaje + '\n' + CMD.normal + CMD.negritaOff + linea();
-  for (const it of pl.items || []) {
-    t += CMD.negritaOn + `${fmtCant(it.cantidad)} x ${it.nombre}\n` + CMD.negritaOff;
-    if (it.nota) t += `   >> ${it.nota}\n`;
-  }
-  if (pl.nota) t += linea() + `NOTA: ${pl.nota}\n`;
-  t += linea('=') + CMD.centro + firma(pl) + CMD.corte;
-  return t;
-}
-
-function renderPrecuenta(pl) {
-  let t = CMD.init + CMD.centro + CMD.grande + 'PRECUENTA\n' + CMD.normal;
-  t += `MESA ${pl.mesa}\n`;
-  if (pl.cuenta && pl.cuenta.de) t += CMD.negritaOn + `CUENTA ${pl.cuenta.n} de ${pl.cuenta.de}\n` + CMD.negritaOff;
-  t += CMD.izq + linea('=');
-  t += fila(`Mozo: ${pl.mozo || '-'}`, pl.hora || '');
-  t += linea();
-  for (const it of pl.items || []) {
-    t += fila(`${fmtCant(it.cantidad)} ${it.nombre}`.slice(0, ANCHO - 9), money(it.cantidad * it.precio));
-  }
-  t += linea('=');
-  t += CMD.negritaOn + fila('TOTAL', money(pl.total)) + CMD.negritaOff;
-  t += linea('=') + CMD.centro;
-  t += `[QR] ${pl.qr}\n`; // v1: texto; QR gráfico ESC/POS en F2 (el cajero escanea desde su celular)
-  t += 'NO ES COMPROBANTE DE PAGO\n';
-  t += firma(pl) + CMD.corte;
-  return t;
-}
-
-const fmtCant = (n) => (Number(n) % 1 === 0 ? String(Number(n)) : Number(n).toFixed(3));
-
-// --- QR gráfico ESC/POS (GS ( k, modelo 2). Soportado por la mayoría de térmicas 58/80mm. ---
-function qrEscPos(texto, tam = 5) {
-  const data = Buffer.from(String(texto || ''), 'utf8');
-  const len = data.length + 3;
-  const pL = String.fromCharCode(len & 0xff), pH = String.fromCharCode((len >> 8) & 0xff);
-  return GS + '(k\x04\x00\x31\x41\x32\x00'                    // modelo 2
-       + GS + '(k\x03\x00\x31\x43' + String.fromCharCode(tam)   // tamaño de módulo
-       + GS + '(k\x03\x00\x31\x45\x31'                         // corrección M
-       + GS + '(k' + pL + pH + '\x31\x50\x30' + data.toString('binary') // almacenar
-       + GS + '(k\x03\x00\x31\x51\x30';                        // imprimir
-}
-
-// [F2] Ticket interno de cobro (no es comprobante)
-function renderTicket(pl) {
-  // Retail (KIPU) no manda mesa; restaurante (KOMO) sí. Un solo template
-  // sirve a ambos: con negocio + nota para la tienda, con mesa/mozo para el resto.
-  const retail = !pl.mesa;
-  let t = CMD.init + CMD.centro;
-  if (pl.negocio) t += CMD.negritaOn + CMD.grande + String(pl.negocio).toUpperCase() + '\n' + CMD.normal + CMD.negritaOff;
-  // [kuti] local (si el negocio tiene varios) y titulo del alquiler de silla; KOMO/KIPU no mandan local ni refTipo.
-  if (pl.local) t += String(pl.local) + '\n';
-  t += CMD.grande + (retail ? (pl.refTipo === 'ALQUILER' ? 'ALQUILER DE SILLA\n' : 'VENTA\n') : 'COBRADO\n') + CMD.normal;
-  if (!retail) t += CMD.grande + 'MESA ' + (pl.mesa || '-') + '\n' + CMD.normal;
-  t += CMD.izq + linea('=');
-  if (pl.nota) t += 'Nota: ' + pl.nota + '\n';
-  const quien = pl.vendedor || pl.mozo || '';
-  t += fila(quien ? ((retail ? 'Atendio: ' : 'Mozo: ') + quien) : '', pl.hora || '');
-  // [kuti] cliente (en alquiler, el profesional) y el profesional de cada servicio en su propia linea.
-  if (pl.cliente) t += 'Cliente: ' + pl.cliente + '\n';
-  t += linea();
-  for (const it of pl.items || []) {
-    t += fila((fmtCant(it.cantidad) + ' ' + it.nombre).slice(0, ANCHO - 9), money(it.cantidad * it.precio));
-    if (it.profesional) t += '   - ' + it.profesional + '\n';
-  }
-  t += linea('=') + CMD.negritaOn + fila('TOTAL', money(pl.total)) + CMD.negritaOff;
-  for (const p of pl.pagos || []) t += fila('  ' + p.medio, money(p.monto));
-  // [kuti] Propinas APARTE (no suman al total). KOMO/KIPU no mandan "propinas".
-  if (Array.isArray(pl.propinas) && pl.propinas.length) {
-    t += linea() + 'PROPINAS (aparte, no suman al total)\n';
-    for (const p of pl.propinas) t += fila(('  ' + p.profesional + ' (' + p.medio + ')').slice(0, ANCHO - 12), money(p.monto));
-  }
-  t += linea('=') + CMD.centro + 'NO ES COMPROBANTE DE PAGO\n';
-  t += firma(pl) + CMD.corte;
-  return t;
-}
-
-// [F4] Comprobante electrónico (boleta/factura) con QR SUNAT
-
-// --- Monto en letras (exigido por SUNAT en la representacion impresa) ---
-function numeroALetras(num){
-  const U=['','UNO','DOS','TRES','CUATRO','CINCO','SEIS','SIETE','OCHO','NUEVE','DIEZ','ONCE','DOCE','TRECE','CATORCE','QUINCE','DIECISEIS','DIECISIETE','DIECIOCHO','DIECINUEVE','VEINTE'];
-  const D=['','','','TREINTA','CUARENTA','CINCUENTA','SESENTA','SETENTA','OCHENTA','NOVENTA'];
-  const C=['','CIENTO','DOSCIENTOS','TRESCIENTOS','CUATROCIENTOS','QUINIENTOS','SEISCIENTOS','SETECIENTOS','OCHOCIENTOS','NOVECIENTOS'];
-  function centenas(n){ if(n===100) return 'CIEN'; let t='';
-    const c=Math.floor(n/100), r=n%100; if(c) t+=C[c]+' ';
-    if(r<=20) t+=U[r]; else { const d=Math.floor(r/10), u=r%10;
-      if(d===2) t+= (u? 'VEINTI'+U[u] : 'VEINTE');
-      else t+= D[d] + (u? ' Y '+U[u] : ''); }
-    return t.trim(); }
-  function seccion(n){ let t='';
-    const mill=Math.floor(n/1000000); n%=1000000;
-    if(mill) t+= (mill===1? 'UN MILLON ' : centenas(mill)+' MILLONES ');
-    const mil=Math.floor(n/1000); n%=1000;
-    if(mil) t+= (mil===1? 'MIL ' : centenas(mil)+' MIL ');
-    if(n) t+= centenas(n);
-    return t.trim() || 'CERO'; }
-  const e=Math.floor(Number(num||0)); const cent=Math.round((Number(num||0)-e)*100);
-  return seccion(e)+' CON '+String(cent).padStart(2,'0')+'/100 SOLES';
-}
-function denomCpe(tipo){ const t=String(tipo||'').toUpperCase();
-  if(t.includes('FACTURA')) return 'FACTURA ELECTRONICA';
-  if(t.includes('BOLETA')) return 'BOLETA DE VENTA ELECTRONICA';
-  if(t.includes('CREDITO')) return 'NOTA DE CREDITO ELECTRONICA';
-  if(t.includes('DEBITO')) return 'NOTA DE DEBITO ELECTRONICA';
-  return t || 'COMPROBANTE'; }
-
-function renderCpe(pl) {
-  const e = pl.empresa || {}, c = pl.cliente || {}, tot = pl.totales || {};
-  const numero = pl.serie + '-' + String(pl.numero).padStart(8, '0');
-  let t = CMD.init + CMD.centro + CMD.negritaOn + (e.razonSocial || e.nombre || '') + '\n' + CMD.negritaOff;
-  if (e.ruc) t += 'RUC ' + e.ruc + '\n';
-  if (e.direccion) t += e.direccion + '\n';
-  t += linea('=') + CMD.negritaOn + denomCpe(pl.tipo) + '\n' + CMD.grande + numero + '\n' + CMD.normal + CMD.negritaOff;
-  if (pl.estado === 'STUB') t += '*** MODO PRACTICA - SIN VALOR ***\n';
-  t += CMD.izq + linea('=');
-  t += fila('Fecha: ' + (pl.fecha || ''), '');
-  // retail: el CPE no lleva mesa/mozo
-  t += 'Cliente: ' + (c.nombre || 'CLIENTE VARIOS') + '\n';
-  if (c.doc && c.doc !== '0') t += (c.tipoDoc || 'DOC') + ': ' + c.doc + '\n';
-  if (c.direccion) t += c.direccion + '\n';
-  t += linea();
-  for (const it of pl.items || []) t += fila((fmtCant(it.cantidad) + ' ' + it.nombre).slice(0, ANCHO - 10), money(it.total));
-  t += linea();
-  const n = (x) => Number(x || 0);
-  if (n(tot.gravada) > 0) t += fila('OP. GRAVADA', money(tot.gravada));
-  if (n(tot.exonerada) > 0) t += fila('OP. EXONERADA', money(tot.exonerada));
-  if (n(tot.inafecta) > 0) t += fila('OP. INAFECTA', money(tot.inafecta));
-  if (n(tot.igv) > 0) t += fila('IGV 18%', money(tot.igv));
-  t += CMD.negritaOn + fila('TOTAL', money(pl.total)) + CMD.negritaOff;
-  t += CMD.izq + 'SON: ' + numeroALetras(pl.total) + '\n';
-  for (const p of pl.pagos || []) t += fila('  ' + p.medio, money(p.monto));
-  t += linea('=') + CMD.centro;
-  if (pl.qr) t += qrEscPos(pl.qr) + '\n';
-  if (pl.hash) t += 'Hash: ' + String(pl.hash).slice(0, 28) + '\n';
-  t += 'Representacion impresa del\ncomprobante electronico.\nConsulte en sunat.gob.pe\n';
-  t += firma(pl) + CMD.corte;
-  return t;
-}
-
-// [F-carta] QR de la carta virtual: título + QR grande + pie.
-function renderCartaQr(pl) {
-  let t = CMD.init + CMD.centro + CMD.negritaOn + CMD.grande + (pl.titulo || '') + '\n' + CMD.normal + CMD.negritaOff;
-  t += '\x1b\x21\x00' + (pl.sub || 'Escanea nuestra carta') + '\n\n';
-  if (pl.url) t += qrEscPos(pl.url, 8) + '\n';
-  t += '\x1b\x21\x00' + (pl.url || '') + '\n';
-  t += firma(pl) + CMD.corte;
-  return t;
-}
-
-function firma(pl){
-  const app=(pl&&pl.app)||process.env.LEVO_APP||"";
-  const lema=(pl&&pl.lema)||process.env.LEVO_LEMA||"";
-  let f=CMD.centro;
-  if(app) f+=CMD.negritaOn+String(app).toUpperCase()+"\n"+CMD.negritaOff;
-  if(lema) f+="\x1b\x21\x00"+lema+"\n";
-  f+="\x1b\x21\x00<Levodev.app />\n";
-  return f;
-}
-
-// Copia de un papel que SI salio: sello arriba (cocina no lo toma por pedido nuevo).
-function render(job) {
-  const t = renderBase(job);
-  const pl = job.payload || {};
-  if ((!pl.reimpresion && !pl.atrasada) || !t.startsWith(CMD.init)) return t;
-  let sello = CMD.centro;
-  // [kuti] KUTI marca toda reimpresion con "copia": el sello dice COPIA.
-  if (pl.copia) return CMD.init + sello + CMD.negritaOn + CMD.grande + '*** COPIA ***\n' + CMD.normal + CMD.negritaOff + CMD.izq + t.slice(CMD.init.length);
-  if (pl.atrasada) sello += CMD.negritaOn + CMD.grande + '*** ATRASADA ***\n' + CMD.normal + 'Pedido de las ' + (pl.hora || '?') + '\n' + CMD.negritaOff;
-  if (pl.reimpresion) sello += CMD.negritaOn + '*** REIMPRESION ***\n' + CMD.negritaOff;
-  return CMD.init + sello + CMD.izq + t.slice(CMD.init.length);
-}
-
-function renderCierre(pl) {
-  let t = CMD.init + CMD.centro;
-  if (pl.negocio) t += CMD.negritaOn + String(pl.negocio).toUpperCase() + '\n' + CMD.negritaOff;
-  t += CMD.grande + 'CORTE DE CAJA\n' + CMD.normal + CMD.izq + linea('=');
-  for (const l of pl.lineas) {
-    if (l && l.sep) { t += linea(String(l.sep).slice(0, 1) || '-'); continue; }
-    const der = String((l && l.der) || '');
-    const f = fila(String((l && l.izq) || '').slice(0, Math.max(1, ANCHO - der.length - 1)), der);
-    t += l && l.negrita ? CMD.negritaOn + f + CMD.negritaOff : f;
-  }
-  t += linea('=') + CMD.centro + firma(pl) + CMD.corte;
-  return t;
-}
-
-function renderBase(job) {
-  if (job.tipo === 'CARTA_QR') return renderCartaQr(job.payload);
-  if (job.tipo === 'COMANDA') return renderComanda(job.payload);
-  if (job.tipo === 'PRECUENTA') return renderPrecuenta(job.payload);
-  if (job.tipo === 'TICKET') return renderTicket(job.payload);
-  if (job.tipo === 'CPE') return renderCpe(job.payload);
-  // [kuti] Corte con lineas ya formateadas por la base (KOMO/KIPU: JSON como antes).
-  if (job.tipo === 'CIERRE' && Array.isArray((job.payload || {}).lineas)) return renderCierre(job.payload);
-  if (job.tipo === 'PRUEBA') return CMD.init + CMD.centro + 'PRUEBA LEVOPRINT OK\n' + CMD.corte;
-  return CMD.init + JSON.stringify(job.payload, null, 1) + CMD.corte;
-}
-
-function imprimirRaw(ip, puerto, datos) {
-  return new Promise((resolve, reject) => {
-    const sock = net.createConnection({ host: ip, port: puerto, timeout: 5000 });
-    sock.on('connect', () => sock.end(Buffer.from(datos, 'binary'), resolve));
-    sock.on('timeout', () => { sock.destroy(); reject(new Error(`timeout ${ip}:${puerto}`)); });
-    sock.on('error', reject);
-  });
-}
+// [F2] El render vive en lib/render.js (copia literal, probada byte a byte
+// contra los dorados del index.js original). Aqui solo se elige el ancho.
+function render(job) { return renderPara(ANCHO).render(job); }
 
 // Render SERVIDOR: el ticket se arma en la edge function `<prefijo>-print`
 // y aquí solo se imprime. Así los cambios de formato/firma se despliegan
 // sin re-instalar el agente. Si el endpoint falla, cae al render local.
 // [qa5] pfx = prefijo capturado por la vuelta del ciclo (igual que las RPC).
-async function renderRemoto(job, pfx) {
+async function renderRemoto(job, pfx, topeMs) {
   const r = await fetch(`${URL_BASE}/functions/v1/${pfx || PREFIJO}-print`, {
-    signal: AbortSignal.timeout(8000),
+    signal: AbortSignal.timeout(topeMs || 8000),
     method: 'POST',
     headers: { apikey: ANON, Authorization: `Bearer ${ANON}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ tipo: job.tipo, payload: job.payload, ancho: ANCHO }),
@@ -422,8 +230,21 @@ async function renderRemoto(job, pfx) {
   return Buffer.from(j.esc, 'base64').toString('binary');
 }
 
+// --- [F2] motor comun nube/LAN: diario, colas por impresora, estaciones en disco ---
+const diario = new Diario(path.join(BASE_DIR, 'levoprint-diario.jsonl'));
+const colas = new Colas({ timeoutMs: 25000 });
+const motor = new Motor({
+  diario, colas, renderPara, getAncho: () => ANCHO, modoConsola: MODO_CONSOLA,
+  log: (...a) => console.log(...a), logErr: (...a) => console.error(...a),
+  archivoEstaciones: path.join(BASE_DIR, 'levoprint-estaciones.json'),
+  archivoAsignaciones: path.join(BASE_DIR, 'levoprint-asignaciones.json'),
+});
+const emparejador = new Emparejador(path.join(BASE_DIR, 'levoprint-equipos.json'));
+
+// Estado de la NUBE visto por el ciclo (para /v1/estado y el render de la LAN).
+const nube = { okTs: 0, falloTs: 0, fallos: 0, lanSoportado: null, lanReintentoTs: 0, ultimoLatidoLan: 0 };
+
 // --- ciclo principal ---
-let estaciones = new Map(); // id -> {nombre, ip, puerto}
 let cicloConfig = 0;            // ms de la última lectura de config
 let espera = INTERVALO_MS;
 // [qa4] Control del ciclo: un solo bucle vivo. cicloEnCurso = hay una vuelta
@@ -467,10 +288,48 @@ const guiEstado = {
 
 async function refrescarConfig(dev, pfx) {
   const cfg = await rpc(`${pfx}_agente_config`, { device: dev });
-  estaciones = new Map((cfg.estaciones || []).map((e) => [e.id, e]));
+  motor.ponerEstaciones(cfg.estaciones || [], pfx);
   guiEstado.ultimaSync = Date.now();
-  console.log(`[cfg] ${estaciones.size} estaciones:`,
-    [...estaciones.values()].map((e) => `${e.nombre}@${e.ip || 'SIN-IP'}:${e.puerto}`).join(' · '));
+  console.log(`[cfg] ${motor.estaciones.size} estaciones:`,
+    motor.listaEstaciones().map((e) => `${e.nombre}@${e.via}`).join(' · '));
+}
+
+// [F2] Latido LAN: publica la IP del agente en la red del local (la app la
+// usa para imprimir sin internet), trae transporte/destino de cada estacion
+// (columnas nuevas, plantilla impresion_local) y reporta los jobId impresos
+// por la LAN para que la nube no los vuelva a encolar. Si la RPC no existe
+// todavia en la base, se reintenta cada 10 min sin ensuciar el log.
+function rpcNoExiste(e) {
+  return !!e && (/HTTP 404/.test(e.message) || /PGRST202|Could not find the function/i.test(e.message));
+}
+async function latidoLan(dev, pfx) {
+  if (nube.lanSoportado === false && Date.now() < nube.lanReintentoTs) return;
+  const impresos = diario.sinReportar(200);
+  try {
+    const r = await rpc(`${pfx}_agente_lan`, {
+      device: dev, version: VERSION,
+      lan: LAN_ACTIVO ? { ips: red.ipsLocales().map((x) => x.ip), puerto: PUERTO_LAN } : null,
+      impresos,
+    });
+    nube.lanSoportado = true;
+    nube.ultimoLatidoLan = Date.now();
+    if (r && Array.isArray(r.estaciones)) motor.ponerTransportes(r.estaciones);
+    if (impresos.length) diario.marcarReportados(impresos.map((x) => x.clave));
+  } catch (e) {
+    if (rpcNoExiste(e)) {
+      if (nube.lanSoportado !== false) console.log('[lan] la base aun no tiene ' + pfx + '_agente_lan (plantilla impresion_local): imprimo igual.');
+      nube.lanSoportado = false;
+      nube.lanReintentoTs = Date.now() + 10 * 60000;
+      nube.ultimoLatidoLan = Date.now();
+    } else throw e;
+  }
+}
+
+// Render remoto con tope corto para la LAN: solo si la nube contesto hace
+// poco (sin internet, el render local sale al toque en vez de esperar 8 s).
+async function renderParaLan(job, pfx) {
+  if (Date.now() - nube.okTs > 30000) return null;
+  return renderRemoto(job, pfx, 2500);
 }
 
 async function ciclo() {
@@ -484,6 +343,8 @@ async function ciclo() {
   try {
     if (Date.now() - cicloConfig >= CONFIG_CADA_MS) { await refrescarConfig(dev, pfx); cicloConfig = Date.now(); }
     const r = await rpc(`${pfx}_print_tomar`, { device: dev, limite: 10 });
+    if (nube.fallos) console.log(`[ciclo] la nube volvio tras ${nube.fallos} intentos fallidos.`);
+    nube.okTs = Date.now(); nube.fallos = 0;
     if (guiEstado.desactivado && dev === DEVICE) {
       console.log('[agente] el servidor volvio a aceptar este equipo: retomo la impresion.');
       guiEstado.desactivado = null;
@@ -491,31 +352,33 @@ async function ciclo() {
     // Espera progresiva: con trabajos vuelve a 2 s; vacío, suma 1 s hasta 6 s.
     // (Antes 2 s fijos, las 24 h: 43 mil consultas al día por local.)
     espera = (r.jobs && r.jobs.length) ? INTERVALO_MS : Math.min(INTERVALO_MAX_MS, espera + 1000);
-    for (const job of r.jobs || []) {
-      const est = estaciones.get(job.estacion);
-      guiEstado.imprimiendo = true;
-      try {
-        // Render en el SERVIDOR (formato siempre al día); respaldo local si cae.
-        let texto;
-        try { texto = await renderRemoto(job, pfx); }
-        catch (_) { texto = render(job); }
-        if (MODO_CONSOLA || !est || !est.ip) {
-          console.log(`\n--- JOB ${job.id} (${job.tipo}) -> ${est ? est.nombre : 'SIN ESTACION'} ---`);
-          console.log(texto.replace(/[\x00-\x1f]/g, '').trim());
-          if (!MODO_CONSOLA && (!est || !est.ip)) throw new Error('estacion sin IP');
-        } else {
-          await imprimirRaw(est.ip, est.puerto || 9100, texto);
-          console.log(`[ok] job ${job.id} ${job.tipo} -> ${est.nombre} (${est.ip})`);
-        }
-        await rpc(`${pfx}_print_marcar`, { device: dev, id: job.id, ok: true });
-        guiEstado.ultimoOk = Date.now();
-      } catch (e) {
-        console.error(`[err] job ${job.id}: ${e.message}`);
-        guiEstado.ultimoError = { mensaje: e.message, ts: Date.now() };
-        await rpc(`${pfx}_print_marcar`, { device: dev, id: job.id, ok: false, error: e.message });
-      } finally {
-        guiEstado.imprimiendo = false;
-      }
+    // [F2] Cada trabajo pasa por el motor (diario + cola de SU impresora): los
+    // de impresoras distintas salen a la vez; los de la misma, en orden. Un
+    // jobId que ya salio por la LAN se marca IMPRESO sin otro papel.
+    const jobs = r.jobs || [];
+    if (jobs.length) guiEstado.imprimiendo = true;
+    try {
+      await Promise.all(jobs.map(async (job) => {
+        const clave = claveDeNube(job);
+        const res = await motor.procesar({
+          clave, origen: 'NUBE', estacion: job.estacion, tipo: job.tipo, payload: job.payload,
+          // Render en el SERVIDOR (formato siempre al día); respaldo local si cae.
+          renderTexto: (jb) => renderRemoto({ ...job, payload: jb.payload }, pfx),
+        });
+        if (res.duplicado) console.log(`[dedupe] job ${job.id} (${clave}) ya habia salido: se marca impreso sin otro papel.`);
+        if (res.ok) guiEstado.ultimoOk = Date.now();
+        else guiEstado.ultimoError = { mensaje: res.error, ts: Date.now() };
+        // Si marcar falla (internet se fue justo ahora), el diario evita la
+        // reimpresion cuando la nube lo vuelva a entregar tras la reserva.
+        await rpc(`${pfx}_print_marcar`, res.ok ? { device: dev, id: job.id, ok: true }
+          : { device: dev, id: job.id, ok: false, error: res.error });
+      }));
+    } finally {
+      guiEstado.imprimiendo = false;
+    }
+    // Latido LAN: cada minuto, o cada 15 s mientras haya impresos por reportar.
+    if (Date.now() - nube.ultimoLatidoLan >= (diario.sinReportar(1).length ? 15000 : CONFIG_CADA_MS)) {
+      try { await latidoLan(dev, pfx); } catch (e) { console.error('[lan] latido:', e.message); }
     }
   } catch (e) {
     if (esAgenteInvalido(e)) {
@@ -532,8 +395,12 @@ async function ciclo() {
         cicloConfig = 0; // al volver, lo primero es releer estaciones
       }
     } else {
-      console.error('[ciclo]', e.message);
+      // [F2] Sin internet: un solo aviso por racha y espera creciente hasta
+      // 15 s (la LAN sigue imprimiendo aparte). Antes: un error cada 2 s.
+      nube.fallos += 1; nube.falloTs = Date.now();
+      if (nube.fallos === 1 || nube.fallos % 30 === 0) console.error('[ciclo]', e.message, nube.fallos > 1 ? `(${nube.fallos} intentos)` : '');
       guiEstado.ultimoError = { mensaje: e.message, ts: Date.now() };
+      espera = Math.min(15000, Math.max(INTERVALO_MS, espera + 2000));
     }
   } finally {
     cicloEnCurso = false;
@@ -722,19 +589,22 @@ function responderJson(res, code, obj) {
 function estadoActual() {
   const vinculado = !faltaConfig();
   const sinUrlAnon = faltaUrlAnon();
-  const listaEst = [...estaciones.values()].map((e) => ({
-    id: e.id, nombre: e.nombre, ip: e.ip || null, puerto: e.puerto || 9100,
+  // [F2] ruta efectiva de cada estacion (asignacion local > nube > ip vieja).
+  const listaEst = motor.listaEstaciones().map((e) => ({
+    id: e.id, nombre: e.nombre, ip: e.ip, puerto: e.puerto, via: e.via, cola: e.cola,
+    local: !!motor.asignaciones[e.id],
   }));
   let semaforo = 'sin_vincular';
   if (sinUrlAnon) semaforo = 'sin_configurar';
   else if (!vinculado) semaforo = 'sin_vincular';
   else if (guiEstado.desactivado) semaforo = 'desactivado';
   else if (guiEstado.imprimiendo) semaforo = 'imprimiendo';
+  else if (nube.fallos > 0) semaforo = 'sin_internet';
   else if (guiEstado.ultimoError && (!guiEstado.ultimoOk || guiEstado.ultimoError.ts > guiEstado.ultimoOk)) semaforo = 'sin_impresora';
   else semaforo = 'conectado';
   return {
     ok: true,
-    version: '1.7',
+    version: VERSION,
     modoConsola: MODO_CONSOLA,
     ancho: ANCHO,
     prefijo: PREFIJO,
@@ -746,7 +616,113 @@ function estadoActual() {
     ultimoOk: guiEstado.ultimoOk,
     ultimaSync: guiEstado.ultimaSync,
     desactivado: textoDesactivado(guiEstado.desactivado),
+    // [F2] Solo esta ventana (127.0.0.1) ve el PIN: es la prueba de que quien
+    // empareja tiene acceso fisico a la PC.
+    lan: {
+      activo: LAN_ACTIVO, escuchando: lanEstado.escuchando, error: lanEstado.error,
+      urls: red.ipsLocales().map((x) => `http://${x.ip}:${PUERTO_LAN}`),
+      pin: (emparejador.pinVigente() || {}).valor || null,
+      pinVence: (emparejador.pinVigente() || {}).expira || null,
+      equipos: emparejador.lista(),
+      nubeConoce: nube.lanSoportado,
+    },
   };
+}
+
+// ============================================================
+// [F2] Servidor LAN :9120 — manejadores (contrato en lib/servidorLan.js)
+// ============================================================
+const lanEstado = { escuchando: false, error: null, servidor: null };
+let cacheBusqueda = null;   // { ts, promesa } (buscar es caro: 1 vez cada 10 s)
+
+function buscarImpresoras() {
+  if (cacheBusqueda && Date.now() - cacheBusqueda.ts < 10000) return cacheBusqueda.promesa;
+  const promesa = buscarTodo({}).catch((e) => ({ ok: false, impresoras: [], avisos: [e.message] }));
+  cacheBusqueda = { ts: Date.now(), promesa };
+  return promesa;
+}
+
+// Destino que el agente acepta tocar: TCP solo a IP privada (el agente no es
+// un puente hacia internet) y nombres de Windows razonables.
+function validarDestino(transporte, destino) {
+  if (!transportes.TRANSPORTES.includes(transporte)) return 'transporte invalido';
+  const d = String(destino || '');
+  if (!d || d.length > 120) return 'destino invalido';
+  if (transporte === 'TCP') {
+    const p = transportes.partirIpPuerto(d);
+    if (!p || !red.esIpPrivada(p.ip) || !(p.puerto >= 1 && p.puerto <= 65535)) return 'la impresora de red debe tener una IP del local (192.168.x.x, 10.x.x.x...)';
+  }
+  if (transporte !== 'TCP' && transporte !== 'USB_WIN') return 'ese transporte solo funciona en el APK de Android';
+  return null;
+}
+
+async function imprimirPrueba(ruta, nombre) {
+  const texto = render({ tipo: 'PRUEBA', payload: {} });
+  if (MODO_CONSOLA) { console.log('[prueba] ' + texto.replace(/[\x00-\x1f]/g, '').trim()); return { ok: true, aviso: 'Modo consola: se mostro en consola.' }; }
+  const cola = ruta.transporte + '|' + ruta.destino;
+  await colas.encolar(cola, () => transportes.enviar(ruta, texto, { timeoutMs: 20000 }), 30000);
+  guiEstado.ultimoOk = Date.now();
+  return { ok: true, aviso: 'Prueba enviada a ' + (nombre || transportes.describir(ruta)) + '.' };
+}
+
+const manejadoresLan = {
+  async estado(ctx) {
+    return {
+      ok: true, version: VERSION, prefijo: PREFIJO, ancho: ANCHO, equipo: ctx.equipo.nombre,
+      nube: { enLinea: Date.now() - nube.okTs < 30000, okTs: nube.okTs || null },
+      estaciones: motor.listaEstaciones().map((e) => ({ id: e.id, nombre: e.nombre, via: e.via, transporte: e.ruta ? e.ruta.transporte : null, cola: e.cola })),
+    };
+  },
+  async diario() { return { ok: true, recientes: diario.recientes(50) }; },
+  async impresoras() { return buscarImpresoras(); },
+  async refrescar() { if (!faltaConfig()) despertarCiclo(); return { ok: true }; },
+  async prueba(b) {
+    try {
+      if (b && b.estacion) {
+        const ruta = motor.ruta(b.estacion);
+        if (!ruta) return { ok: false, error: 'SIN_IMPRESORA', mensaje: 'La estacion no tiene impresora asignada.' };
+        return await imprimirPrueba(ruta, (motor.estaciones.get(b.estacion) || {}).nombre);
+      }
+      const err = validarDestino(b && b.transporte, b && b.destino);
+      if (err) return { ok: false, error: 'DESTINO_INVALIDO', mensaje: err };
+      return await imprimirPrueba({ transporte: b.transporte, destino: String(b.destino) });
+    } catch (e) {
+      return { ok: false, error: 'IMPRESION', mensaje: e.message };
+    }
+  },
+  async imprimir(b, ctx) {
+    if (!b || !jobIdValido(b.jobId)) return { ok: false, status: 400, error: 'JOBID_INVALIDO', mensaje: 'Falta jobId (uuid del equipo).' };
+    if (typeof b.tipo !== 'string' || !/^[A-Z_]{3,20}$/.test(b.tipo)) return { ok: false, status: 400, error: 'TIPO_INVALIDO' };
+    if (!b.estacion || !motor.estaciones.has(b.estacion)) return { ok: false, status: 404, error: 'ESTACION_DESCONOCIDA', mensaje: 'LevoPrint no conoce esa estacion (abre LevoPrint con internet una vez).' };
+    const pfx = PREFIJO;
+    const payload = b.payload && typeof b.payload === 'object' && !Array.isArray(b.payload) ? b.payload : {};
+    const r = await motor.procesar({
+      clave: b.jobId, origen: 'LAN', estacion: b.estacion, tipo: b.tipo, payload,
+      renderTexto: (jb) => renderParaLan(jb, pfx),
+    });
+    if (r.ok) { guiEstado.ultimoOk = Date.now(); return { ok: true, jobId: b.jobId, via: r.via, duplicado: !!r.duplicado, equipo: ctx.equipo.nombre }; }
+    guiEstado.ultimoError = { mensaje: r.error, ts: Date.now() };
+    return { ok: false, status: 502, error: 'IMPRESION', mensaje: r.error, via: r.via };
+  },
+};
+
+function iniciarLan() {
+  if (!LAN_ACTIVO) { console.log('[lan] servidor de la red desactivado (LEVO_LAN=0).'); return; }
+  const servidor = crearServidorLan({
+    emparejador, version: VERSION, origenesExtra: ORIGENES_EXTRA, prefijo: () => PREFIJO,
+    manejadores: manejadoresLan, log: (...a) => console.log(...a),
+  });
+  servidor.on('error', (e) => {
+    lanEstado.escuchando = false;
+    lanEstado.error = e.code === 'EADDRINUSE' ? `el puerto ${PUERTO_LAN} esta ocupado (otro LevoPrint abierto?)` : e.message;
+    console.error('[lan] ' + lanEstado.error);
+  });
+  servidor.listen(PUERTO_LAN, '0.0.0.0', () => {
+    lanEstado.escuchando = true; lanEstado.error = null;
+    const urls = red.ipsLocales().map((x) => `http://${x.ip}:${PUERTO_LAN}`);
+    console.log('[lan] impresion por la red del local en ' + (urls.join(' · ') || ('puerto ' + PUERTO_LAN)));
+  });
+  lanEstado.servidor = servidor;
 }
 
 function paginaHtml() {
@@ -780,6 +756,13 @@ function paginaHtml() {
   button:disabled { opacity:.5; cursor:default; }
   .msg { font-size:13px; margin-top:10px; min-height:16px; }
   .msg.err { color:#ff8080; } .msg.ok { color:#5fe08a; }
+  h2 { font-size:15px; margin:22px 0 6px; }
+  .pin { font-size:30px; letter-spacing:8px; font-weight:800; color:#5fe08a; }
+  .chip { display:inline-block; font-size:11px; padding:2px 8px; border-radius:99px; background:#262b36; color:#b9bfcc; margin-left:6px; }
+  .hallazgo { padding:10px 0; border-top:1px solid #262b36; font-size:14px; }
+  .hallazgo .acciones { display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; }
+  select { font: inherit; padding:9px 10px; border-radius:8px; border:1px solid #333a48; background:#0f1115; color:#e8e8ea; max-width:100%; }
+  button.chico { padding:6px 10px; font-size:13px; }
   footer { text-align:center; color:#4c5261; font-size:12px; margin-top:18px; }
 </style>
 </head>
@@ -811,14 +794,39 @@ function paginaHtml() {
     </div>
     <div id="msgPrueba" class="msg"></div>
 
+    <h2>Impresion sin internet (red del local)</h2>
+    <div class="sub" style="margin-bottom:8px">Las cajas y los mozos imprimen directo por la WiFi del local, aunque se caiga el internet.</div>
+    <div id="lanBox" class="muted">-</div>
+    <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;">
+      <button id="btnPin">Emparejar un equipo</button>
+    </div>
+    <div id="pinBox" style="display:none; margin-top:10px">
+      <div class="muted" style="font-size:13px">En la app: Estaciones &gt; LevoPrint en esta red &gt; escribe este PIN (vence en 10 min, sirve una vez):</div>
+      <div id="pinTexto" class="pin">------</div>
+    </div>
+    <div id="equiposBox"></div>
+    <div id="msgLan" class="msg"></div>
+
+    <h2>Buscar impresoras</h2>
+    <div class="sub" style="margin-bottom:8px">Busca impresoras USB de esta PC, de la red (puerto 9100) y Bluetooth instaladas en Windows.</div>
+    <button id="btnBuscar">Buscar impresoras</button>
+    <div id="msgBuscar" class="msg"></div>
+    <div id="hallazgosBox"></div>
+
     <footer>&lt;Levodev.app /&gt;</footer>
   </div>
 
 <script>
+// [F2] Todo POST va con JSON (el servidor de esta ventana rechaza el resto:
+// una pagina de internet no puede mandar ordenes a LevoPrint).
 async function j(url, opts) {
+  opts = opts || {};
+  if (opts.method === 'POST') { opts.headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {}); if (!opts.body) opts.body = '{}'; }
   const r = await fetch(url, opts);
   return r.json().catch(() => ({}));
 }
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+let ultimoEstado = null;
 function fmtTs(ts) { if (!ts) return 'nunca'; const d = new Date(ts); return d.toLocaleTimeString(); }
 
 async function refrescar() {
@@ -834,6 +842,7 @@ async function refrescar() {
     sin_vincular: ['warn', 'Sin vincular — ingresa tu codigo abajo'],
     imprimiendo: ['ok', 'Imprimiendo...'],
     sin_impresora: ['bad', 'Sin impresora / error en el ultimo trabajo'],
+    sin_internet: ['warn', 'Sin internet — sigue imprimiendo lo que llegue por la red del local'],
     conectado: ['ok', 'Conectado — listo para imprimir'],
   };
   let [clase, texto] = mapa[e.semaforo] || ['info', 'Estado desconocido'];
@@ -849,14 +858,92 @@ async function refrescar() {
     box.innerHTML = e.vinculado ? '<div class="fila muted">Sin estaciones asignadas todavia.</div>' : '';
   } else {
     box.innerHTML = e.estaciones.map(function (est) {
-      const ip = est.ip ? (est.ip + ':' + est.puerto) : 'SIN IP — configura la IP en tu consola web';
-      return '<div class="fila"><span>' + est.nombre + '</span><span class="muted">' + ip + '</span></div>';
+      const via = est.via && est.via !== 'sin impresora' ? est.via : 'SIN IMPRESORA — usa Buscar impresoras';
+      const quitar = est.local ? ' <button class="secundario chico" data-desasignar="' + esc(est.id) + '">Quitar</button>' : '';
+      return '<div class="fila"><span>' + esc(est.nombre) + (est.cola ? '<span class="chip">' + est.cola + ' en cola</span>' : '') + '</span><span class="muted">' + esc(via) + quitar + '</span></div>';
     }).join('');
   }
+  ultimoEstado = e;
+  pintarLan(e.lan || {});
 
   document.getElementById('anchoTexto').textContent = e.ancho + ' columnas (' + (e.ancho > 56 ? '80mm' : '58mm') + ')';
   document.getElementById('btnPrueba').disabled = !e.vinculado;
 }
+
+function pintarLan(l) {
+  const box = document.getElementById('lanBox');
+  if (!l.activo) box.textContent = 'Apagado (LEVO_LAN=0 en levoprint.txt).';
+  else if (l.error) box.innerHTML = '<span style="color:#ff8080">' + esc(l.error) + '</span>';
+  else if (!l.escuchando) box.textContent = 'Iniciando...';
+  else box.innerHTML = 'Escuchando en ' + (l.urls && l.urls.length ? l.urls.map(esc).join(' · ') : 'esta PC (sin WiFi/cable detectado)');
+  const pinBox = document.getElementById('pinBox');
+  pinBox.style.display = l.pin ? 'block' : 'none';
+  document.getElementById('pinTexto').textContent = l.pin || '------';
+  const eq = document.getElementById('equiposBox');
+  eq.innerHTML = (l.equipos || []).map(function (q) {
+    return '<div class="fila"><span>' + esc(q.nombre) + ' <span class="muted" style="font-size:12px">' + esc(q.ip || '') + '</span></span><button class="secundario chico" data-quitar="' + esc(q.id) + '">Quitar</button></div>';
+  }).join('');
+}
+
+document.getElementById('btnPin').addEventListener('click', async function () {
+  const r = await j('/lan/pin', { method: 'POST' });
+  const msg = document.getElementById('msgLan');
+  msg.textContent = r && r.ok ? 'PIN listo. Escribelo en el equipo que quieres emparejar.' : 'No se pudo generar el PIN.';
+  msg.className = 'msg ' + (r && r.ok ? 'ok' : 'err');
+  refrescar();
+});
+
+document.addEventListener('click', async function (ev) {
+  const t = ev.target;
+  if (!t || !t.getAttribute) return;
+  const quitar = t.getAttribute('data-quitar');
+  const desasignar = t.getAttribute('data-desasignar');
+  const probar = t.getAttribute('data-probar');
+  const asignar = t.getAttribute('data-asignar');
+  if (quitar) { await j('/lan/quitar', { method: 'POST', body: JSON.stringify({ id: quitar }) }); refrescar(); }
+  if (desasignar) { await j('/desasignar', { method: 'POST', body: JSON.stringify({ estacion: desasignar }) }); refrescar(); }
+  if (probar || asignar) {
+    const h = hallazgos[Number(probar || asignar)];
+    const msg = document.getElementById('msgBuscar');
+    if (!h) return;
+    if (probar) {
+      msg.textContent = 'Imprimiendo prueba en ' + h.nombre + '...'; msg.className = 'msg';
+      const r = await j('/prueba', { method: 'POST', body: JSON.stringify({ transporte: h.transporte, destino: h.destino }) });
+      msg.textContent = r && r.ok ? (r.aviso || 'Prueba enviada.') : ((r && r.mensaje) || 'No se pudo imprimir.');
+      msg.className = 'msg ' + (r && r.ok ? 'ok' : 'err');
+    } else {
+      const sel = document.getElementById('est-' + asignar);
+      const estacion = sel ? sel.value : '';
+      if (!estacion) { msg.textContent = 'Elige la estacion (cocina, barra, caja).'; msg.className = 'msg err'; return; }
+      const r = await j('/asignar', { method: 'POST', body: JSON.stringify({ estacion: estacion, transporte: h.transporte, destino: h.destino }) });
+      msg.textContent = r && r.ok ? ('Listo: ' + h.nombre + ' imprime para ' + (r.estacion || 'la estacion') + '.' + (r.nube ? '' : ' (Se guardo en esta PC; se avisara a la nube cuando haya internet.)')) : ((r && r.mensaje) || 'No se pudo asignar.');
+      msg.className = 'msg ' + (r && r.ok ? 'ok' : 'err');
+      refrescar();
+    }
+  }
+});
+
+let hallazgos = [];
+document.getElementById('btnBuscar').addEventListener('click', async function () {
+  const btn = this;
+  const msg = document.getElementById('msgBuscar');
+  btn.disabled = true; msg.textContent = 'Buscando en USB, red y Bluetooth...'; msg.className = 'msg';
+  const r = await j('/buscar', { method: 'POST' });
+  btn.disabled = false;
+  hallazgos = (r && r.impresoras) || [];
+  const ests = (ultimoEstado && ultimoEstado.estaciones) || [];
+  const opciones = '<option value="">Asignar a...</option>' + ests.map(function (e) { return '<option value="' + esc(e.id) + '">' + esc(e.nombre) + '</option>'; }).join('');
+  msg.textContent = hallazgos.length ? (hallazgos.length + ' encontradas.') : 'No se encontro ninguna. Revisa el cable USB o que la impresora este en la misma red.';
+  if (r && r.avisos && r.avisos.length) msg.textContent += ' (' + r.avisos.join(' · ') + ')';
+  msg.className = 'msg ' + (hallazgos.length ? 'ok' : 'err');
+  document.getElementById('hallazgosBox').innerHTML = hallazgos.map(function (h, i) {
+    return '<div class="hallazgo"><b>' + esc(h.nombre) + '</b><span class="chip">' + esc(h.via) + '</span>' + (h.ticketera ? '<span class="chip">ticketera</span>' : '') +
+      '<div class="muted" style="font-size:12px">' + esc(h.detalle || h.destino) + '</div>' +
+      '<div class="acciones"><button class="secundario chico" data-probar="' + i + '">Probar</button>' +
+      (ests.length ? '<select id="est-' + i + '">' + opciones + '</select><button class="chico" data-asignar="' + i + '">Asignar</button>' : '<span class="muted" style="font-size:12px">Vincula el agente para asignar estaciones.</span>') +
+      '</div></div>';
+  }).join('');
+});
 
 document.getElementById('btnVincular').addEventListener('click', async function () {
   const codigo = document.getElementById('codigo').value.trim();
@@ -894,23 +981,31 @@ setInterval(refrescar, 2500);
 }
 
 async function manejarPrueba(req, res) {
-  if (faltaConfig()) return responderJson(res, 400, { ok: false, error: 'SIN_VINCULAR', mensaje: 'Primero vincula el agente.' });
   const body = await leerBodyJson(req);
-  const est = body.estacion ? estaciones.get(body.estacion) : [...estaciones.values()][0];
+  // [F2] Prueba de un hallazgo de "Buscar impresoras" (aun sin estacion):
+  // no exige estar vinculado.
+  if (body.transporte) {
+    const r = await manejadoresLan.prueba({ transporte: body.transporte, destino: body.destino });
+    if (!r.ok) guiEstado.ultimoError = { mensaje: r.mensaje || r.error, ts: Date.now() };
+    return responderJson(res, r.ok ? 200 : 500, r);
+  }
+  if (faltaConfig()) return responderJson(res, 400, { ok: false, error: 'SIN_VINCULAR', mensaje: 'Primero vincula el agente.' });
+  const est = body.estacion ? motor.estaciones.get(body.estacion) : [...motor.estaciones.values()][0];
+  const ruta = est ? motor.ruta(est.id) : null;
   const texto = render({ tipo: 'PRUEBA', payload: {} });
   try {
-    if (MODO_CONSOLA || !est || !est.ip) {
+    if (MODO_CONSOLA || !est || !ruta) {
       console.log('[prueba] ' + texto.replace(/[\x00-\x1f]/g, '').trim());
       return responderJson(res, 200, {
         ok: true,
         aviso: !est ? 'Sin estaciones asignadas: se mostro en consola.'
-              : !est.ip ? 'Sin IP configurada: se mostro en consola. Configura la IP en tu consola web.'
+              : !ruta ? 'Sin impresora asignada: se mostro en consola. Usa Buscar impresoras.'
               : 'Modo consola: se mostro en consola.',
       });
     }
-    await imprimirRaw(est.ip, est.puerto || 9100, texto);
+    await colas.encolar(ruta.transporte + '|' + ruta.destino, () => transportes.enviar(ruta, texto, { timeoutMs: 20000 }), 30000);
     guiEstado.ultimoOk = Date.now();
-    return responderJson(res, 200, { ok: true, aviso: 'Prueba enviada a ' + est.nombre + ' (' + est.ip + ').' });
+    return responderJson(res, 200, { ok: true, aviso: 'Prueba enviada a ' + est.nombre + ' (' + transportes.describir(ruta) + ').' });
   } catch (e) {
     guiEstado.ultimoError = { mensaje: e.message, ts: Date.now() };
     return responderJson(res, 500, { ok: false, error: 'IMPRESION', mensaje: e.message });
@@ -939,6 +1034,42 @@ async function manejarAncho(req, res) {
   return responderJson(res, 200, { ok: true, ancho: ANCHO, persistido });
 }
 
+// [F2] Asignar desde la ventana (funciona sin internet: queda en esta PC y se
+// avisa a la nube si se puede, con <p>_agente_asignar).
+async function manejarAsignar(req, res) {
+  const b = await leerBodyJson(req);
+  const est = motor.estaciones.get(b.estacion);
+  if (!est) return responderJson(res, 400, { ok: false, error: 'ESTACION_DESCONOCIDA', mensaje: 'Elige una estacion de la lista.' });
+  const err = validarDestino(b.transporte, b.destino);
+  if (err) return responderJson(res, 400, { ok: false, error: 'DESTINO_INVALIDO', mensaje: err });
+  motor.asignar(est.id, b.transporte, String(b.destino));
+  let enNube = false;
+  if (!faltaConfig()) {
+    try {
+      await rpc(`${PREFIJO}_agente_asignar`, { device: DEVICE, estacion: est.id, transporte: b.transporte, destino: String(b.destino) });
+      enNube = true;
+    } catch (e) {
+      if (!rpcNoExiste(e)) console.error('[asignar] no se pudo avisar a la nube:', e.message);
+    }
+  }
+  console.log(`[asignar] ${est.nombre} -> ${transportes.describir({ transporte: b.transporte, destino: b.destino })}${enNube ? '' : ' (solo en esta PC)'}`);
+  return responderJson(res, 200, { ok: true, estacion: est.nombre, nube: enNube });
+}
+
+// Ventana solo para esta PC: Host 127.0.0.1/localhost (anti DNS rebinding),
+// y todo POST con JSON y sin Origin ajeno (una pagina de internet no puede
+// mandar ordenes ni leer el PIN).
+function guiPermitida(req) {
+  const host = red.hostSinPuerto(req.headers.host);
+  if (host !== '127.0.0.1' && host !== 'localhost') return false;
+  if (req.method === 'POST') {
+    if (!/^application\/json/i.test(String(req.headers['content-type'] || ''))) return false;
+    const o = req.headers.origin;
+    if (o && !/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(o)) return false;
+  }
+  return true;
+}
+
 function abrirNavegador(url) {
   try {
     const cmd = process.platform === 'win32' ? `start "" "${url}"`
@@ -953,6 +1084,7 @@ function abrirNavegador(url) {
 function iniciarGui() {
   const servidor = http.createServer((req, res) => {
     const url = (req.url || '/').split('?')[0];
+    if (!guiPermitida(req)) return responderJson(res, 403, { ok: false, error: 'NO_PERMITIDO' });
     if (req.method === 'GET' && url === '/') {
       // [qa5] Abrir la ventana con el equipo desactivado = reintento ya (con
       // tope de uno cada 10 s; /estado, que se sondea, NO despierta).
@@ -967,6 +1099,12 @@ function iniciarGui() {
     if (req.method === 'POST' && url === '/prueba') return void manejarPrueba(req, res);
     if (req.method === 'POST' && url === '/vincular') return void manejarVincular(req, res);
     if (req.method === 'POST' && url === '/ancho') return void manejarAncho(req, res);
+    // [F2] emparejar equipos de la red, buscar y asignar impresoras
+    if (req.method === 'POST' && url === '/lan/pin') { const p = emparejador.nuevoPin(); return responderJson(res, 200, { ok: true, pin: p.valor, expira: p.expira }); }
+    if (req.method === 'POST' && url === '/lan/quitar') return void leerBodyJson(req).then((b) => responderJson(res, 200, { ok: emparejador.quitar(String(b.id || '')) }));
+    if (req.method === 'POST' && url === '/buscar') return void buscarImpresoras().then((r) => responderJson(res, 200, r));
+    if (req.method === 'POST' && url === '/asignar') return void manejarAsignar(req, res).catch((e) => responderJson(res, 500, { ok: false, mensaje: e.message }));
+    if (req.method === 'POST' && url === '/desasignar') return void leerBodyJson(req).then((b) => { motor.desasignar(String(b.estacion || '')); responderJson(res, 200, { ok: true }); });
     responderJson(res, 404, { ok: false, error: 'NO_ENCONTRADO' });
   });
   function intentarPuertos(intento) {
@@ -989,9 +1127,11 @@ function iniciarGui() {
 async function arrancar() {
   await canjearCodigo();
   if (faltaUrlAnon()) { abortarSinConfig(); return; }
-  console.log('LevoPrint agente de impresion v1.7 (ventana visual + emparejamiento por codigo) — <Levodev.app />');
+  console.log(`LevoPrint agente de impresion v${VERSION} (red del local + USB + emparejamiento por codigo) — <Levodev.app />`);
   console.log(MODO_CONSOLA ? 'MODO CONSOLA (sin impresoras reales)' : 'Modo impresión real');
+  if (motor.estaciones.size) console.log(`[cfg] ${motor.estaciones.size} estaciones guardadas en esta PC (sirven aunque no haya internet).`);
   iniciarGui();
+  iniciarLan();
   if (!faltaConfig()) ciclo();
   else console.log('Falta vincular: abre la ventana de LevoPrint (o entra tu codigo por /vincular) para terminar la configuracion.');
 }
