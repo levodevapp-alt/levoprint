@@ -50,11 +50,17 @@ test('F2 de punta a punta: LAN sin nube, dedupe al volver, simultaneos, atascada
   const env = {
     LEVO_DIR: dir, LEVO_URL: nube.url, LEVO_ANON: 'anon-falsa', LEVO_DEVICE: uuid(), LEVO_PREFIJO: 'komo',
     LEVO_SINVENTANA: '1', LEVO_PUERTO_GUI: String(PG), LEVO_PUERTO_LAN: String(PL), LEVO_ORIGENES: ORIGEN,
+    LEVO_TCP_PRUEBAS: '1', LEVO_LATIDO_MS: '1000',
   };
   let agente = arrancarAgente(env);
   t.after(async () => { await parar(agente); await cocina.cerrar(); await barra.cerrar(); await nube.cerrar(); fs.rmSync(dir, { recursive: true, force: true }); });
 
+  // [QA MEDIO-3] Sin PIN ni equipos emparejados, el 9120 NO esta abierto.
+  assert.ok(await hasta(async () => (await pedir(PG, 'GET', '/estado').catch(() => ({}))).status === 200, 15000), 'la ventana no levanto:\n' + agente.salida);
+  assert.equal(await pedir(PL, 'GET', '/v1/hola').then(() => 'abierto', () => 'cerrado'), 'cerrado', 'el 9120 no se abre solo');
+  const pinInicial = (await pedir(PG, 'POST', '/lan/pin', { cuerpo: {} })).json.pin;   // "Activar impresion sin internet"
   assert.ok(await hasta(async () => (await pedir(PL, 'GET', '/v1/hola').catch(() => ({}))).status === 200, 15000), 'el servidor LAN no levanto:\n' + agente.salida);
+  assert.equal((await pedir(PL, 'GET', '/v1/hola')).json.prefijo, undefined, '/v1/hola no dice de que app es');
   assert.ok(await hasta(() => nube.estado.llamadas.some((u) => u.endsWith('komo_print_tomar')), 10000), 'el ciclo no hablo con la nube');
 
   // ---- 0) la ventana local sirve una pagina con JS valido ----
@@ -78,7 +84,7 @@ test('F2 de punta a punta: LAN sin nube, dedupe al volver, simultaneos, atascada
   assert.equal(pre.status, 204);
   assert.equal(pre.headers['access-control-allow-origin'], ORIGEN);
   assert.equal(pre.headers['access-control-allow-private-network'], 'true');
-  const pin = (await pedir(PG, 'POST', '/lan/pin', { cuerpo: {} })).json.pin;
+  const pin = pinInicial;
   assert.match(pin, /^\d{6}$/);
   const par = await pedir(PL, 'POST', '/v1/emparejar', { cuerpo: { pin, nombre: 'Caja 1' }, cabeceras: { Origin: ORIGEN } });
   assert.equal(par.status, 200, JSON.stringify(par.json));
@@ -132,7 +138,7 @@ test('F2 de punta a punta: LAN sin nube, dedupe al volver, simultaneos, atascada
   assert.ok(await hasta(() => nube.estado.latidosLan.some((l) => (l.impresos || []).length), 20000), 'falta el latido LAN con impresos');
   const reportados = new Set(nube.estado.latidosLan.flatMap((l) => (l.impresos || []).map((x) => x.clave)));
   for (const j of [J1, J2, J3]) assert.ok(reportados.has(j), 'reportado ' + j);
-  const lat = nube.estado.latidosLan[0];
+  const lat = nube.estado.latidosLan.filter((l) => l.lan).pop();   // antes del PIN el 9120 estaba cerrado: lan null
   assert.equal(lat.lan.puerto, PL);
   assert.equal(lat.version, '1.8.0');
 
@@ -145,6 +151,44 @@ test('F2 de punta a punta: LAN sin nube, dedupe al volver, simultaneos, atascada
   const ra = await atascada;
   assert.equal(ra.status, 502);
   assert.equal(ra.json.ok, false);
+  assert.doesNotMatch(ra.json.mensaje, /10\.255|timeout|ECONN/i, 'la app no ve el error crudo de la red');
+
+  // ---- 5b) [QA ALTO-1] asignar en la PC sin internet, avisar al volver, y que la nube vuelva a mandar ----
+  nube.estado.caida = true;
+  const asig = await pedir(PG, 'POST', '/asignar', { cuerpo: { estacion: EST_COCINA, transporte: 'TCP', destino: `127.0.0.1:${barra.puerto}` } });
+  assert.equal(asig.json.ok, true); assert.equal(asig.json.nube, false);
+  let est5 = (await pedir(PL, 'GET', '/v1/estado', { cabeceras: auth })).json.estaciones.find((e) => e.id === EST_COCINA);
+  assert.deepEqual([est5.fuente, est5.pendienteNube], ['local', true]);
+  const barraAntes = barra.papeles.length;
+  const ra1 = await pedir(PL, 'POST', '/v1/imprimir', { cuerpo: { jobId: uuid(), tipo: 'COMANDA', estacion: EST_COCINA, payload: { mesa: '20', items: [] } }, cabeceras: auth });
+  assert.equal(ra1.json.ok, true);
+  assert.ok(await hasta(() => barra.papeles.length === barraAntes + 1, 3000), 'la asignacion local manda aun sin internet');
+  nube.estado.caida = false;
+  assert.ok(await hasta(() => nube.estado.asignados.some((a) => a.estacion === EST_COCINA), 25000), 'al volver internet se avisa la asignacion');
+  nube.estado.transportes = [{ id: EST_COCINA, transporte: 'TCP', destino: `127.0.0.1:${barra.puerto}` }];   // la nube ya la guardo
+  assert.ok(await hasta(async () => {
+    const e = (await pedir(PL, 'GET', '/v1/estado', { cabeceras: auth })).json.estaciones.find((x) => x.id === EST_COCINA);
+    return e.fuente === 'nube';
+  }, 10000), 'confirmada en la nube, la asignacion local se borra');
+  // el dueno la cambia desde la app (vuelve a la impresora de cocina): manda la nube
+  nube.estado.transportes = [{ id: EST_COCINA, transporte: 'TCP', destino: `127.0.0.1:${cocina.puerto}` }];
+  assert.ok(await hasta(async () => {
+    const e = (await pedir(PL, 'GET', '/v1/estado', { cabeceras: auth })).json.estaciones.find((x) => x.id === EST_COCINA);
+    return e.via === `TCP 127.0.0.1:${cocina.puerto}`;
+  }, 10000), 'el cambio de la nube llega al agente');
+  const cocinaAntes = cocina.papeles.length; const barraAntes2 = barra.papeles.length;
+  const ra2 = await pedir(PL, 'POST', '/v1/imprimir', { cuerpo: { jobId: uuid(), tipo: 'COMANDA', estacion: EST_COCINA, payload: { mesa: '21', items: [] } }, cabeceras: auth });
+  assert.equal(ra2.json.ok, true);
+  assert.ok(await hasta(() => cocina.papeles.length === cocinaAntes + 1, 3000), 'el ticket va a la impresora NUEVA de la nube');
+  assert.equal(barra.papeles.length, barraAntes2);
+  nube.estado.transportes = [];
+
+  // ---- 5c) [QA MEDIO-6] desactivado en la consola -> la LAN responde 423 ----
+  nube.estado.invalido = true;
+  assert.ok(await hasta(async () => (await pedir(PL, 'GET', '/v1/estado', { cabeceras: auth })).status === 423, 20000), 'con AGENTE_INVALIDO la LAN no imprime');
+  assert.equal((await pedir(PL, 'GET', '/v1/hola')).status, 200);
+  nube.estado.invalido = false;
+  assert.ok(await hasta(async () => (await pedir(PL, 'GET', '/v1/estado', { cabeceras: auth })).status === 200, 60000), 'reactivado, vuelve a atender');
 
   // ---- 6) reinicio SIN internet: estaciones y diario sobreviven ----
   await parar(agente);
@@ -159,4 +203,10 @@ test('F2 de punta a punta: LAN sin nube, dedupe al volver, simultaneos, atascada
   assert.equal(r7.json.ok, true, 'imprime sin internet con las estaciones guardadas: ' + JSON.stringify(r7.json));
   assert.ok(await hasta(() => cocina.papeles.length === antes + 1, 3000));
   assert.match(agente.salida, /estaciones guardadas en esta PC/);
+
+  // ---- 7) [QA BAJO] una sola instancia por carpeta ----
+  const segundo = arrancarAgente({ ...env, LEVO_PUERTO_GUI: String(await puertoLibre()), LEVO_PUERTO_LAN: String(await puertoLibre()) });
+  const codigo = await new Promise((r) => segundo.once('exit', r));
+  assert.equal(codigo, 1);
+  assert.match(segundo.salida, /ya esta abierto/);
 });

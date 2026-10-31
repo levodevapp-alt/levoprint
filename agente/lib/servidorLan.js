@@ -6,7 +6,7 @@
 // comandas vencidas). Este servidor recibe la impresion directo por la LAN.
 //
 // Contrato (JSON; todo menos /v1/hola y /v1/emparejar exige token):
-//   GET  /v1/hola        -> { levoprint, version, prefijo } (deteccion; sin datos)
+//   GET  /v1/hola        -> { levoprint, version } (deteccion; sin datos del negocio)
 //   POST /v1/emparejar   { pin, nombre } -> { token }   (PIN de la ventana)
 //   GET  /v1/estado      -> estaciones con su ruta, nube, colas, version
 //   POST /v1/imprimir    { jobId, tipo, payload, estacion } -> { ok, via, duplicado? }
@@ -19,9 +19,19 @@
 //   · solo IP de origen privada; Host IP literal/localhost/.local (anti DNS
 //     rebinding); CORS solo para *.levodev.app (+ LEVO_ORIGENES); nunca "*";
 //   · preflight con Access-Control-Allow-Private-Network (Chrome LNA/PNA);
-//   · token por equipo (lib/emparejar). Aqui NO hay certificados ni llaves
-//     del cliente: el agente solo imprime papel; el CPE se firma en la nube.
-//   · cuerpo maximo 256 KB.
+//   · token por equipo (lib/emparejar), vence a los 90 dias sin uso. Aqui NO
+//     hay certificados ni llaves del cliente: el agente solo imprime papel;
+//     el CPE se firma en la nube.
+//   · cuerpo maximo 256 KB; 10 s para las cabeceras y 20 s por pedido.
+//   · [QA F2 MEDIO-6] Si la consola desactivo este LevoPrint (la nube dice
+//     AGENTE_INVALIDO), todo menos /v1/hola responde 423: un equipo dado de
+//     baja no sigue imprimiendo por la puerta de atras.
+// RIESGO ACEPTADO (documentado): HTTP en claro dentro de la red del local.
+// Un equipo en la misma WiFi podria leer un papel o el token en transito.
+// Mitigaciones: solo red privada, token por equipo que vence y se puede
+// quitar, y los papeles no llevan secretos (el CPE ya es publico en SUNAT).
+// HTTPS local exigiria un certificado por PC que los navegadores no aceptan
+// sin instalarlo a mano.
 // ============================================================
 'use strict';
 const http = require('http');
@@ -89,7 +99,10 @@ function crearServidorLan(op) {
 
     try {
       if (req.method === 'GET' && url === '/v1/hola') {
-        return responder(req, res, 200, { ok: true, levoprint: true, version, prefijo: op.prefijo ? op.prefijo() : null });
+        return responder(req, res, 200, { ok: true, levoprint: true, version });
+      }
+      if (op.bloqueado && op.bloqueado()) {
+        return responder(req, res, 423, { ok: false, error: 'AGENTE_DESACTIVADO', mensaje: 'Este LevoPrint esta desactivado en la consola. Activalo o vincula otro.' });
       }
       if (req.method === 'POST' && url === '/v1/emparejar') {
         const b = await leerCuerpo(req);
@@ -120,7 +133,7 @@ function crearServidorLan(op) {
     }
   });
   servidor.headersTimeout = 10000;
-  servidor.requestTimeout = 60000;
+  servidor.requestTimeout = 20000;
   return servidor;
 }
 

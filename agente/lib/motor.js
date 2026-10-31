@@ -17,6 +17,7 @@
 'use strict';
 const fs = require('fs');
 const transportes = require('./transportes');
+const { claveDe } = require('./diario');
 
 class Motor {
   constructor(op) {
@@ -69,23 +70,64 @@ class Motor {
   }
 
   // transporte/destino desde <p>_agente_lan (columnas nuevas de estaciones).
+  // [QA F2 ALTO-1] Una asignacion LOCAL ya confirmada por la nube no puede
+  // mandar para siempre: si la nube trae otra cosa (el dueno la cambio desde
+  // la app), la local se descarta y manda la nube. Solo sobrevive la que
+  // todavia esta pendienteNube (se hizo sin internet y aun no se aviso).
   ponerTransportes(lista) {
     let cambio = false;
+    let cambioAsig = false;
     for (const t of lista || []) {
       const e = this.estaciones.get(t.id);
       if (!e) continue;
-      if (e.transporte !== (t.transporte || null) || e.destino !== (t.destino || null)) {
-        e.transporte = t.transporte || null; e.destino = t.destino || null; cambio = true;
+      const tr = t.transporte || null; const de = t.destino || null;
+      if (e.transporte !== tr || e.destino !== de) { e.transporte = tr; e.destino = de; cambio = true; }
+      const a = this.asignaciones[t.id];
+      if (a && !a.pendienteNube && (a.transporte !== tr || a.destino !== de)) {
+        delete this.asignaciones[t.id];
+        cambioAsig = true;
+        this.log(`[asignar] ${e.nombre}: la nube trae otra impresora (${tr ? transportes.describir({ transporte: tr, destino: de }) : 'la de siempre'}); se deja la asignacion de esta PC.`);
       }
     }
     if (cambio) this.guardarJson(this.archivoEstaciones, { prefijo: this.estacionesPrefijo, ts: this.estacionesTs, estaciones: [...this.estaciones.values()] });
+    if (cambioAsig) this.guardarJson(this.archivoAsignaciones, this.asignaciones);
   }
 
-  asignar(estacionId, transporte, destino) {
-    if (!transportes.TRANSPORTES.includes(transporte)) throw new Error('transporte invalido');
-    if (!destino || String(destino).length > 120) throw new Error('destino invalido');
-    this.asignaciones[estacionId] = { transporte, destino: String(destino), ts: Date.now() };
+  // Asignacion hecha en esta PC (asistente Buscar impresoras). Nace
+  // pendienteNube: manda hasta que la nube la confirme (confirmarNube) y,
+  // mientras tanto, el latido reintenta avisarla.
+  asignar(estacionId, transporte, destino, opciones = {}) {
+    const problema = transportes.validarDestino(transporte, destino);
+    if (problema) throw new Error(problema);
+    this.asignaciones[estacionId] = { transporte, destino: String(destino), ts: Date.now(), pendienteNube: opciones.pendienteNube !== false };
     this.guardarJson(this.archivoAsignaciones, this.asignaciones);
+  }
+
+  // La nube ya la tiene: se copia a la estacion y se BORRA la local (desde
+  // ahora manda la nube; si el dueno la cambia en la app, se respeta).
+  confirmarNube(estacionId) {
+    const a = this.asignaciones[estacionId];
+    if (!a) return;
+    const e = this.estaciones.get(estacionId);
+    if (e) {
+      e.transporte = a.transporte; e.destino = a.destino;
+      this.guardarJson(this.archivoEstaciones, { prefijo: this.estacionesPrefijo, ts: this.estacionesTs, estaciones: [...this.estaciones.values()] });
+    }
+    delete this.asignaciones[estacionId];
+    this.guardarJson(this.archivoAsignaciones, this.asignaciones);
+  }
+
+  // La base no tiene <p>_agente_asignar (plantilla sin aplicar): la local
+  // queda como unica fuente, ya sin reintentos.
+  quedarSoloLocal(estacionId) {
+    const a = this.asignaciones[estacionId];
+    if (!a || !a.pendienteNube) return;
+    a.pendienteNube = false;
+    this.guardarJson(this.archivoAsignaciones, this.asignaciones);
+  }
+
+  pendientesNube() {
+    return Object.entries(this.asignaciones).filter(([, a]) => a && a.pendienteNube).map(([id, a]) => ({ estacion: id, ...a }));
   }
 
   desasignar(estacionId) {
@@ -100,30 +142,39 @@ class Motor {
   listaEstaciones() {
     return [...this.estaciones.values()].map((e) => {
       const r = this.ruta(e.id);
-      return { id: e.id, nombre: e.nombre, ip: e.ip || null, puerto: e.puerto || 9100, ruta: r, via: transportes.describir(r), cola: r ? this.colas.enEspera(r.transporte + '|' + r.destino) : 0 };
+      return {
+        id: e.id, nombre: e.nombre, ip: e.ip || null, puerto: e.puerto || 9100, ruta: r, via: transportes.describir(r),
+        fuente: r ? r.fuente : null, pendienteNube: !!(r && r.pendienteNube),
+        cola: r ? this.colas.enEspera(r.transporte + '|' + r.destino) : 0,
+      };
     });
   }
 
-  // Imprime UN trabajo con dedupe. j: { clave, origen: 'NUBE'|'LAN', estacion,
+  // Imprime UN papel con dedupe. j: { jobId, origen: 'NUBE'|'LAN', estacion,
   // tipo, payload, renderTexto?: async (job) => string }.
-  // Devuelve { ok, duplicado?, via, error? }. Nunca lanza.
+  // Clave del diario = jobId|estacion (un jobId por papel y estacion).
+  // Devuelve { ok, duplicado?, via, error?, errorInterno?, dudoso? }. Nunca lanza.
   procesar(j) {
-    const clave = j.clave;
+    const clave = claveDe(j.jobId, j.estacion);
     if (this.enCurso.has(clave)) return this.enCurso.get(clave).then((r) => ({ ...r, duplicado: true }));
-    const p = this._procesar(j).finally(() => this.enCurso.delete(clave));
+    const p = this._procesar({ ...j, clave }).finally(() => this.enCurso.delete(clave));
     this.enCurso.set(clave, p);
     return p;
   }
 
   async _procesar(j) {
     const previo = this.diario.get(j.clave);
-    if (previo && previo.e === 'IMPRESO') return { ok: true, duplicado: true, via: previo.via || null };
+    let payload = j.payload || {};
+    // [QA F2 MEDIO-2] Una reimpresion PEDIDA (payload.reimpresion) no se calla
+    // aunque ese papel ya haya salido: es justamente lo que se pidio.
+    const pideReimpresion = payload.reimpresion === true;
+    if (previo && previo.e === 'IMPRESO' && !pideReimpresion) return { ok: true, duplicado: true, via: previo.via || null };
     const est = this.estaciones.get(j.estacion);
     const ruta = this.ruta(j.estacion);
-    let payload = j.payload || {};
-    // DUDOSO: el agente se cerro a mitad; si vuelve, sale con sello (no como pedido nuevo).
+    // DUDOSO: no se sabe si salio; si vuelve, sale con sello (no como pedido nuevo).
     if (previo && previo.e === 'DUDOSO' && !payload.reimpresion) payload = { ...payload, reimpresion: true };
     const job = { tipo: j.tipo, payload };
+    const base = { o: j.origen, j: j.jobId, est: j.estacion, t: j.tipo };
 
     if (this.modoConsola || !ruta) {
       const texto = this.renderPara(this.getAncho()).render(job);
@@ -131,15 +182,16 @@ class Motor {
       this.log(texto.replace(/[\x00-\x1f]/g, '').trim());
       if (!this.modoConsola) {
         const error = !est ? 'estacion desconocida' : 'estacion sin impresora asignada';
-        if (j.origen === 'LAN') this.diario.poner(j.clave, { e: 'ERROR', o: j.origen, est: j.estacion, t: j.tipo, err: error });
+        if (j.origen === 'LAN') this.diario.poner(j.clave, { ...base, e: 'ERROR', err: error });
         return { ok: false, error, via: null };
       }
-      this.diario.poner(j.clave, { e: 'IMPRESO', o: j.origen, est: j.estacion, t: j.tipo, via: 'consola' });
+      this.diario.poner(j.clave, { ...base, e: 'IMPRESO', via: 'consola' });
       return { ok: true, via: 'consola' };
     }
 
     const colaKey = ruta.transporte + '|' + ruta.destino;
     const via = transportes.describir(ruta);
+    let enviando = false;
     try {
       await this.colas.encolar(colaKey, async () => {
         // Render dentro de la cola (formato al dia) y ANTES de marcar IMPRIMIENDO.
@@ -148,16 +200,21 @@ class Motor {
           try { texto = await j.renderTexto(job); } catch (_) { texto = null; }
         }
         if (!texto) texto = this.renderPara(this.getAncho()).render(job);
-        this.diario.poner(j.clave, { e: 'IMPRIMIENDO', o: j.origen, est: j.estacion, t: j.tipo });
+        this.diario.poner(j.clave, { ...base, e: 'IMPRIMIENDO' });
+        enviando = true;
         await this.enviar(ruta, texto, { timeoutMs: ruta.transporte === 'USB_WIN' ? 25000 : 10000 });
       }, ruta.transporte === 'USB_WIN' ? 35000 : 20000);
       this.diario.poner(j.clave, { e: 'IMPRESO', via });
       this.log(`[ok] ${j.origen === 'LAN' ? 'LAN' : 'nube'} ${j.clave} ${j.tipo} -> ${est ? est.nombre : j.estacion} (${via})`);
       return { ok: true, via };
     } catch (e) {
-      this.diario.poner(j.clave, { e: 'ERROR', o: j.origen, est: j.estacion, t: j.tipo, err: String(e.message).slice(0, 200) });
-      this.logErr(`[err] ${j.origen === 'LAN' ? 'LAN' : 'nube'} ${j.clave}: ${e.message}`);
-      return { ok: false, error: e.message, via };
+      // [QA F2 MEDIO-1] Si ya se empezo a mandar y no es seguro que nada
+      // salio (conexion rechazada, impresora que no abrio), queda DUDOSO: el
+      // reintento sale con sello REIMPRESION.
+      const dudoso = enviando && !e.sinEnviar;
+      this.diario.poner(j.clave, { ...base, e: dudoso ? 'DUDOSO' : 'ERROR', err: String(e.message).slice(0, 200) });
+      this.logErr(`[err] ${j.origen === 'LAN' ? 'LAN' : 'nube'} ${j.clave}${dudoso ? ' (DUDOSO)' : ''}: ${e.message}`);
+      return { ok: false, error: transportes.mensajePublico(e), errorInterno: e.message, via, dudoso };
     }
   }
 }

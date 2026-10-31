@@ -35,6 +35,8 @@ function nubeFalsa({ prefijo = 'komo', estaciones = [] } = {}) {
   const conexiones = new Set();
   const server = http.createServer((req, res) => {
     if (estado.caida) { req.socket.destroy(); return; }
+    // estado.invalido: la consola desactivo el agente (PostgREST 400 AGENTE_INVALIDO).
+    if (estado.invalido && req.url.startsWith('/rest/v1/rpc/')) { req.resume(); res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ message: 'AGENTE_INVALIDO' })); }
     let cuerpo = '';
     req.on('data', (c) => { cuerpo += c; });
     req.on('end', () => {

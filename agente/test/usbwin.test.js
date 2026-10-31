@@ -18,6 +18,15 @@ const { buscarTodo } = require('../lib/buscar');
 
 const correr = process.platform === 'win32' && process.env.LP_USB === '1';
 
+test('Windows: los scripts son .ps1 junto a LevoPrint y el hijo recibe un entorno minimo', { skip: !correr }, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lp-ps-'));
+  usbwin.configurar(dir);
+  assert.ok(fs.existsSync(path.join(dir, 'levoprint-raw.ps1')) && fs.existsSync(path.join(dir, 'levoprint-listar.ps1')));
+  const env = usbwin.entornoMinimo({ LP_X: '1' });
+  assert.ok(!('LEVO_ANON' in env) && !('LEVO_DEVICE' in env) && env.LP_X === '1' && env.PATH);
+  assert.ok((await usbwin.listar()).length >= 1, 'corre desde la carpeta configurada');
+});
+
 test('Windows: listar impresoras (Get-Printer) y clasificarlas', { skip: !correr }, async () => {
   const lista = await usbwin.listar();
   assert.ok(Array.isArray(lista) && lista.length >= 1, 'Windows siempre trae al menos una');
@@ -35,7 +44,10 @@ test('Windows: RAW por el spooler a Microsoft Print to PDF', { skip: !correr }, 
 });
 
 test('Windows: impresora inexistente da un error claro', { skip: !correr }, async () => {
-  await assert.rejects(usbwin.imprimir('No Existe LevoPrint 123', Buffer.from('x')), /OpenPrinter|1801|no es v|invalid/i);
+  // [QA MEDIO-1] no se pudo abrir la impresora: seguro que no salio nada (sinEnviar)
+  await assert.rejects(usbwin.imprimir('No Existe LevoPrint 123', Buffer.from('x')), (e) => /OpenPrinter|1801|no es v|invalid/i.test(e.message) && e.sinEnviar === true);
+  // [QA MEDIO-5] el .bin temporal se borra aunque falle
+  assert.deepEqual(fs.readdirSync(usbwin.DIR_TMP).filter((f) => f.endsWith('.bin')), []);
 });
 
 test('Windows: el asistente no ofrece impresoras virtuales (PDF, fax)', { skip: !correr }, async () => {

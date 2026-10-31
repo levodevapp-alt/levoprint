@@ -1,21 +1,26 @@
 // ============================================================
-// LevoPrint · diario local de trabajos (F2, dedupe por jobId)
+// LevoPrint · diario local de trabajos (F2, dedupe por jobId|estacion)
 // ------------------------------------------------------------
 // PORQUE: con el internet caido la comanda llega por la LAN y sale; al
 // volver la red, la MISMA comanda llega desde la nube (la bandeja del mozo
 // la sube). Sin diario, la cocina la recibe dos veces (PLAN F2 §4.2).
 //
-// Clave = jobId que genera el CLIENTE (uuid). Por la nube viaja en
+// Clave = "<jobId>|<estacion>" [QA F2 MEDIO-2]. Regla del contrato: UN jobId
+// POR PAPEL Y ESTACION. Una venta que saca comanda en cocina y en barra puede
+// usar el mismo jobId: son dos papeles distintos (dos claves) y ninguno tapa
+// al otro. El jobId lo genera el CLIENTE (uuid); por la nube viaja en
 // payload.jobId (o job.clave si la RPC lo devuelve). Un trabajo de la nube
 // SIN jobId usa "nube:<id>" (solo protege contra un marcar fallido).
 //
 // Estados:
-//   IMPRIMIENDO  bytes en camino a la impresora (se escribe ANTES de enviar)
+//   IMPRIMIENDO  bytes en camino a la impresora (se escribe ANTES de enviar,
+//                con fsync: es el que importa si se corta la luz)
 //   IMPRESO      la impresora acepto los bytes
-//   ERROR        fallo; se puede reintentar con el mismo jobId
-//   DUDOSO       el agente se cerro con el trabajo IMPRIMIENDO: no se sabe si
-//                salio. Si vuelve a llegar, se imprime CON sello REIMPRESION
-//                (cocina no lo toma por pedido nuevo) en vez de callarlo.
+//   ERROR        fallo SIN haber mandado nada; se puede reintentar tal cual
+//   DUDOSO       no se sabe si salio: el agente se cerro con el trabajo
+//                IMPRIMIENDO, o fallo a mitad del envio [QA F2 MEDIO-1]. Si
+//                vuelve a llegar, se imprime CON sello REIMPRESION (cocina no
+//                lo toma por pedido nuevo) en vez de callarlo.
 //
 // Archivo JSONL (una linea por cambio, append = barato y resistente a cortes
 // de luz: una linea a medias se ignora al leer). Se compacta al arrancar y
@@ -26,6 +31,10 @@
 const fs = require('fs');
 
 const DIA_MS = 86400000;
+
+function claveDe(jobId, estacion) {
+  return String(jobId) + '|' + String(estacion || '-');
+}
 
 class Diario {
   constructor(archivo, opciones = {}) {
@@ -68,12 +77,18 @@ class Diario {
   estado(k) { const e = this.get(k); return e ? e.e : null; }
 
   // Cambia el estado y lo deja en disco al toque (antes de mandar bytes).
+  // [QA F2 BAJO] IMPRIMIENDO va con fsync: si se corta la luz justo despues,
+  // al volver se sabe que ese papel quedo DUDOSO.
   poner(k, datos) {
     const prev = this.mapa.get(k) || { k };
     const e = { ...prev, ...datos, k, ts: Date.now() };
     this.mapa.set(k, e);
     try {
-      fs.appendFileSync(this.archivo, JSON.stringify(e) + '\n');
+      const fd = fs.openSync(this.archivo, 'a');
+      try {
+        fs.writeSync(fd, JSON.stringify(e) + '\n');
+        if (e.e === 'IMPRIMIENDO' && datos.e === 'IMPRIMIENDO') fs.fsyncSync(fd);
+      } finally { fs.closeSync(fd); }
       if (fs.statSync(this.archivo).size > this.maxBytes) this.compactar();
     } catch { /* disco lleno: sigue en memoria */ }
     return e;
@@ -83,7 +98,9 @@ class Diario {
   sinReportar(max = 200) {
     const out = [];
     for (const e of this.mapa.values()) {
-      if (e.e === 'IMPRESO' && e.o === 'LAN' && !e.r && !String(e.k).startsWith('nube:')) out.push({ clave: e.k, estacion: e.est || null, ts: new Date(e.ts).toISOString() });
+      if (e.e === 'IMPRESO' && e.o === 'LAN' && !e.r && e.j && e.est && !String(e.j).startsWith('nube:')) {
+        out.push({ k: e.k, clave: e.j, estacion: e.est, ts: new Date(e.ts).toISOString() });
+      }
       if (out.length >= max) break;
     }
     return out;
@@ -98,16 +115,21 @@ class Diario {
 
   recientes(n = 50) {
     return [...this.mapa.values()].sort((a, b) => b.ts - a.ts).slice(0, n)
-      .map((e) => ({ jobId: e.k, estado: e.e, origen: e.o || null, estacion: e.est || null, tipo: e.t || null, ts: e.ts }));
+      .map((e) => ({ jobId: e.j || e.k, estado: e.e, origen: e.o || null, estacion: e.est || null, tipo: e.t || null, ts: e.ts }));
   }
 }
 
-// Clave de dedupe de un trabajo de la nube.
-function claveDeNube(job) {
+// jobId de un trabajo de la nube (o "nube:<id>" si no trae).
+function jobIdDeNube(job) {
   const pl = (job && job.payload) || {};
   const c = (job && job.clave) || pl.jobId;
   if (typeof c === 'string' && c.trim()) return c.trim().slice(0, 80);
   return 'nube:' + String(job && job.id);
+}
+
+// Clave de dedupe de un trabajo de la nube: jobId|estacion.
+function claveDeNube(job) {
+  return claveDe(jobIdDeNube(job), job && job.estacion);
 }
 
 // jobId valido del cliente: uuid o texto corto sin espacios (8 a 80).
@@ -115,4 +137,4 @@ function jobIdValido(id) {
   return typeof id === 'string' && /^[A-Za-z0-9:_\-.]{8,80}$/.test(id) && !id.startsWith('nube:');
 }
 
-module.exports = { Diario, claveDeNube, jobIdValido };
+module.exports = { Diario, claveDe, claveDeNube, jobIdDeNube, jobIdValido };

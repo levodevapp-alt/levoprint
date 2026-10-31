@@ -6,7 +6,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const red = require('../lib/red');
-const { Diario, claveDeNube, jobIdValido } = require('../lib/diario');
+const { Diario, claveDe, claveDeNube, jobIdDeNube, jobIdValido } = require('../lib/diario');
+const { Motor } = require('../lib/motor');
+const { renderPara } = require('../lib/render');
 const { Colas } = require('../lib/colas');
 const { Emparejador } = require('../lib/emparejar');
 const mdns = require('../lib/mdns');
@@ -36,18 +38,20 @@ test('red: IP privada, host y origen', () => {
 test('diario: dedupe, persistencia, DUDOSO y reporte', () => {
   const d = tmp(); const f = path.join(d, 'diario.jsonl');
   const a = new Diario(f);
-  a.poner('job-aaaa-1', { e: 'IMPRIMIENDO', o: 'LAN', est: 'e1' });
-  a.poner('job-aaaa-1', { e: 'IMPRESO' });
-  a.poner('job-bbbb-2', { e: 'IMPRIMIENDO', o: 'LAN', est: 'e1' });   // "se corta la luz"
-  fs.appendFileSync(f, '{"k":"roto",');                                 // linea a medias
+  const k1 = claveDe('job-aaaa-1', 'e1'), k2 = claveDe('job-bbbb-2', 'e1');
+  a.poner(k1, { e: 'IMPRIMIENDO', o: 'LAN', j: 'job-aaaa-1', est: 'e1' });
+  a.poner(k1, { e: 'IMPRESO' });
+  a.poner(k2, { e: 'IMPRIMIENDO', o: 'LAN', j: 'job-bbbb-2', est: 'e1' });   // "se corta la luz"
+  fs.appendFileSync(f, '{"k":"roto",');                                       // linea a medias
   const b = new Diario(f);
-  assert.equal(b.estado('job-aaaa-1'), 'IMPRESO');
-  assert.equal(b.estado('job-bbbb-2'), 'DUDOSO');
-  assert.deepEqual(b.sinReportar().map((x) => x.clave), ['job-aaaa-1']);
-  b.marcarReportados(['job-aaaa-1']);
+  assert.equal(b.estado(k1), 'IMPRESO');
+  assert.equal(b.estado(k2), 'DUDOSO');
+  assert.deepEqual(b.sinReportar().map((x) => [x.clave, x.estacion]), [['job-aaaa-1', 'e1']]);
+  b.marcarReportados(b.sinReportar().map((x) => x.k));
   assert.equal(new Diario(f).sinReportar().length, 0);
-  assert.equal(claveDeNube({ id: 9, payload: { jobId: 'abc-12345' } }), 'abc-12345');
-  assert.equal(claveDeNube({ id: 9, payload: {} }), 'nube:9');
+  assert.equal(k1, 'job-aaaa-1|e1');
+  assert.equal(claveDeNube({ id: 9, estacion: 'e2', payload: { jobId: 'abc-12345' } }), 'abc-12345|e2');
+  assert.equal(jobIdDeNube({ id: 9, payload: {} }), 'nube:9');
   assert.ok(jobIdValido('4f1c2b9e-1111-4222-8333-944455556666'));
   assert.ok(!jobIdValido('corto'));
   assert.ok(!jobIdValido('nube:12345678'));
@@ -97,10 +101,30 @@ test('emparejar: PIN de un uso, token valido, freno por IP y global', () => {
   assert.ok(!fs.readFileSync(f, 'utf8').includes(ok.token), 'el archivo no guarda el token');
   assert.ok(e2.quitar(ok.equipo.id));
   assert.equal(e2.validar(ok.token), null);
-  // freno global: 20 fallos desde IPs distintas anulan el PIN
-  e2.nuevoPin();
-  for (let i = 0; i < 20; i++) e2.intentar('99999' + (i % 10), 'x', '10.0.0.' + i);
-  assert.equal(e2.pinVigente(), null);
+  // [QA BAJO] freno global: 30 fallos por minuto frenan a TODOS, pero NO anulan el PIN
+  const pin2 = e2.nuevoPin().valor;
+  const otro = pin2 === '999999' ? '888888' : '999999';
+  for (let i = 0; i < 30; i++) e2.intentar(otro, 'x', '10.0.0.' + i);
+  assert.ok(e2.pinVigente(), 'el PIN sigue vigente');
+  assert.equal(e2.intentar(pin2, 'Caja', '10.0.1.1').error, 'ESPERA');
+  e2.fallosGlobal = [];                                  // pasa el minuto
+  assert.ok(e2.intentar(pin2, 'Caja', '10.0.1.1').ok);
+});
+
+test('emparejar: token vence a los 90 dias y se renueva al usarse; hash raro se descarta', () => {
+  const d = tmp(); const f = path.join(d, 'equipos.json');
+  const e = new Emparejador(f);
+  const ok = e.intentar(e.nuevoPin().valor, 'Caja', '192.168.1.9');
+  const eq = e.equipos[0];
+  assert.ok(eq.vence > Date.now() + 89 * 86400000);
+  eq.visto = Date.now() - 2 * 60000; eq.vence = Date.now() + 1000;
+  assert.ok(e.validar(ok.token));
+  assert.ok(e.equipos[0].vence > Date.now() + 89 * 86400000, 'el uso lo renueva');
+  e.equipos[0].vence = Date.now() - 1;
+  assert.equal(e.validar(ok.token), null, 'vencido no entra');
+  assert.equal(e.equipos.length, 0);
+  fs.writeFileSync(f, JSON.stringify({ equipos: [{ id: 'a', hash: 'corto' }, { id: 'b', hash: 'f'.repeat(64), creado: Date.now() }] }));
+  assert.deepEqual(new Emparejador(f).equipos.map((x) => x.id), ['b']);
 });
 
 test('mdns: arma consulta y resuelve SRV + A', () => {
@@ -129,12 +153,25 @@ test('usbwin: clasificar puertos y drivers', () => {
 });
 
 test('transportes: ruta efectiva y TCP real a impresora falsa', async () => {
-  assert.deepEqual(transportes.rutaDeEstacion({ ip: '192.168.1.9', puerto: 9100 }), { transporte: 'TCP', destino: '192.168.1.9:9100', fuente: 'ip' });
+  assert.deepEqual(transportes.rutaDeEstacion({ ip: '192.168.1.9', puerto: 9100 }), { transporte: 'TCP', destino: '192.168.1.9:9100', fuente: 'nube' });
   assert.equal(transportes.rutaDeEstacion({ ip: '1.2.3.4', transporte: 'USB_WIN', destino: 'POS-80' }).transporte, 'USB_WIN');
   assert.equal(transportes.rutaDeEstacion({ ip: '1.2.3.4' }, { transporte: 'TCP', destino: '10.0.0.5:9100' }).fuente, 'local');
   assert.equal(transportes.rutaDeEstacion({}), null);
+  // [QA MEDIO-4] un solo punto de validacion
+  for (const [d, ok] of [['192.168.1.9:9100', true], ['10.0.0.5', true], ['172.20.1.1:9103', true], ['192.168.1.9:22', false],
+    ['192.168.1.9:631', false], ['127.0.0.1:9100', false], ['169.254.1.1:9100', false], ['8.8.8.8:9100', false], ['impresora.local:9100', false]]) {
+    assert.equal(transportes.validarDestino('TCP', d) === null, ok, d);
+  }
+  assert.equal(transportes.validarDestino('USB_WIN', 'POS-80 (copia 1)'), null);
+  await assert.rejects(transportes.enviar({ transporte: 'TCP', destino: '127.0.0.1:22' }, 'x'), (e) => e.sinEnviar && e.codigo === 'DESTINO_NO_PERMITIDO');
+  // conexion rechazada = sinEnviar (nada salio)
+  process.env.LEVO_TCP_PRUEBAS = '1';
+  await assert.rejects(transportes.enviar({ transporte: 'TCP', destino: '127.0.0.1:1' }, 'x'), (e) => e.sinEnviar === true);
+  assert.match(transportes.mensajePublico({ sinEnviar: true, message: 'connect ECONNREFUSED 127.0.0.1:1' }), /No se pudo conectar/);
+  assert.doesNotMatch(transportes.mensajePublico({ message: 'EPIPE 10.0.0.1' }), /EPIPE/);
   const imp = await impresoraFalsa();
   await transportes.enviar({ transporte: 'TCP', destino: `127.0.0.1:${imp.puerto}` }, '\x1b@HOLA');
+  delete process.env.LEVO_TCP_PRUEBAS;
   await new Promise((r) => setTimeout(r, 50));
   assert.equal(imp.textos()[0], '\x1b@HOLA');
   await assert.rejects(transportes.enviar({ transporte: 'BT', destino: 'AA:BB' }, 'x'), /APK/);
@@ -146,4 +183,74 @@ test('barrido LAN encuentra la impresora falsa', async () => {
   const r = await barrerLan({ hosts: ['127.0.0.1', '127.0.0.2'], puerto: imp.puerto, timeoutMs: 200 });
   assert.deepEqual(r, [{ ip: '127.0.0.1', puerto: imp.puerto }]);
   await imp.cerrar();
+});
+
+// ---------- Motor (QA F2) ----------
+function motorDePrueba(enviar) {
+  const d = tmp();
+  const m = new Motor({
+    diario: new Diario(path.join(d, 'diario.jsonl')), colas: new Colas({ timeoutMs: 2000 }), renderPara, getAncho: () => 48,
+    log: () => {}, logErr: () => {}, enviar,
+    archivoEstaciones: path.join(d, 'est.json'), archivoAsignaciones: path.join(d, 'asig.json'),
+  });
+  m.ponerEstaciones([{ id: 'coc', nombre: 'Cocina', ip: '192.168.1.40', puerto: 9100 }, { id: 'bar', nombre: 'Barra', ip: '192.168.1.41', puerto: 9100 }], 'komo');
+  return m;
+}
+const comanda = (extra) => ({ jobId: 'J1-aaaa-bbbb', origen: 'LAN', estacion: 'coc', tipo: 'COMANDA', payload: { mesa: '7', items: [{ cantidad: 1, nombre: 'Ceviche' }], ...(extra || {}) } });
+
+test('motor [MEDIO-1]: falla A MITAD del envio -> DUDOSO y el reintento sale con sello REIMPRESION', async () => {
+  const textos = [];
+  let falla = true;
+  const m = motorDePrueba(async (ruta, texto) => { if (falla) throw new Error('write EPIPE'); textos.push(texto); });
+  const r1 = await m.procesar(comanda());
+  assert.equal(r1.ok, false); assert.equal(r1.dudoso, true);
+  assert.doesNotMatch(r1.error, /EPIPE/, 'la app no ve el error crudo');
+  assert.equal(m.diario.estado(claveDe('J1-aaaa-bbbb', 'coc')), 'DUDOSO');
+  falla = false;
+  const r2 = await m.procesar(comanda());
+  assert.equal(r2.ok, true);
+  assert.match(textos[0], /\*\*\* REIMPRESION \*\*\*/);
+});
+
+test('motor [MEDIO-1]: conexion rechazada (nada salio) -> ERROR y el reintento sale SIN sello', async () => {
+  const textos = [];
+  let falla = true;
+  const m = motorDePrueba(async (ruta, texto) => { if (falla) { const e = new Error('connect ECONNREFUSED'); e.sinEnviar = true; throw e; } textos.push(texto); });
+  const r1 = await m.procesar(comanda());
+  assert.equal(r1.dudoso, false);
+  assert.equal(m.diario.estado(claveDe('J1-aaaa-bbbb', 'coc')), 'ERROR');
+  falla = false;
+  await m.procesar(comanda());
+  assert.doesNotMatch(textos[0], /REIMPRESION/);
+});
+
+test('motor [MEDIO-2]: un jobId por papel y estacion; reimpresion pedida no se calla', async () => {
+  const salidas = [];
+  const m = motorDePrueba(async (ruta) => { salidas.push(ruta.destino); });
+  assert.equal((await m.procesar(comanda())).ok, true);
+  assert.equal((await m.procesar({ ...comanda(), estacion: 'bar' })).ok, true, 'mismo jobId en OTRA estacion = otro papel');
+  assert.equal((await m.procesar(comanda())).duplicado, true);
+  assert.deepEqual(salidas, ['192.168.1.40:9100', '192.168.1.41:9100']);
+  const r = await m.procesar(comanda({ reimpresion: true }));
+  assert.equal(r.duplicado, undefined);
+  assert.equal(salidas.length, 3, 'la reimpresion pedida SI sale');
+});
+
+test('motor [ALTO-1]: asignacion local pendiente manda; confirmada se borra; la nube vuelve a mandar', () => {
+  const m = motorDePrueba(async () => {});
+  m.asignar('coc', 'TCP', '192.168.1.99:9100', { pendienteNube: true });
+  assert.equal(m.ruta('coc').fuente, 'local');
+  m.ponerTransportes([{ id: 'coc', transporte: null, destino: null }]);
+  assert.equal(m.ruta('coc').destino, '192.168.1.99:9100', 'pendiente: la nube vieja no la pisa');
+  m.confirmarNube('coc');
+  assert.equal(m.asignaciones.coc, undefined);
+  assert.deepEqual([m.ruta('coc').fuente, m.ruta('coc').destino], ['nube', '192.168.1.99:9100']);
+  m.ponerTransportes([{ id: 'coc', transporte: 'TCP', destino: '192.168.1.77:9100' }]);
+  assert.equal(m.ruta('coc').destino, '192.168.1.77:9100', 'el dueno la cambio en la app: manda la nube');
+  // asignacion local YA sincronizada que difiere de la nube: se descarta
+  m.asignar('bar', 'USB_WIN', 'POS-80', { pendienteNube: false });
+  m.ponerTransportes([{ id: 'bar', transporte: 'TCP', destino: '192.168.1.88:9100' }]);
+  assert.equal(m.asignaciones.bar, undefined);
+  assert.equal(m.ruta('bar').destino, '192.168.1.88:9100');
+  assert.deepEqual(m.listaEstaciones().map((e) => e.fuente), ['nube', 'nube']);
 });

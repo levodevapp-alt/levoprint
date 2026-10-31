@@ -23,7 +23,9 @@
 //   · Latido <p>_agente_lan: publica la IP LAN del agente y reporta lo impreso
 //     por la LAN (si la RPC no existe aun, se ignora: compatible hacia atras).
 //   · Estaciones guardadas en disco: arranca e imprime por la LAN sin internet.
-// Opcionales en levoprint.txt: LEVO_LAN=0 (apaga el servidor LAN),
+// Opcionales en levoprint.txt: LEVO_LAN=0 (nunca abre el servidor LAN),
+// LEVO_LAN=1 (lo deja siempre abierto; por defecto solo se abre al
+// "Activar impresion sin internet" = hay un PIN vigente o equipos emparejados),
 // LEVO_PUERTO_LAN=9120, LEVO_ORIGENES=http://localhost:5173 (desarrollo),
 // LEVO_DIR=<carpeta de datos> (pruebas).
 // El .exe se arma con empaquetar.mjs (un solo archivo para Node SEA).
@@ -35,7 +37,8 @@ const path = require('path');
 const http = require('http');
 const { exec } = require('child_process');
 const { renderPara } = require('./lib/render');
-const { Diario, claveDeNube, jobIdValido } = require('./lib/diario');
+const { Diario, claveDeNube, jobIdDeNube, jobIdValido } = require('./lib/diario');
+const usbwin = require('./lib/usbwin');
 const { Colas } = require('./lib/colas');
 const { Motor } = require('./lib/motor');
 const { Emparejador } = require('./lib/emparejar');
@@ -118,7 +121,14 @@ const SIN_VENTANA = /^(1|true|si|s[ií])$/i.test(String(process.env.LEVO_SINVENT
 const PUERTO_GUI_BASE = parseInt(process.env.LEVO_PUERTO_GUI || '9110', 10) || 9110;
 // [F2] Servidor LAN (ver cabecera). VERSION la ve la app en /v1/hola.
 const VERSION = '1.8.0';
-const LAN_ACTIVO = !/^(0|false|no)$/i.test(String(process.env.LEVO_LAN || '1'));
+// [QA F2 MEDIO-3] El puerto 9120 NO se abre por defecto: solo cuando el
+// dueno activa la impresion sin internet (genera un PIN en la ventana) o ya
+// hay equipos emparejados. Sin uso, el agente no expone nada en la red.
+const LAN_MODO = /^(0|false|no)$/i.test(String(process.env.LEVO_LAN || '')) ? 'apagado'
+  : /^(1|true|si|s[ií])$/i.test(String(process.env.LEVO_LAN || '')) ? 'siempre' : 'demanda';
+const LAN_ACTIVO = LAN_MODO !== 'apagado';
+// Ritmo del latido LAN (pruebas automaticas lo bajan; en el local, 60 s).
+const LATIDO_MS = parseInt(process.env.LEVO_LATIDO_MS || '60000', 10) || 60000;
 const PUERTO_LAN = parseInt(process.env.LEVO_PUERTO_LAN || '9120', 10) || 9120;
 const ORIGENES_EXTRA = red.leerOrigenesExtra(process.env.LEVO_ORIGENES);
 
@@ -302,19 +312,41 @@ async function refrescarConfig(dev, pfx) {
 function rpcNoExiste(e) {
   return !!e && (/HTTP 404/.test(e.message) || /PGRST202|Could not find the function/i.test(e.message));
 }
+// [QA F2 ALTO-1] Asignaciones hechas en esta PC que la nube aun no conoce:
+// se reintenta avisarlas. Al confirmarse se BORRA la local (desde ahi manda
+// la nube, y si el dueno la cambia en la app, se respeta).
+async function avisarAsignacion(dev, pfx, estacion, a) {
+  try {
+    const r = await rpc(`${pfx}_agente_asignar`, { device: dev, estacion, transporte: a.transporte, destino: a.destino });
+    if (r && r.ok === false) {
+      // La nube la rechaza (estacion borrada, destino invalido): no tiene
+      // sentido reintentar; queda solo en esta PC y se avisa en el log.
+      console.error(`[asignar] la nube rechazo la asignacion de ${estacion}: ${r.error}`);
+      motor.quedarSoloLocal(estacion);
+      return false;
+    }
+    motor.confirmarNube(estacion);
+    return true;
+  } catch (e) {
+    if (rpcNoExiste(e)) { motor.quedarSoloLocal(estacion); return false; }
+    return false;   // sin internet: queda pendienteNube y se reintenta en el latido
+  }
+}
+
 async function latidoLan(dev, pfx) {
+  for (const a of motor.pendientesNube()) await avisarAsignacion(dev, pfx, a.estacion, a);
   if (nube.lanSoportado === false && Date.now() < nube.lanReintentoTs) return;
   const impresos = diario.sinReportar(200);
   try {
     const r = await rpc(`${pfx}_agente_lan`, {
       device: dev, version: VERSION,
-      lan: LAN_ACTIVO ? { ips: red.ipsLocales().map((x) => x.ip), puerto: PUERTO_LAN } : null,
-      impresos,
+      lan: lanEstado.escuchando ? { ips: red.ipsLocales().map((x) => x.ip), puerto: PUERTO_LAN } : null,
+      impresos: impresos.map((x) => ({ clave: x.clave, estacion: x.estacion, ts: x.ts })),
     });
     nube.lanSoportado = true;
     nube.ultimoLatidoLan = Date.now();
     if (r && Array.isArray(r.estaciones)) motor.ponerTransportes(r.estaciones);
-    if (impresos.length) diario.marcarReportados(impresos.map((x) => x.clave));
+    if (impresos.length) diario.marcarReportados(impresos.map((x) => x.k));
   } catch (e) {
     if (rpcNoExiste(e)) {
       if (nube.lanSoportado !== false) console.log('[lan] la base aun no tiene ' + pfx + '_agente_lan (plantilla impresion_local): imprimo igual.');
@@ -361,7 +393,7 @@ async function ciclo() {
       await Promise.all(jobs.map(async (job) => {
         const clave = claveDeNube(job);
         const res = await motor.procesar({
-          clave, origen: 'NUBE', estacion: job.estacion, tipo: job.tipo, payload: job.payload,
+          jobId: jobIdDeNube(job), origen: 'NUBE', estacion: job.estacion, tipo: job.tipo, payload: job.payload,
           // Render en el SERVIDOR (formato siempre al día); respaldo local si cae.
           renderTexto: (jb) => renderRemoto({ ...job, payload: jb.payload }, pfx),
         });
@@ -371,13 +403,15 @@ async function ciclo() {
         // Si marcar falla (internet se fue justo ahora), el diario evita la
         // reimpresion cuando la nube lo vuelva a entregar tras la reserva.
         await rpc(`${pfx}_print_marcar`, res.ok ? { device: dev, id: job.id, ok: true }
-          : { device: dev, id: job.id, ok: false, error: res.error });
+          : { device: dev, id: job.id, ok: false, error: res.errorInterno || res.error });
       }));
     } finally {
       guiEstado.imprimiendo = false;
     }
-    // Latido LAN: cada minuto, o cada 15 s mientras haya impresos por reportar.
-    if (Date.now() - nube.ultimoLatidoLan >= (diario.sinReportar(1).length ? 15000 : CONFIG_CADA_MS)) {
+    // Latido LAN: cada minuto, o cada 15 s mientras haya impresos por reportar
+    // o asignaciones de esta PC sin avisar a la nube.
+    const urgente = diario.sinReportar(1).length || motor.pendientesNube().length;
+    if (Date.now() - nube.ultimoLatidoLan >= (urgente ? Math.min(15000, LATIDO_MS) : LATIDO_MS)) {
       try { await latidoLan(dev, pfx); } catch (e) { console.error('[lan] latido:', e.message); }
     }
   } catch (e) {
@@ -592,7 +626,7 @@ function estadoActual() {
   // [F2] ruta efectiva de cada estacion (asignacion local > nube > ip vieja).
   const listaEst = motor.listaEstaciones().map((e) => ({
     id: e.id, nombre: e.nombre, ip: e.ip, puerto: e.puerto, via: e.via, cola: e.cola,
-    local: !!motor.asignaciones[e.id],
+    local: !!motor.asignaciones[e.id], fuente: e.fuente, pendienteNube: e.pendienteNube,
   }));
   let semaforo = 'sin_vincular';
   if (sinUrlAnon) semaforo = 'sin_configurar';
@@ -619,7 +653,7 @@ function estadoActual() {
     // [F2] Solo esta ventana (127.0.0.1) ve el PIN: es la prueba de que quien
     // empareja tiene acceso fisico a la PC.
     lan: {
-      activo: LAN_ACTIVO, escuchando: lanEstado.escuchando, error: lanEstado.error,
+      activo: LAN_ACTIVO, modo: LAN_MODO, escuchando: lanEstado.escuchando, error: lanEstado.error,
       urls: red.ipsLocales().map((x) => `http://${x.ip}:${PUERTO_LAN}`),
       pin: (emparejador.pinVigente() || {}).valor || null,
       pinVence: (emparejador.pinVigente() || {}).expira || null,
@@ -642,19 +676,8 @@ function buscarImpresoras() {
   return promesa;
 }
 
-// Destino que el agente acepta tocar: TCP solo a IP privada (el agente no es
-// un puente hacia internet) y nombres de Windows razonables.
-function validarDestino(transporte, destino) {
-  if (!transportes.TRANSPORTES.includes(transporte)) return 'transporte invalido';
-  const d = String(destino || '');
-  if (!d || d.length > 120) return 'destino invalido';
-  if (transporte === 'TCP') {
-    const p = transportes.partirIpPuerto(d);
-    if (!p || !red.esIpPrivada(p.ip) || !(p.puerto >= 1 && p.puerto <= 65535)) return 'la impresora de red debe tener una IP del local (192.168.x.x, 10.x.x.x...)';
-  }
-  if (transporte !== 'TCP' && transporte !== 'USB_WIN') return 'ese transporte solo funciona en el APK de Android';
-  return null;
-}
+// [QA F2 MEDIO-4] Un solo punto de validacion del destino: lib/transportes.
+const validarDestino = transportes.validarDestino;
 
 async function imprimirPrueba(ruta, nombre) {
   const texto = render({ tipo: 'PRUEBA', payload: {} });
@@ -670,7 +693,8 @@ const manejadoresLan = {
     return {
       ok: true, version: VERSION, prefijo: PREFIJO, ancho: ANCHO, equipo: ctx.equipo.nombre,
       nube: { enLinea: Date.now() - nube.okTs < 30000, okTs: nube.okTs || null },
-      estaciones: motor.listaEstaciones().map((e) => ({ id: e.id, nombre: e.nombre, via: e.via, transporte: e.ruta ? e.ruta.transporte : null, cola: e.cola })),
+      // fuente: 'local' (asignada en esta PC) | 'nube'; pendienteNube: aun sin avisar.
+      estaciones: motor.listaEstaciones().map((e) => ({ id: e.id, nombre: e.nombre, via: e.via, transporte: e.ruta ? e.ruta.transporte : null, fuente: e.fuente, pendienteNube: e.pendienteNube, cola: e.cola })),
     };
   },
   async diario() { return { ok: true, recientes: diario.recientes(50) }; },
@@ -687,7 +711,9 @@ const manejadoresLan = {
       if (err) return { ok: false, error: 'DESTINO_INVALIDO', mensaje: err };
       return await imprimirPrueba({ transporte: b.transporte, destino: String(b.destino) });
     } catch (e) {
-      return { ok: false, error: 'IMPRESION', mensaje: e.message };
+      // Nunca el mensaje crudo de la red o de Windows hacia la app (queda en el log).
+      console.error('[prueba] ' + e.message);
+      return { ok: false, error: 'IMPRESION', mensaje: transportes.mensajePublico(e) };
     }
   },
   async imprimir(b, ctx) {
@@ -697,19 +723,38 @@ const manejadoresLan = {
     const pfx = PREFIJO;
     const payload = b.payload && typeof b.payload === 'object' && !Array.isArray(b.payload) ? b.payload : {};
     const r = await motor.procesar({
-      clave: b.jobId, origen: 'LAN', estacion: b.estacion, tipo: b.tipo, payload,
+      jobId: b.jobId, origen: 'LAN', estacion: b.estacion, tipo: b.tipo, payload,
       renderTexto: (jb) => renderParaLan(jb, pfx),
     });
     if (r.ok) { guiEstado.ultimoOk = Date.now(); return { ok: true, jobId: b.jobId, via: r.via, duplicado: !!r.duplicado, equipo: ctx.equipo.nombre }; }
     guiEstado.ultimoError = { mensaje: r.error, ts: Date.now() };
-    return { ok: false, status: 502, error: 'IMPRESION', mensaje: r.error, via: r.via };
+    // dudoso: la impresora pudo haberlo sacado; reintentar con el MISMO jobId
+    // (si salio, el reintento sale con sello REIMPRESION).
+    return { ok: false, status: 502, error: 'IMPRESION', mensaje: r.error, via: r.via, dudoso: !!r.dudoso };
   },
 };
+
+// [QA F2 MEDIO-3] Abre o cierra el 9120 segun haga falta (ver LAN_MODO).
+function lanHaceFalta() {
+  if (LAN_MODO === 'apagado') return false;
+  if (LAN_MODO === 'siempre') return true;
+  return !!emparejador.pinVigente() || emparejador.lista().length > 0;
+}
+function asegurarLan() {
+  const falta = lanHaceFalta();
+  if (falta && !lanEstado.servidor) iniciarLan();
+  else if (!falta && lanEstado.servidor) {
+    try { lanEstado.servidor.close(); } catch { /* ya cerrado */ }
+    lanEstado.servidor = null; lanEstado.escuchando = false;
+    console.log('[lan] sin PIN ni equipos emparejados: se cierra el puerto ' + PUERTO_LAN + '.');
+  }
+}
 
 function iniciarLan() {
   if (!LAN_ACTIVO) { console.log('[lan] servidor de la red desactivado (LEVO_LAN=0).'); return; }
   const servidor = crearServidorLan({
-    emparejador, version: VERSION, origenesExtra: ORIGENES_EXTRA, prefijo: () => PREFIJO,
+    emparejador, version: VERSION, origenesExtra: ORIGENES_EXTRA,
+    bloqueado: () => !!guiEstado.desactivado,
     manejadores: manejadoresLan, log: (...a) => console.log(...a),
   });
   servidor.on('error', (e) => {
@@ -798,7 +843,7 @@ function paginaHtml() {
     <div class="sub" style="margin-bottom:8px">Las cajas y los mozos imprimen directo por la WiFi del local, aunque se caiga el internet.</div>
     <div id="lanBox" class="muted">-</div>
     <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;">
-      <button id="btnPin">Emparejar un equipo</button>
+      <button id="btnPin">Activar impresion sin internet / emparejar un equipo</button>
     </div>
     <div id="pinBox" style="display:none; margin-top:10px">
       <div class="muted" style="font-size:13px">En la app: Estaciones &gt; LevoPrint en esta red &gt; escribe este PIN (vence en 10 min, sirve una vez):</div>
@@ -858,7 +903,8 @@ async function refrescar() {
     box.innerHTML = e.vinculado ? '<div class="fila muted">Sin estaciones asignadas todavia.</div>' : '';
   } else {
     box.innerHTML = e.estaciones.map(function (est) {
-      const via = est.via && est.via !== 'sin impresora' ? est.via : 'SIN IMPRESORA — usa Buscar impresoras';
+      const via = (est.via && est.via !== 'sin impresora' ? est.via : 'SIN IMPRESORA — usa Buscar impresoras') +
+        (est.fuente === 'local' ? (est.pendienteNube ? ' (en esta PC, falta avisar a la nube)' : ' (solo en esta PC)') : est.fuente === 'nube' ? ' (de la nube)' : '');
       const quitar = est.local ? ' <button class="secundario chico" data-desasignar="' + esc(est.id) + '">Quitar</button>' : '';
       return '<div class="fila"><span>' + esc(est.nombre) + (est.cola ? '<span class="chip">' + est.cola + ' en cola</span>' : '') + '</span><span class="muted">' + esc(via) + quitar + '</span></div>';
     }).join('');
@@ -874,7 +920,7 @@ function pintarLan(l) {
   const box = document.getElementById('lanBox');
   if (!l.activo) box.textContent = 'Apagado (LEVO_LAN=0 en levoprint.txt).';
   else if (l.error) box.innerHTML = '<span style="color:#ff8080">' + esc(l.error) + '</span>';
-  else if (!l.escuchando) box.textContent = 'Iniciando...';
+  else if (!l.escuchando) box.textContent = l.modo === 'demanda' ? 'Cerrado: toca Activar impresion sin internet para abrirlo en la red del local.' : 'Iniciando...';
   else box.innerHTML = 'Escuchando en ' + (l.urls && l.urls.length ? l.urls.map(esc).join(' · ') : 'esta PC (sin WiFi/cable detectado)');
   const pinBox = document.getElementById('pinBox');
   pinBox.style.display = l.pin ? 'block' : 'none';
@@ -1042,16 +1088,12 @@ async function manejarAsignar(req, res) {
   if (!est) return responderJson(res, 400, { ok: false, error: 'ESTACION_DESCONOCIDA', mensaje: 'Elige una estacion de la lista.' });
   const err = validarDestino(b.transporte, b.destino);
   if (err) return responderJson(res, 400, { ok: false, error: 'DESTINO_INVALIDO', mensaje: err });
-  motor.asignar(est.id, b.transporte, String(b.destino));
+  // [QA F2 ALTO-1] Nace como asignacion LOCAL pendienteNube (imprime ya, aun
+  // sin internet). Si la nube la acepta, se borra la local y manda la nube; si
+  // no hay internet, el latido la reintenta.
+  motor.asignar(est.id, b.transporte, String(b.destino), { pendienteNube: true });
   let enNube = false;
-  if (!faltaConfig()) {
-    try {
-      await rpc(`${PREFIJO}_agente_asignar`, { device: DEVICE, estacion: est.id, transporte: b.transporte, destino: String(b.destino) });
-      enNube = true;
-    } catch (e) {
-      if (!rpcNoExiste(e)) console.error('[asignar] no se pudo avisar a la nube:', e.message);
-    }
-  }
+  if (!faltaConfig()) enNube = await avisarAsignacion(DEVICE, PREFIJO, est.id, motor.asignaciones[est.id]);
   console.log(`[asignar] ${est.nombre} -> ${transportes.describir({ transporte: b.transporte, destino: b.destino })}${enNube ? '' : ' (solo en esta PC)'}`);
   return responderJson(res, 200, { ok: true, estacion: est.nombre, nube: enNube });
 }
@@ -1100,8 +1142,9 @@ function iniciarGui() {
     if (req.method === 'POST' && url === '/vincular') return void manejarVincular(req, res);
     if (req.method === 'POST' && url === '/ancho') return void manejarAncho(req, res);
     // [F2] emparejar equipos de la red, buscar y asignar impresoras
-    if (req.method === 'POST' && url === '/lan/pin') { const p = emparejador.nuevoPin(); return responderJson(res, 200, { ok: true, pin: p.valor, expira: p.expira }); }
-    if (req.method === 'POST' && url === '/lan/quitar') return void leerBodyJson(req).then((b) => responderJson(res, 200, { ok: emparejador.quitar(String(b.id || '')) }));
+    // "Activar impresion sin internet": generar un PIN abre el 9120 (MEDIO-3).
+    if (req.method === 'POST' && url === '/lan/pin') { const p = emparejador.nuevoPin(); asegurarLan(); return responderJson(res, 200, { ok: true, pin: p.valor, expira: p.expira }); }
+    if (req.method === 'POST' && url === '/lan/quitar') return void leerBodyJson(req).then((b) => { const ok = emparejador.quitar(String(b.id || '')); asegurarLan(); responderJson(res, 200, { ok }); });
     if (req.method === 'POST' && url === '/buscar') return void buscarImpresoras().then((r) => responderJson(res, 200, r));
     if (req.method === 'POST' && url === '/asignar') return void manejarAsignar(req, res).catch((e) => responderJson(res, 500, { ok: false, mensaje: e.message }));
     if (req.method === 'POST' && url === '/desasignar') return void leerBodyJson(req).then((b) => { motor.desasignar(String(b.estacion || '')); responderJson(res, 200, { ok: true }); });
@@ -1124,14 +1167,42 @@ function iniciarGui() {
   intentarPuertos(0);
 }
 
+// [QA F2 BAJO] Una sola instancia por carpeta: dos LevoPrint abiertos se
+// pelearian el diario, el puerto 9120 y los trabajos de la nube.
+const CANDADO = path.join(BASE_DIR, 'levoprint.lock');
+function tomarCandado() {
+  try {
+    const pid = parseInt(fs.readFileSync(CANDADO, 'utf8'), 10);
+    if (pid && pid !== process.pid) {
+      let vivo = false;
+      try { process.kill(pid, 0); vivo = true; } catch (e) { vivo = e.code === 'EPERM'; }
+      if (vivo) {
+        console.error(`LevoPrint ya esta abierto en esta PC (proceso ${pid}). Cierra esa ventana antes de abrir otra.`);
+        pausarYSalir(1);
+        return false;
+      }
+    }
+  } catch { /* no hay candado */ }
+  try {
+    fs.writeFileSync(CANDADO, String(process.pid));
+    process.on('exit', () => { try { if (fs.readFileSync(CANDADO, 'utf8') === String(process.pid)) fs.unlinkSync(CANDADO); } catch { /* nada */ } });
+    for (const s of ['SIGINT', 'SIGTERM', 'SIGBREAK']) process.on(s, () => process.exit(0));
+  } catch { /* carpeta de solo lectura: se sigue sin candado */ }
+  return true;
+}
+
 async function arrancar() {
+  if (!tomarCandado()) return;
+  usbwin.configurar(BASE_DIR);
   await canjearCodigo();
   if (faltaUrlAnon()) { abortarSinConfig(); return; }
   console.log(`LevoPrint agente de impresion v${VERSION} (red del local + USB + emparejamiento por codigo) — <Levodev.app />`);
   console.log(MODO_CONSOLA ? 'MODO CONSOLA (sin impresoras reales)' : 'Modo impresión real');
   if (motor.estaciones.size) console.log(`[cfg] ${motor.estaciones.size} estaciones guardadas en esta PC (sirven aunque no haya internet).`);
   iniciarGui();
-  iniciarLan();
+  asegurarLan();
+  // El PIN vence a los 10 min: si nadie se emparejo, el puerto se vuelve a cerrar.
+  setInterval(asegurarLan, 30000).unref();
   if (!faltaConfig()) ciclo();
   else console.log('Falta vincular: abre la ventana de LevoPrint (o entra tu codigo por /vincular) para terminar la configuracion.');
 }

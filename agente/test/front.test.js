@@ -44,9 +44,11 @@ test('front impresora.js + agente real: LAN primero, nube de respaldo, sin dupli
   const nube = await nubeFalsa({ prefijo: 'komo', estaciones: [{ id: EST, nombre: 'Cocina', ip: '127.0.0.1', puerto: cocina.puerto }] });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lp-front-'));
   const PG = await puertoLibre(), PL = await puertoLibre();
-  const env = { LEVO_DIR: dir, LEVO_URL: nube.url, LEVO_ANON: 'x', LEVO_DEVICE: crypto.randomUUID(), LEVO_PREFIJO: 'komo', LEVO_SINVENTANA: '1', LEVO_PUERTO_GUI: String(PG), LEVO_PUERTO_LAN: String(PL) };
+  const env = { LEVO_DIR: dir, LEVO_URL: nube.url, LEVO_ANON: 'x', LEVO_DEVICE: crypto.randomUUID(), LEVO_PREFIJO: 'komo', LEVO_SINVENTANA: '1', LEVO_PUERTO_GUI: String(PG), LEVO_PUERTO_LAN: String(PL), LEVO_TCP_PRUEBAS: '1', LEVO_LATIDO_MS: '1000' };
   let agente = spawn(process.execPath, [path.join(__dirname, '..', 'index.js')], { env: { ...process.env, ...env }, stdio: 'ignore' });
   t.after(async () => { try { agente.kill(); } catch { /* ya */ } await cocina.cerrar(); await nube.cerrar(); fs.rmSync(dir, { recursive: true, force: true }); });
+  assert.ok(await hasta(async () => (await pedir(PG, 'GET', '/estado').catch(() => ({}))).status === 200, 15000));
+  const pin = (await pedir(PG, 'POST', '/lan/pin', { cuerpo: {} })).json.pin;   // abre el 9120 (MEDIO-3)
   assert.ok(await hasta(async () => (await pedir(PL, 'GET', '/v1/hola').catch(() => ({}))).status === 200, 15000));
   assert.ok(await hasta(() => nube.estado.llamadas.some((u) => u.endsWith('komo_agente_config')), 10000));
 
@@ -69,7 +71,11 @@ test('front impresora.js + agente real: LAN primero, nube de respaldo, sin dupli
   // emparejar con la direccion que publico el agente
   await I.refrescarDesdeNube();
   assert.deepEqual(I.basesSugeridas(), [`http://127.0.0.1:${PL}`]);
-  const pin = (await pedir(PG, 'POST', '/lan/pin', { cuerpo: {} })).json.pin;
+  // [QA BAJO] solo direcciones de la red del local
+  assert.equal(I.normalizarBase('8.8.8.8'), '');
+  assert.equal(I.normalizarBase('evil.com:9120'), '');
+  assert.equal(I.normalizarBase('192.168.1.20'), 'http://192.168.1.20:9120');
+  assert.equal(I.normalizarBase('caja.local'), 'http://caja.local:9120');
   await assert.rejects(I.emparejar(I.basesSugeridas()[0], '000000' === pin ? '111111' : '000000', 'Caja'), (e) => e.codigo === 'PIN_INVALIDO');
   await I.emparejar(I.basesSugeridas()[0], pin, 'Caja 1');
   assert.equal(I.lpLocal.activo, true);
@@ -109,10 +115,24 @@ test('front impresora.js + agente real: LAN primero, nube de respaldo, sin dupli
   assert.equal(r4.ok, false);
   nube.estado.caida = false;
 
+  // [QA MEDIO-7] LevoPrint que acepta pero no contesta: dudoso:true y se sigue
+  // a la nube con el MISMO jobId.
+  const mudo = require('net').createServer(() => {}).listen(0, '127.0.0.1');
+  await new Promise((r) => mudo.once('listening', r));
+  const guardado = { base: I.lpLocal.base, token: I.lpLocal.token };
+  Object.assign(I.lpLocal, { base: 'http://127.0.0.1:' + mudo.address().port, token: 'x'.repeat(32), activo: true });
+  const rD = await I.imprimir({ tipo: 'COMANDA', estacion: EST, payload: {} }, { nube: porNube });
+  assert.equal(rD.via, 'NUBE'); assert.equal(rD.dudoso, true);
+  assert.ok(encoladosNube.includes(rD.jobId), 'la nube recibio el MISMO jobId');
+  Object.assign(I.lpLocal, guardado);
+  mudo.close();
+
   // el dueno quita el equipo en la ventana: la ruta local se apaga sola
   agente = spawn(process.execPath, [path.join(__dirname, '..', 'index.js')], { env: { ...process.env, ...env }, stdio: 'ignore' });
   assert.ok(await hasta(async () => (await pedir(PL, 'GET', '/v1/hola').catch(() => ({}))).status === 200, 15000));
   const eq = (await pedir(PG, 'GET', '/estado')).json.lan.equipos;
+  // con un PIN vigente el 9120 sigue abierto (sin PIN ni equipos se cerraria: MEDIO-3)
+  await pedir(PG, 'POST', '/lan/pin', { cuerpo: {} });
   await pedir(PG, 'POST', '/lan/quitar', { cuerpo: { id: eq[0].id } });
   const r5 = await I.imprimir({ tipo: 'COMANDA', estacion: EST, payload: {} }, { nube: porNube });
   assert.equal(r5.via, 'NUBE');

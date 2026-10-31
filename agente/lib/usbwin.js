@@ -15,6 +15,19 @@
 // comillas o tildes no rompe el comando). Cada trabajo abre un PowerShell
 // (~1-3 s con la compilacion del C#): aceptable para tickets; si hiciera
 // falta, el siguiente paso es un PowerShell persistente.
+//
+// [QA F2 MEDIO-5] Endurecido:
+//   · Los scripts son archivos .ps1 en la carpeta de LevoPrint (configurar),
+//     que se reescriben al arrancar y se corren con -File (nada de
+//     -EncodedCommand, que los antivirus miran con razon). Sigue haciendo
+//     falta -ExecutionPolicy Bypass (de este proceso, no del equipo): Windows
+//     trae "Restricted" y un .ps1 sin firma no correria. Con el .exe y los
+//     .ps1 FIRMADOS se podria pasar a AllSigned (pendiente: certificado de
+//     firma de codigo de LevoDev; ver docs/F2_IMPRESION_LOCAL.md).
+//   · El proceso hijo recibe un entorno MINIMO (sistema + LP_*), no el
+//     entorno completo del agente.
+//   · Los .bin temporales viven en <tmp>/levoprint-raw, se borran en finally
+//     (tambien si falla la escritura) y al arrancar se limpian los viejos.
 // ============================================================
 'use strict';
 const { execFile } = require('child_process');
@@ -25,13 +38,54 @@ const crypto = require('crypto');
 
 const ES_WINDOWS = process.platform === 'win32';
 
-// Ejecuta un script de PowerShell sin perfil y devuelve stdout (UTF-8).
-function powershell(script, env, timeoutMs) {
+const DIR_TMP = path.join(os.tmpdir(), 'levoprint-raw');
+let dirScripts = path.join(os.tmpdir(), 'levoprint-ps');   // configurar() lo cambia a la carpeta de LevoPrint
+const PRE = '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n$ProgressPreference = "SilentlyContinue"\r\n';
+
+// Escribe los .ps1 junto a LevoPrint y limpia temporales viejos (> 1 h).
+function configurar(dir) {
+  if (dir) dirScripts = dir;
+  try {
+    fs.mkdirSync(dirScripts, { recursive: true });
+    for (const [nombre, cuerpo] of Object.entries(SCRIPTS)) {
+      const f = path.join(dirScripts, nombre);
+      const txt = '\uFEFF' + PRE + cuerpo.replace(/\r?\n/g, '\r\n');
+      let actual = null;
+      try { actual = fs.readFileSync(f, 'utf8'); } catch { actual = null; }
+      if (actual !== txt) fs.writeFileSync(f, txt, 'utf8');
+    }
+  } catch { /* carpeta de solo lectura: falla al imprimir con un mensaje claro */ }
+  try {
+    const limite = Date.now() - 3600000;
+    for (const f of fs.readdirSync(DIR_TMP)) {
+      const p = path.join(DIR_TMP, f);
+      try { if (fs.statSync(p).mtimeMs < limite) fs.unlinkSync(p); } catch { /* en uso */ }
+    }
+  } catch { /* no existe todavia */ }
+}
+
+// Entorno minimo del PowerShell hijo: lo justo para que arranque y cargue
+// sus modulos (PrintManagement), mas las variables LP_* del trabajo.
+function entornoMinimo(extra) {
+  const e = {};
+  for (const k of ['SystemRoot', 'SYSTEMROOT', 'windir', 'SystemDrive', 'ProgramFiles', 'ProgramData', 'TEMP', 'TMP', 'USERPROFILE', 'COMPUTERNAME', 'PATHEXT']) {
+    if (process.env[k]) e[k] = process.env[k];
+  }
+  const raiz = process.env.SystemRoot || 'C:\\Windows';
+  e.PATH = [raiz + '\\System32', raiz, raiz + '\\System32\\WindowsPowerShell\\v1.0'].join(';');
+  return { ...e, ...(extra || {}) };
+}
+
+// Corre uno de los .ps1 con -File y devuelve stdout (UTF-8).
+function powershell(nombre, env, timeoutMs) {
+  if (!SCRIPTS[nombre]) return Promise.reject(new Error('script desconocido'));
+  const archivo = path.join(dirScripts, nombre);
+  if (!fs.existsSync(archivo)) configurar();
+  const raiz = process.env.SystemRoot || 'C:\\Windows';
+  const exe = path.join(raiz, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   return new Promise((resolve, reject) => {
-    const pre = '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $ProgressPreference = "SilentlyContinue";\n';
-    const cod = Buffer.from(pre + script, 'utf16le').toString('base64');
-    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', cod], {
-      env: { ...process.env, ...(env || {}) }, timeout: timeoutMs || 20000, windowsHide: true, maxBuffer: 4 * 1024 * 1024,
+    execFile(fs.existsSync(exe) ? exe : 'powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', archivo], {
+      env: entornoMinimo(env), timeout: timeoutMs || 20000, windowsHide: true, maxBuffer: 4 * 1024 * 1024,
     }, (err, stdout, stderr) => {
       if (err && !stdout) return reject(new Error((stderr || err.message || 'powershell fallo').toString().trim().slice(0, 300)));
       resolve(String(stdout || '').trim());
@@ -128,9 +182,11 @@ function clasificar(p) {
   return { ...p, via, ticketera, ipRed };
 }
 
+const SCRIPTS = { 'levoprint-listar.ps1': SCRIPT_LISTAR, 'levoprint-raw.ps1': SCRIPT_IMPRIMIR };
+
 async function listar() {
   if (!ES_WINDOWS) return [];
-  const out = await powershell(SCRIPT_LISTAR, null, 20000);
+  const out = await powershell('levoprint-listar.ps1', null, 20000);
   let lista = [];
   try { lista = JSON.parse(out || '[]'); } catch { throw new Error('no pude leer la lista de impresoras de Windows'); }
   if (!Array.isArray(lista)) lista = lista ? [lista] : [];
@@ -141,10 +197,11 @@ async function listar() {
 async function imprimir(nombre, datos, opciones = {}) {
   if (!ES_WINDOWS) throw new Error('USB por la cola de Windows solo existe en el .exe de PC');
   if (!nombre) throw new Error('falta el nombre de la impresora de Windows');
-  const archivo = path.join(os.tmpdir(), 'levoprint-' + crypto.randomBytes(6).toString('hex') + '.bin');
-  fs.writeFileSync(archivo, Buffer.isBuffer(datos) ? datos : Buffer.from(String(datos), 'binary'));
+  const archivo = path.join(DIR_TMP, 'levoprint-' + crypto.randomBytes(6).toString('hex') + '.bin');
   try {
-    const out = await powershell(SCRIPT_IMPRIMIR, {
+    fs.mkdirSync(DIR_TMP, { recursive: true });
+    fs.writeFileSync(archivo, Buffer.isBuffer(datos) ? datos : Buffer.from(String(datos), 'binary'));
+    const out = await powershell('levoprint-raw.ps1', {
       LP_ARCHIVO: archivo, LP_IMPRESORA: String(nombre), LP_DOC: opciones.documento || 'LevoPrint', LP_SALIDA: opciones.archivoSalida || '',
     }, opciones.timeoutMs || 25000);
     let r;
@@ -152,6 +209,8 @@ async function imprimir(nombre, datos, opciones = {}) {
     if (!r.ok) {
       const e = new Error(`impresora USB "${nombre}": ${r.error || 'fallo'}${r.codigo ? ' (' + r.codigo + ')' : ''}`);
       e.codigo = r.codigo;
+      // No se abrio la impresora o no empezo el documento: no salio nada.
+      e.sinEnviar = /OpenPrinter|StartDocPrinter|StartPagePrinter/.test(String(r.error || ''));
       throw e;
     }
     return r.bytes;
@@ -160,4 +219,4 @@ async function imprimir(nombre, datos, opciones = {}) {
   }
 }
 
-module.exports = { listar, imprimir, clasificar, ES_WINDOWS, _powershell: powershell };
+module.exports = { listar, imprimir, clasificar, configurar, ES_WINDOWS, DIR_TMP, entornoMinimo };
