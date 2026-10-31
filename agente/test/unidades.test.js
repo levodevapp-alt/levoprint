@@ -109,6 +109,14 @@ test('emparejar: PIN de un uso, token valido, freno por IP y global', () => {
   assert.equal(e2.intentar(pin2, 'Caja', '10.0.1.1').error, 'ESPERA');
   e2.fallosGlobal = [];                                  // pasa el minuto
   assert.ok(e2.intentar(pin2, 'Caja', '10.0.1.1').ok);
+  // [re-QA] 150 fallos acumulados contra el mismo PIN lo anulan
+  const pin3 = e2.nuevoPin().valor;
+  const malo3 = pin3 === '777777' ? '666666' : '777777';
+  for (let i = 0; i < 149; i++) { e2.fallosGlobal = []; e2.porIp.clear(); e2.intentar(malo3, 'x', '10.0.2.' + (i % 250)); }
+  assert.ok(e2.pinVigente(), '149 fallos: sigue');
+  e2.fallosGlobal = []; e2.porIp.clear();
+  assert.equal(e2.intentar(malo3, 'x', '10.0.3.1').error, 'SIN_PIN');
+  assert.equal(e2.pinVigente(), null, 'al fallo 150 se anula');
 });
 
 test('emparejar: token vence a los 90 dias y se renueva al usarse; hash raro se descarta', () => {
@@ -224,16 +232,52 @@ test('motor [MEDIO-1]: conexion rechazada (nada salio) -> ERROR y el reintento s
   assert.doesNotMatch(textos[0], /REIMPRESION/);
 });
 
-test('motor [MEDIO-2]: un jobId por papel y estacion; reimpresion pedida no se calla', async () => {
+test('motor [MEDIO-2]: un jobId por papel y estacion', async () => {
   const salidas = [];
   const m = motorDePrueba(async (ruta) => { salidas.push(ruta.destino); });
   assert.equal((await m.procesar(comanda())).ok, true);
   assert.equal((await m.procesar({ ...comanda(), estacion: 'bar' })).ok, true, 'mismo jobId en OTRA estacion = otro papel');
   assert.equal((await m.procesar(comanda())).duplicado, true);
   assert.deepEqual(salidas, ['192.168.1.40:9100', '192.168.1.41:9100']);
-  const r = await m.procesar(comanda({ reimpresion: true }));
-  assert.equal(r.duplicado, undefined);
-  assert.equal(salidas.length, 3, 'la reimpresion pedida SI sale');
+});
+
+test('motor [re-QA NUEVO-1]: reimpresion con el MISMO jobId por la LAN y luego por la nube = UN papel', async () => {
+  const salidas = [];
+  const m = motorDePrueba(async (ruta) => { salidas.push(ruta.destino); });
+  const reimp = { ...comanda({ reimpresion: true }), jobId: 'R1-reimp-0001' };
+  assert.equal((await m.procesar(reimp)).ok, true);                                  // sale por la LAN
+  const r = await m.procesar({ ...reimp, origen: 'NUBE' });                          // la nube la entrega despues
+  assert.equal(r.duplicado, true);
+  assert.equal(salidas.length, 1, 'reimpresion:true NO salta la dedupe');
+  // una reimpresion de verdad lleva un jobId NUEVO y si sale
+  assert.equal((await m.procesar({ ...reimp, jobId: 'R2-reimp-0002' })).ok, true);
+  assert.equal(salidas.length, 2);
+});
+
+test('colas [re-QA]: si el tope vence antes de mandar, la tarea ve abandonada y no manda', async () => {
+  const c = new Colas({ timeoutMs: 100 });
+  let mandado = false;
+  await assert.rejects(c.encolar('A', async (estado) => {
+    await new Promise((r) => setTimeout(r, 200));            // render lento
+    if (estado.abandonada) return;
+    mandado = true;
+  }), /no respondio/);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(mandado, false);
+});
+
+test('motor [re-QA ALTO-1]: asignacion pendiente se descarta si la nube cambio desde que se asigno', () => {
+  const m = motorDePrueba(async () => {});
+  m.asignar('coc', 'TCP', '192.168.1.99:9100', { pendienteNube: true });   // la nube tenia null (ip de siempre)
+  m.ponerTransportes([{ id: 'coc', transporte: null, destino: null }]);
+  assert.equal(m.ruta('coc').fuente, 'local', 'la nube sigue igual que al asignar: la pendiente se queda');
+  m.ponerTransportes([{ id: 'coc', transporte: 'TCP', destino: '192.168.1.77:9100' }]);
+  assert.equal(m.asignaciones.coc, undefined, 'el dueno cambio la impresora en la app despues: se descarta la local');
+  assert.equal(m.ruta('coc').destino, '192.168.1.77:9100');
+  m.asignar('bar', 'TCP', '192.168.1.98:9100', { pendienteNube: true });
+  assert.deepEqual(m.asignaciones.bar.nubeAntes, { transporte: null, destino: null });
+  m.descartarPorNube('bar');                                                 // el servidor respondio CAMBIO_EN_NUBE
+  assert.equal(m.asignaciones.bar, undefined);
 });
 
 test('motor [ALTO-1]: asignacion local pendiente manda; confirmada se borra; la nube vuelve a mandar', () => {

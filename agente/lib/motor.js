@@ -83,10 +83,16 @@ class Motor {
       const tr = t.transporte || null; const de = t.destino || null;
       if (e.transporte !== tr || e.destino !== de) { e.transporte = tr; e.destino = de; cambio = true; }
       const a = this.asignaciones[t.id];
-      if (a && !a.pendienteNube && (a.transporte !== tr || a.destino !== de)) {
+      // [re-QA F2] Una PENDIENTE tambien se descarta si la nube cambio desde que
+      // se asigno (nubeAntes = lo que tenia la nube en ese momento): el cambio
+      // del dueno en la app es mas nuevo y el reintento no lo debe pisar.
+      const antes = (a && a.nubeAntes) || {};
+      const nubeCambio = !!(a && a.pendienteNube && ((antes.transporte || null) !== tr || (antes.destino || null) !== de));
+      const sincronizadaDistinta = !!(a && !a.pendienteNube && (a.transporte !== tr || a.destino !== de));
+      if (nubeCambio || sincronizadaDistinta) {
         delete this.asignaciones[t.id];
         cambioAsig = true;
-        this.log(`[asignar] ${e.nombre}: la nube trae otra impresora (${tr ? transportes.describir({ transporte: tr, destino: de }) : 'la de siempre'}); se deja la asignacion de esta PC.`);
+        this.log(`[asignar] ${e.nombre}: la nube trae otra impresora (${tr ? transportes.describir({ transporte: tr, destino: de }) : 'la de siempre'}); se descarta la asignacion de esta PC.`);
       }
     }
     if (cambio) this.guardarJson(this.archivoEstaciones, { prefijo: this.estacionesPrefijo, ts: this.estacionesTs, estaciones: [...this.estaciones.values()] });
@@ -99,7 +105,12 @@ class Motor {
   asignar(estacionId, transporte, destino, opciones = {}) {
     const problema = transportes.validarDestino(transporte, destino);
     if (problema) throw new Error(problema);
-    this.asignaciones[estacionId] = { transporte, destino: String(destino), ts: Date.now(), pendienteNube: opciones.pendienteNube !== false };
+    // nubeAntes: lo que la nube tenia al asignar (para no pisar un cambio posterior del dueno).
+    const est = this.estaciones.get(estacionId) || {};
+    this.asignaciones[estacionId] = {
+      transporte, destino: String(destino), ts: Date.now(), pendienteNube: opciones.pendienteNube !== false,
+      nubeAntes: { transporte: est.transporte || null, destino: est.destino || null },
+    };
     this.guardarJson(this.archivoAsignaciones, this.asignaciones);
   }
 
@@ -124,6 +135,15 @@ class Motor {
     if (!a || !a.pendienteNube) return;
     a.pendienteNube = false;
     this.guardarJson(this.archivoAsignaciones, this.asignaciones);
+  }
+
+  // La nube rechazo el aviso porque cambio despues (CAMBIO_EN_NUBE): manda la
+  // nube y la local se descarta.
+  descartarPorNube(estacionId) {
+    if (!this.asignaciones[estacionId]) return;
+    delete this.asignaciones[estacionId];
+    this.guardarJson(this.archivoAsignaciones, this.asignaciones);
+    this.log(`[asignar] la nube cambio la impresora de ${(this.estaciones.get(estacionId) || {}).nombre || estacionId} despues de asignarla aqui: se descarta la asignacion de esta PC.`);
   }
 
   pendientesNube() {
@@ -165,10 +185,12 @@ class Motor {
   async _procesar(j) {
     const previo = this.diario.get(j.clave);
     let payload = j.payload || {};
-    // [QA F2 MEDIO-2] Una reimpresion PEDIDA (payload.reimpresion) no se calla
-    // aunque ese papel ya haya salido: es justamente lo que se pidio.
-    const pideReimpresion = payload.reimpresion === true;
-    if (previo && previo.e === 'IMPRESO' && !pideReimpresion) return { ok: true, duplicado: true, via: previo.via || null };
+    // [re-QA F2 NUEVO-1] La dedupe es SIEMPRE por jobId|estacion, tambien con
+    // payload.reimpresion: una reimpresion lleva un jobId NUEVO (lo genera
+    // core/front/lib/impresora.js). Si la reimpresion saltara la dedupe, el
+    // papel que salio por la LAN volveria a salir cuando la nube lo entregue
+    // con el mismo jobId (respaldo LAN -> nube).
+    if (previo && previo.e === 'IMPRESO') return { ok: true, duplicado: true, via: previo.via || null };
     const est = this.estaciones.get(j.estacion);
     const ruta = this.ruta(j.estacion);
     // DUDOSO: no se sabe si salio; si vuelve, sale con sello (no como pedido nuevo).
@@ -193,13 +215,15 @@ class Motor {
     const via = transportes.describir(ruta);
     let enviando = false;
     try {
-      await this.colas.encolar(colaKey, async () => {
+      await this.colas.encolar(colaKey, async (cola) => {
         // Render dentro de la cola (formato al dia) y ANTES de marcar IMPRIMIENDO.
         let texto;
         if (j.renderTexto) {
           try { texto = await j.renderTexto(job); } catch (_) { texto = null; }
         }
         if (!texto) texto = this.renderPara(this.getAncho()).render(job);
+        // El tope de la cola vencio mientras se armaba el papel: no se manda nada.
+        if (cola && cola.abandonada) { const e = new Error('abandonada por tiempo antes de enviar'); e.sinEnviar = true; throw e; }
         this.diario.poner(j.clave, { ...base, e: 'IMPRIMIENDO' });
         enviando = true;
         await this.enviar(ruta, texto, { timeoutMs: ruta.transporte === 'USB_WIN' ? 25000 : 10000 });

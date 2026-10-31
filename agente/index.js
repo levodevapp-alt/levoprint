@@ -317,7 +317,10 @@ function rpcNoExiste(e) {
 // la nube, y si el dueno la cambia en la app, se respeta).
 async function avisarAsignacion(dev, pfx, estacion, a) {
   try {
-    const r = await rpc(`${pfx}_agente_asignar`, { device: dev, estacion, transporte: a.transporte, destino: a.destino });
+    // antes = lo que tenia la nube al asignar: si la nube cambio despues, el
+    // servidor responde CAMBIO_EN_NUBE y NO pisa el cambio del dueno [re-QA F2].
+    const r = await rpc(`${pfx}_agente_asignar`, { device: dev, estacion, transporte: a.transporte, destino: a.destino, antes: a.nubeAntes || null });
+    if (r && r.ok === false && r.error === 'CAMBIO_EN_NUBE') { motor.descartarPorNube(estacion); return false; }
     if (r && r.ok === false) {
       // La nube la rechaza (estacion borrada, destino invalido): no tiene
       // sentido reintentar; queda solo en esta PC y se avisa en el log.
@@ -333,8 +336,15 @@ async function avisarAsignacion(dev, pfx, estacion, a) {
   }
 }
 
+// [re-QA F2] Primero se trae lo que tiene la nube (agente_lan) y DESPUES se
+// avisan las asignaciones pendientes: si el dueno cambio la impresora en la
+// app mientras tanto, ponerTransportes descarta la local antes de reintentar.
 async function latidoLan(dev, pfx) {
-  for (const a of motor.pendientesNube()) await avisarAsignacion(dev, pfx, a.estacion, a);
+  try { await latidoLanNube(dev, pfx); }
+  finally { for (const a of motor.pendientesNube()) await avisarAsignacion(dev, pfx, a.estacion, a); }
+}
+
+async function latidoLanNube(dev, pfx) {
   if (nube.lanSoportado === false && Date.now() < nube.lanReintentoTs) return;
   const impresos = diario.sinReportar(200);
   try {
@@ -741,10 +751,12 @@ function lanHaceFalta() {
   return !!emparejador.pinVigente() || emparejador.lista().length > 0;
 }
 function asegurarLan() {
+  emparejador.purgarVencidos();   // un token vencido no mantiene el puerto abierto
   const falta = lanHaceFalta();
   if (falta && !lanEstado.servidor) iniciarLan();
   else if (!falta && lanEstado.servidor) {
-    try { lanEstado.servidor.close(); } catch { /* ya cerrado */ }
+    // close() no corta las conexiones keep-alive abiertas: se cierran a mano.
+    try { lanEstado.servidor.close(); lanEstado.servidor.closeAllConnections(); } catch { /* ya cerrado */ }
     lanEstado.servidor = null; lanEstado.escuchando = false;
     console.log('[lan] sin PIN ni equipos emparejados: se cierra el puerto ' + PUERTO_LAN + '.');
   }
@@ -761,6 +773,8 @@ function iniciarLan() {
     lanEstado.escuchando = false;
     lanEstado.error = e.code === 'EADDRINUSE' ? `el puerto ${PUERTO_LAN} esta ocupado (otro LevoPrint abierto?)` : e.message;
     console.error('[lan] ' + lanEstado.error);
+    // Sin escuchar: se suelta para que asegurarLan (cada 30 s) lo reintente.
+    if (lanEstado.servidor === servidor) lanEstado.servidor = null;
   });
   servidor.listen(PUERTO_LAN, '0.0.0.0', () => {
     lanEstado.escuchando = true; lanEstado.error = null;

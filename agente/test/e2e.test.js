@@ -142,6 +142,19 @@ test('F2 de punta a punta: LAN sin nube, dedupe al volver, simultaneos, atascada
   assert.equal(lat.lan.puerto, PL);
   assert.equal(lat.version, '1.8.0');
 
+  // ---- 4b) [re-QA NUEVO-1] reimpresion:true por la LAN y luego por la nube con el MISMO jobId = UN papel ----
+  const JR = uuid();
+  const reimp = { mesa: '7', items: [{ cantidad: 1, nombre: 'Ceviche' }], reimpresion: true, jobId: JR };
+  const cocinaR = cocina.papeles.length;
+  const rR = await pedir(PL, 'POST', '/v1/imprimir', { cuerpo: { jobId: JR, tipo: 'COMANDA', estacion: EST_COCINA, payload: reimp }, cabeceras: auth });
+  assert.equal(rR.json.ok, true);
+  const marcadosAntes = nube.estado.marcados.length;
+  const jR = nube.encolar('COMANDA', EST_COCINA, reimp);
+  assert.ok(await hasta(() => nube.estado.marcados.some((m) => m.id === jR.id), 20000), 'la nube no recibio el marcar de la reimpresion');
+  await esperar(300);
+  assert.equal(cocina.papeles.length, cocinaR + 1, 'la reimpresion salio UNA vez');
+  assert.ok(nube.estado.marcados.length > marcadosAntes);
+
   // ---- 5) impresora atascada no frena a la otra ----
   const t0 = Date.now();
   const atascada = pedir(PL, 'POST', '/v1/imprimir', { cuerpo: { jobId: uuid(), tipo: 'COMANDA', estacion: EST_ATASCADA, payload: { mesa: '1', items: [] } }, cabeceras: auth });

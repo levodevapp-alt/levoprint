@@ -17,13 +17,11 @@
 // falta, el siguiente paso es un PowerShell persistente.
 //
 // [QA F2 MEDIO-5] Endurecido:
-//   · Los scripts son archivos .ps1 en la carpeta de LevoPrint (configurar),
-//     que se reescriben al arrancar y se corren con -File (nada de
-//     -EncodedCommand, que los antivirus miran con razon). Sigue haciendo
-//     falta -ExecutionPolicy Bypass (de este proceso, no del equipo): Windows
-//     trae "Restricted" y un .ps1 sin firma no correria. Con el .exe y los
-//     .ps1 FIRMADOS se podria pasar a AllSigned (pendiente: certificado de
-//     firma de codigo de LevoDev; ver docs/F2_IMPRESION_LOCAL.md).
+//   · [re-QA F2] El script viaja por la ENTRADA ESTANDAR del PowerShell
+//     (powershell -NoProfile -NonInteractive -Command -): no hay archivo .ps1
+//     que alguien pueda cambiar en disco, ni -EncodedCommand, ni
+//     -ExecutionPolicy Bypass (la politica de ejecucion solo mira archivos de
+//     script; un comando por stdin no la necesita). Probado con la cola real.
 //   · El proceso hijo recibe un entorno MINIMO (sistema + LP_*), no el
 //     entorno completo del agente.
 //   · Los .bin temporales viven en <tmp>/levoprint-raw, se borran en finally
@@ -39,22 +37,16 @@ const crypto = require('crypto');
 const ES_WINDOWS = process.platform === 'win32';
 
 const DIR_TMP = path.join(os.tmpdir(), 'levoprint-raw');
-let dirScripts = path.join(os.tmpdir(), 'levoprint-ps');   // configurar() lo cambia a la carpeta de LevoPrint
 const PRE = '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n$ProgressPreference = "SilentlyContinue"\r\n';
 
-// Escribe los .ps1 junto a LevoPrint y limpia temporales viejos (> 1 h).
+// Al arrancar: limpia temporales viejos (> 1 h) y borra los .ps1 que dejaba
+// una version de prueba anterior en la carpeta de LevoPrint (ya no se usan).
 function configurar(dir) {
-  if (dir) dirScripts = dir;
-  try {
-    fs.mkdirSync(dirScripts, { recursive: true });
-    for (const [nombre, cuerpo] of Object.entries(SCRIPTS)) {
-      const f = path.join(dirScripts, nombre);
-      const txt = '\uFEFF' + PRE + cuerpo.replace(/\r?\n/g, '\r\n');
-      let actual = null;
-      try { actual = fs.readFileSync(f, 'utf8'); } catch { actual = null; }
-      if (actual !== txt) fs.writeFileSync(f, txt, 'utf8');
+  if (dir) {
+    for (const viejo of ['levoprint-raw.ps1', 'levoprint-listar.ps1']) {
+      try { fs.unlinkSync(path.join(dir, viejo)); } catch { /* no estaba */ }
     }
-  } catch { /* carpeta de solo lectura: falla al imprimir con un mensaje claro */ }
+  }
   try {
     const limite = Date.now() - 3600000;
     for (const f of fs.readdirSync(DIR_TMP)) {
@@ -76,20 +68,21 @@ function entornoMinimo(extra) {
   return { ...e, ...(extra || {}) };
 }
 
-// Corre uno de los .ps1 con -File y devuelve stdout (UTF-8).
+// Corre uno de los scripts mandandolo por stdin (-Command -) y devuelve stdout (UTF-8).
+// La linea en blanco final cierra el ultimo bloque en el modo de lectura por stdin.
 function powershell(nombre, env, timeoutMs) {
   if (!SCRIPTS[nombre]) return Promise.reject(new Error('script desconocido'));
-  const archivo = path.join(dirScripts, nombre);
-  if (!fs.existsSync(archivo)) configurar();
   const raiz = process.env.SystemRoot || 'C:\\Windows';
   const exe = path.join(raiz, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   return new Promise((resolve, reject) => {
-    execFile(fs.existsSync(exe) ? exe : 'powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', archivo], {
+    const hijo = execFile(fs.existsSync(exe) ? exe : 'powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '-'], {
       env: entornoMinimo(env), timeout: timeoutMs || 20000, windowsHide: true, maxBuffer: 4 * 1024 * 1024,
     }, (err, stdout, stderr) => {
       if (err && !stdout) return reject(new Error((stderr || err.message || 'powershell fallo').toString().trim().slice(0, 300)));
       resolve(String(stdout || '').trim());
     });
+    hijo.stdin.on('error', () => { /* el proceso murio antes de leer: lo informa el callback */ });
+    hijo.stdin.end(PRE + SCRIPTS[nombre].replace(/\r?\n/g, '\r\n') + '\r\n\r\n');
   });
 }
 

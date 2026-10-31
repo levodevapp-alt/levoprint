@@ -18,10 +18,13 @@ const { buscarTodo } = require('../lib/buscar');
 
 const correr = process.platform === 'win32' && process.env.LP_USB === '1';
 
-test('Windows: los scripts son .ps1 junto a LevoPrint y el hijo recibe un entorno minimo', { skip: !correr }, async () => {
+test('Windows: el script va por stdin (sin .ps1 ni Bypass) y el hijo recibe un entorno minimo', { skip: !correr }, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lp-ps-'));
+  fs.writeFileSync(path.join(dir, 'levoprint-raw.ps1'), 'viejo');           // lo dejaba una version anterior
   usbwin.configurar(dir);
-  assert.ok(fs.existsSync(path.join(dir, 'levoprint-raw.ps1')) && fs.existsSync(path.join(dir, 'levoprint-listar.ps1')));
+  assert.ok(!fs.existsSync(path.join(dir, 'levoprint-raw.ps1')), 'se borra el .ps1 viejo');
+  const fuente = fs.readFileSync(path.join(__dirname, '..', 'lib', 'usbwin.js'), 'utf8');
+  assert.ok(!/'-ExecutionPolicy', 'Bypass'/.test(fuente) && !/'-File'/.test(fuente) && /'-Command', '-'/.test(fuente));
   const env = usbwin.entornoMinimo({ LP_X: '1' });
   assert.ok(!('LEVO_ANON' in env) && !('LEVO_DEVICE' in env) && env.LP_X === '1' && env.PATH);
   assert.ok((await usbwin.listar()).length >= 1, 'corre desde la carpeta configurada');

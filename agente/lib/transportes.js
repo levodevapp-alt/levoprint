@@ -15,8 +15,9 @@
 //   · puertos de impresion RAW 9100-9109 (servidores de impresion de
 //     varios puertos usan 9101, 9102...).
 // La misma regla vive en SQL (_il_destino_error) y en el APK (Motor.validar).
-// LEVO_TCP_PRUEBAS=1 (solo pruebas automaticas) permite 127.0.0.1 y
-// cualquier puerto: las impresoras falsas escuchan en puertos al azar.
+// LEVO_TCP_PRUEBAS=1 (solo pruebas automaticas con node, nunca en el .exe)
+// permite 127.0.0.1 y cualquier puerto: las impresoras falsas escuchan en
+// puertos al azar.
 //
 // [QA F2 MEDIO-1] Todo error lleva `sinEnviar`: true si es SEGURO que la
 // impresora no recibio nada (conexion rechazada, destino invalido, no se
@@ -28,7 +29,10 @@ const net = require('net');
 const usbwin = require('./usbwin');
 
 const TRANSPORTES = ['TCP', 'USB_WIN', 'USB_ANDROID', 'BT', 'BLE'];
-const modoPruebas = () => process.env.LEVO_TCP_PRUEBAS === '1';
+// [re-QA F2] El modo pruebas NO existe en el .exe (Node SEA): una variable de
+// entorno en la PC del cliente no puede abrir loopback ni otros puertos.
+const ES_EXE = (() => { try { return require('node:sea').isSea(); } catch { return false; } })();
+const modoPruebas = () => !ES_EXE && process.env.LEVO_TCP_PRUEBAS === '1';
 
 function errorSinEnviar(mensaje, codigo) {
   const e = new Error(mensaje);

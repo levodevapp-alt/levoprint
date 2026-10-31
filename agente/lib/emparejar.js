@@ -21,7 +21,10 @@
 //     tope se responde "espera" sin anular el PIN. Antes 20 fallos anulaban el
 //     PIN y cualquiera de la red podia impedir emparejar (negacion de servicio).
 //     Con el tope, en los 10 min de vida del PIN caben ~300 intentos: 0,03 %.
-//   · el mapa de IPs tiene tope (1000): no crece sin limite.
+//   · el mapa de IPs tiene tope (1000): no crece sin limite;
+//   · [re-QA F2] 150 fallos ACUMULADOS contra el mismo PIN lo anulan (hay que
+//     generar otro en la ventana). Con el tope por minuto, adivinarlo antes
+//     queda en 150 / 1 000 000.
 // Por que PIN local y no un secreto de la nube: funciona sin internet (que
 // es justo cuando importa) y no deja un secreto de la empresa en la BD.
 // ============================================================
@@ -33,6 +36,7 @@ const PIN_MS = 10 * 60000;
 const FALLOS_IP = 5, ESPERA_IP_MS = 60000;
 const FALLOS_MINUTO = 30;
 const MAX_IPS = 1000;
+const FALLOS_POR_PIN = 150;
 const VIDA_TOKEN_MS = 90 * 86400000;
 
 const sha = (t) => crypto.createHash('sha256').update(String(t)).digest('hex');
@@ -71,7 +75,7 @@ class Emparejador {
 
   nuevoPin() {
     const valor = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
-    this.pin = { valor, expira: Date.now() + PIN_MS };
+    this.pin = { valor, expira: Date.now() + PIN_MS, fallos: 0 };
     return this.pin;
   }
 
@@ -101,6 +105,11 @@ class Emparejador {
       }
       this.porIp.set(ip, reg);
       this.fallosGlobal.push(ahora);
+      vigente.fallos = (vigente.fallos || 0) + 1;
+      if (vigente.fallos >= FALLOS_POR_PIN) {
+        this.pin = null;
+        return { ok: false, error: 'SIN_PIN', mensaje: 'Demasiados intentos: el PIN se anulo. Genera otro en la ventana de LevoPrint.' };
+      }
       return { ok: false, error: 'PIN_INVALIDO', mensaje: 'PIN incorrecto o vencido. Revisa el que muestra LevoPrint.' };
     }
     this.porIp.delete(ip);

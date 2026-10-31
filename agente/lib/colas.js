@@ -7,6 +7,9 @@
 // de la misma impresora salen en orden; los de otra impresora no esperan.
 // Cada trabajo tiene un tope de tiempo (timeoutMs): si se cuelga, la fila
 // sigue con el siguiente y el colgado se da por fallido.
+// [re-QA F2] La tarea recibe { abandonada }: si el tope vencio mientras
+// esperaba (p. ej. el render remoto tardo), NO debe mandar nada: quien pidio
+// el papel ya recibio un error y podria reintentarlo por otra ruta.
 // ============================================================
 'use strict';
 
@@ -24,12 +27,14 @@ class Colas {
     const tope = timeoutMs || this.timeoutMs;
     const actual = previa.catch(() => {}).then(() => new Promise((resolve, reject) => {
       let listo = false;
+      const estado = { abandonada: false };
       const t = setTimeout(() => {
         if (listo) return;
         listo = true;
+        estado.abandonada = true;
         reject(new Error(`la impresora no respondio en ${Math.round(tope / 1000)} s`));
       }, tope);
-      Promise.resolve().then(tarea).then(
+      Promise.resolve().then(() => tarea(estado)).then(
         (v) => { if (!listo) { listo = true; clearTimeout(t); resolve(v); } },
         (e) => { if (!listo) { listo = true; clearTimeout(t); reject(e); } });
     }));
