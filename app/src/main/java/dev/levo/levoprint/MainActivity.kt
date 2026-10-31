@@ -191,6 +191,46 @@ class MainActivity : AppCompatActivity() {
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) pedir(Manifest.permission.POST_NOTIFICATIONS)
 
+    // ---- [F2] Impresion sin internet: emparejar equipos y buscar impresoras ----
+    Motor.iniciar(this)
+    val txtLan = findViewById<TextView>(R.id.txtLan)
+    val txtPinLan = findViewById<TextView>(R.id.txtPinLan)
+    val txtBuscar = findViewById<TextView>(R.id.txtBuscar)
+    refrescarLan = {
+      val ips = Red.ipsLocales()
+      txtLan.text = when {
+        !PrintService.activo -> "Arranca LevoPrint para recibir impresiones por la WiFi del local."
+        PrintService.lanError != null -> "Red del local: " + PrintService.lanError
+        ips.isEmpty() -> "Escuchando en este equipo (127.0.0.1:" + PrintService.PUERTO_LAN + "). Conecta la WiFi del local para los demas equipos."
+        else -> "Escuchando en " + ips.joinToString(" · ") { "http://$it:" + PrintService.PUERTO_LAN } +
+          " · " + Emparejador.equipos(this).size + " equipos emparejados"
+      }
+      val pin = Emparejador.pinVigente()
+      txtPinLan.visibility = if (pin != null) android.view.View.VISIBLE else android.view.View.GONE
+      txtPinLan.text = pin ?: ""
+    }
+    findViewById<Button>(R.id.btnPinLan).setOnClickListener {
+      Emparejador.nuevoPin()
+      txtBuscar.text = "En la app: Estaciones > LevoPrint en esta red > escribe este PIN (vence en 10 min, sirve una vez)."
+      refrescarLan?.invoke()
+    }
+    findViewById<Button>(R.id.btnBuscar).setOnClickListener { b ->
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) pedir(Manifest.permission.BLUETOOTH_CONNECT)
+      b.isEnabled = false
+      txtBuscar.text = "Buscando en USB, Bluetooth y la red..."
+      Thread {
+        val l = try { Buscar.lista(this) } catch (e: Exception) { emptyList() }
+        h.post {
+          b.isEnabled = true
+          txtBuscar.text = if (l.isEmpty()) "No se encontro ninguna. Revisa el cable OTG, el Bluetooth emparejado o que la impresora este en la misma WiFi." else l.size.toString() + " encontradas."
+          if (l.isNotEmpty()) elegirHallazgo(l)
+        }
+      }.start()
+    }
+    // Abierta por enchufar una ticketera USB (USB_DEVICE_ATTACHED).
+    if (intent?.action == android.hardware.usb.UsbManager.ACTION_USB_DEVICE_ATTACHED)
+      txtBuscar.text = "Impresora USB conectada. Toca Buscar impresoras para asignarla a una estacion."
+
     // Arranque automático si ya hay configuración (tras reinicio/reapertura).
     // Si el servicio corre pero esta desactivado, abrir la app lo despierta
     // para reintentar al instante (onStartCommand).
@@ -200,12 +240,43 @@ class MainActivity : AppCompatActivity() {
     }
     refrescar()
     tick = object : Runnable {
-      override fun run() { log.text = PrintService.ultimoLog; refrescar(); h.postDelayed(this, 1500) }
+      override fun run() { log.text = PrintService.ultimoLog; refrescar(); refrescarLan?.invoke(); h.postDelayed(this, 1500) }
     }
     h.post(tick!!)
   }
 
   private var tick: Runnable? = null
+  private var refrescarLan: (() -> Unit)? = null
+
+  // [F2] Hallazgo de "Buscar impresoras": Probar o Asignar a una estacion con un toque.
+  private fun elegirHallazgo(l: List<Buscar.Hallazgo>) {
+    val nombres = l.map { it.nombre + "  ·  " + it.via + (if (it.ticketera) "" else " (¿impresora?)") }.toTypedArray()
+    android.app.AlertDialog.Builder(this).setTitle("Impresoras encontradas").setItems(nombres) { _, i ->
+      val hz = l[i]
+      val ruta = Motor.Ruta(hz.transporte, hz.destino)
+      val ests = Motor.estaciones.values.sortedBy { it.nombre }
+      val opciones = arrayOf("Imprimir prueba") + ests.map { "Asignar a " + it.nombre }.toTypedArray()
+      android.app.AlertDialog.Builder(this).setTitle(hz.nombre).setItems(opciones) { _, j ->
+        val txt = findViewById<TextView>(R.id.txtBuscar)
+        if (hz.transporte == "USB_ANDROID") Usb.pedirPermiso(this, hz.destino)
+        if (j == 0) {
+          txt.text = "Imprimiendo prueba en " + hz.nombre + "..."
+          Thread {
+            val ancho = Prefs.leer(this)?.ancho ?: 48
+            val r = try { Motor.enviar(ruta, Agent.render(org.json.JSONObject().put("tipo", "PRUEBA").put("payload", org.json.JSONObject()), ancho)); "Prueba enviada a " + hz.nombre + "." }
+              catch (e: Exception) { "No se pudo imprimir: " + e.message }
+            h.post { txt.text = r }
+          }.start()
+        } else {
+          val est = ests[j - 1]
+          Motor.asignar(est.id, ruta)
+          txt.text = "Listo: " + hz.nombre + " imprime para " + est.nombre + "."
+          // Se avisa a la nube si hay internet (si no, queda en este equipo).
+          Thread { try { Prefs.leer(this)?.let { Agent.asignar(it, est.id, ruta.transporte, ruta.destino) } } catch (_: Exception) {} }.start()
+        }
+      }.show()
+    }.show()
+  }
   override fun onDestroy() { tick?.let { h.removeCallbacks(it) }; super.onDestroy() }
 
   private fun pedir(p: String) {

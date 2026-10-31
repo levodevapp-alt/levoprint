@@ -39,6 +39,8 @@ android {
     targetCompatibility = JavaVersion.VERSION_17
   }
   kotlinOptions { jvmTarget = "17" }
+  // [F2] BuildConfig.VERSION_NAME lo devuelve el servidor local en /v1/hola.
+  buildFeatures { buildConfig = true }
 }
 dependencies {
   implementation("androidx.core:core-ktx:1.13.1")

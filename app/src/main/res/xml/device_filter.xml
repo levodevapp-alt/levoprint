@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [F2] Impresoras USB que despiertan a LevoPrint al enchufarlas (OTG).
+     Clase 7 = impresora (estandar USB). Ademas, fabricantes de ticketeras que
+     se anuncian como "vendor specific" (clase 255) y no entrarian por la clase:
+     Epson 0x04B8, Winbond/Xprinter 0x0416, STM (POS-58 genericas) 0x0483,
+     ICS/Xprinter 0x0FE6, Xprinter GD32 0x28E9, Star 0x0519, Bixolon 0x1504,
+     SNBC 0x154F, Rongta/HPRT 0x20D1, Custom 0x0DD4, Citizen 0x1D90.
+     Valores en decimal (asi los lee Android). -->
+<resources>
+  <usb-device class="7" />
+  <usb-device vendor-id="1208" />
+  <usb-device vendor-id="1046" />
+  <usb-device vendor-id="1155" />
+  <usb-device vendor-id="4070" />
+  <usb-device vendor-id="10473" />
+  <usb-device vendor-id="1305" />
+  <usb-device vendor-id="5380" />
+  <usb-device vendor-id="5455" />
+  <usb-device vendor-id="8401" />
+  <usb-device vendor-id="3540" />
+  <usb-device vendor-id="7568" />
+</resources>

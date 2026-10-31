@@ -14,7 +14,10 @@ data class Cfg(
   val prefijo: String, val ancho: Int
 )
 
-data class Estacion(val id: String, val nombre: String, val ip: String?, val puerto: Int)
+// [F2] transporte/destino: columnas nuevas (plantilla impresion_local). Nulos =
+// estacion de siempre (ip:puerto por TCP).
+data class Estacion(val id: String, val nombre: String, val ip: String?, val puerto: Int,
+                    val transporte: String? = null, val destino: String? = null)
 
 // [canje-v3] Error HTTP de una RPC con el "message" de Postgres ya leido.
 // Las RPC del agente (agente_config / print_tomar / print_marcar) pasan por
@@ -72,11 +75,26 @@ object Agent {
     val arr = r.optJSONArray("estaciones") ?: JSONArray()
     val m = HashMap<String, Estacion>()
     for (i in 0 until arr.length()) {
-      val e = arr.getJSONObject(i)
-      val id = e.optString("id")
-      m[id] = Estacion(id, e.optString("nombre"), e.optString("ip").ifBlank { null }, e.optInt("puerto", 9100))
+      val e = Motor.estacionDe(arr.getJSONObject(i))
+      m[e.id] = e
     }
     return m
+  }
+
+  // [F2] Latido LAN: publica la IP del equipo en la red del local, trae
+  // transporte/destino de cada estacion y reporta lo impreso por la LAN.
+  // Si la base aun no tiene la RPC (plantilla impresion_local), RpcError 404.
+  fun latidoLan(c: Cfg, ips: List<String>, puerto: Int, impresos: List<Diario.Entrada>): JSONObject {
+    val arr = JSONArray()
+    for (x in impresos) arr.put(JSONObject().put("clave", x.k).put("estacion", x.est).put("ts", java.time.Instant.ofEpochMilli(x.ts).toString()))
+    val p = JSONObject().put("device", c.device).put("version", BuildConfig.VERSION_NAME).put("android", true)
+      .put("lan", JSONObject().put("ips", JSONArray(ips)).put("puerto", puerto)).put("impresos", arr)
+    return rpc(c, c.prefijo + "_agente_lan", p)
+  }
+
+  fun asignar(c: Cfg, estacion: String, transporte: String, destino: String) {
+    rpc(c, c.prefijo + "_agente_asignar", JSONObject().put("device", c.device).put("estacion", estacion)
+      .put("transporte", transporte).put("destino", destino))
   }
 
   fun tomar(c: Cfg): JSONArray {
@@ -316,6 +334,10 @@ object Agent {
       else -> renderGenerico(tipo.ifBlank { "COMPROBANTE" }, pl, ancho)
     }
     // [kuti] Toda reimpresion de KUTI trae "copia": sello arriba. KOMO/KIPU no lo mandan.
+    // [F2] "reimpresion" (como el .exe): sello REIMPRESION arriba; lo usa el
+    // diario cuando un trabajo quedo DUDOSO (la app murio a mitad).
+    if (!pl.optBoolean("copia") && pl.optBoolean("reimpresion") && t.startsWith(INIT))
+      return INIT + CENTRO + NEG_ON + "*** REIMPRESION ***" + NL + NEG_OFF + IZQ + t.substring(INIT.length)
     if (!pl.optBoolean("copia") || !t.startsWith(INIT)) return t
     return INIT + CENTRO + NEG_ON + GRANDE + "*** COPIA ***" + NL + NORMAL + NEG_OFF + IZQ + t.substring(INIT.length)
   }
@@ -327,6 +349,7 @@ object Agent {
   fun imprimirTcp(ip: String, puerto: Int, texto: String) {
     Socket().use { s ->
       s.connect(InetSocketAddress(ip, puerto), 5000)
+      s.soTimeout = 10000
       s.getOutputStream().use { out ->
         out.write(bytes(texto))
         out.flush()

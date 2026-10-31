@@ -44,8 +44,17 @@ import androidx.core.content.ContextCompat
 //
 // Backoff "equipo olvidado": 60 s la primera hora, 5 min hasta las 24 h y
 // luego cada 15 min.
+//
+// [F2] Ademas del bucle de la nube, el servicio levanta el ServidorLocal
+// (:9120, red del local y loopback): la caja y los mozos imprimen por la
+// WiFi aunque se caiga el internet. Nube y LAN pasan por el mismo Motor
+// (diario anti-duplicado + una cola por impresora). Latido LAN cada ~60 s
+// (cada ~16 s mientras haya impresos por la LAN sin reportar).
 class PrintService : Service() {
   @Volatile private var corriendo = false
+  private var servidor: ServidorLocal? = null
+  private val trabajadores = java.util.concurrent.Executors.newFixedThreadPool(4)
+  @Volatile private var lanNoExisteHasta = 0L
   private var hilo: Thread? = null
   private var wake: PowerManager.WakeLock? = null
   private var wakeCorto: PowerManager.WakeLock? = null
@@ -66,6 +75,10 @@ class PrintService : Service() {
     @Volatile var desactivado = false
     @Volatile var desactivadoDesde = 0L // System.currentTimeMillis() del primer AGENTE_INVALIDO
     @Volatile var ultimoLog = "Detenido"
+    @Volatile var nubeOkTs = 0L                 // [F2] ultima respuesta buena de la nube
+    @Volatile var lanEscuchando = false
+    @Volatile var lanError: String? = null
+    const val PUERTO_LAN = 9120
 
     fun esperaDesactivado(desde: Long): Long {
       val t = System.currentTimeMillis() - desde
@@ -118,6 +131,8 @@ class PrintService : Service() {
     }
     val cfg = Prefs.leer(this) ?: run { stopSelf(); return START_NOT_STICKY }
     try { arrancarForeground(TXT_ACTIVO) } catch (e: Exception) { ultimoLog = "foreground: " + e.message }
+    Motor.iniciar(this)
+    servidor = ServidorLocal(this, PUERTO_LAN) { forzarConfig = true; despertar() }.also { it.iniciar() }
     cfgActual = cfg
     forzarConfig = true
     desactivado = false
@@ -129,8 +144,8 @@ class PrintService : Service() {
   }
 
   private fun bucle() {
-    var estaciones: Map<String, Estacion> = emptyMap()
     var ciclo = 0
+    var ultimoLatido = 0L
     while (corriendo) {
       // Config de ESTA vuelta: los trabajos tomados se marcan con el mismo token.
       val cfg = cfgActual ?: break
@@ -139,34 +154,48 @@ class PrintService : Service() {
         // [qa5] El contador avanza SIEMPRE (antes "forzar || ciclo++" lo
         // saltaba por cortocircuito cuando forzarConfig era true).
         val tocaConfig = ciclo++ % 30 == 0
+        lanEscuchando = servidor?.escuchando == true
+        lanError = servidor?.error
         if (forzarConfig || tocaConfig) {
-          estaciones = Agent.estaciones(cfg)
+          Motor.ponerEstaciones(Agent.estaciones(cfg))
           forzarConfig = false
-          ultimoLog = "Config: " + estaciones.size + " estaciones"
+          ultimoLog = "Config: " + Motor.estaciones.size + " estaciones"
         }
         val jobs = Agent.tomar(cfg)
+        nubeOkTs = System.currentTimeMillis()
         if (desactivado && cfg == cfgActual) {
           // Lo reactivaron en la consola: vuelve al ritmo normal.
           salirDeDesactivado()
           ultimoLog = "Reactivado: imprimiendo de nuevo"
         }
-        for (i in 0 until jobs.length()) {
+        // [F2] Cada trabajo por el Motor (diario + cola de SU impresora), en
+        // paralelo entre impresoras. Un jobId que ya salio por la LAN se marca
+        // impreso sin otro papel.
+        val tareas = (0 until jobs.length()).map { i ->
           val job = jobs.getJSONObject(i)
-          val id = job.optString("id")
-          try {
-            val est = estaciones[job.optString("estacion")]
-            val texto = Agent.render(job, cfg.ancho)
-            val btMac = Prefs.getBtMac(this)
-            when {
-              est?.ip != null -> { Agent.imprimirTcp(est.ip, est.puerto, texto); ultimoLog = "OK " + job.optString("tipo") + " -> " + est.nombre }
-              Prefs.getBluetooth(this) && btMac.isNotBlank() -> { Bt.imprimir(btMac, texto); ultimoLog = "OK " + job.optString("tipo") + " -> Bluetooth" }
-              else -> throw RuntimeException("estacion sin IP y sin Bluetooth")
-            }
-            Agent.marcar(cfg, id, true)
-          } catch (e: Exception) {
-            try { Agent.marcar(cfg, id, false, e.message) } catch (_: Exception) {}
-            ultimoLog = "ERR " + id + ": " + e.message
+          trabajadores.submit {
+            val id = job.optString("id")
+            val r = Motor.procesar(Diario.claveDeNube(job), "NUBE", job.optString("estacion").ifBlank { null },
+              job.optString("tipo"), job.optJSONObject("payload") ?: org.json.JSONObject(), cfg.ancho)
+            ultimoLog = (if (r.ok) "OK " else "ERR ") + job.optString("tipo") + " -> " + (r.via ?: "-") +
+              (if (r.duplicado) " (ya habia salido)" else "") + (if (r.ok) "" else ": " + r.error)
+            try { Agent.marcar(cfg, id, r.ok, if (r.ok) null else r.error) } catch (_: Exception) {}
           }
+        }
+        for (t in tareas) try { t.get() } catch (_: Exception) {}
+        // Latido LAN: cada ~60 s, o ~16 s si hay impresos por la LAN sin reportar.
+        val hayPorReportar = Motor.diario.sinReportar(1).isNotEmpty()
+        val ahora = System.currentTimeMillis()
+        if (ahora > lanNoExisteHasta && ahora - ultimoLatido > (if (hayPorReportar) 16000L else 60000L)) {
+          ultimoLatido = ahora
+          try {
+            val imp = Motor.diario.sinReportar(200)
+            val r = Agent.latidoLan(cfg, Red.ipsLocales(), PUERTO_LAN, imp)
+            Motor.ponerTransportes(r.optJSONArray("estaciones"))
+            if (imp.isNotEmpty()) Motor.diario.marcarReportados(imp.map { it.k })
+          } catch (e: RpcError) {
+            if (e.http == 404) lanNoExisteHasta = ahora + 10 * 60000L   // la base aun no tiene impresion_local
+          } catch (_: Exception) {}
         }
       } catch (e: RpcError) {
         if (e.agenteInvalido) {
@@ -293,6 +322,9 @@ class PrintService : Service() {
     desactivadoDesde = 0L
     ultimoLog = "Detenido"
     hilo?.interrupt()
+    servidor?.detener()
+    servidor = null
+    lanEscuchando = false
     cancelarReintento()
     if (receptorRegistrado) { try { unregisterReceiver(receptor) } catch (_: Exception) {} }
     soltarWake()

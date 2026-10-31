@@ -19,6 +19,9 @@
        (se pide en runtime; el emparejamiento por codigo escrito funciona igual sin ella). -->
   <uses-permission android:name="android.permission.CAMERA" />
   <uses-feature android:name="android.hardware.camera" android:required="false" />
+  <!-- [F2] Ticketera USB por cable OTG (USB host). Opcional: la app se instala
+       igual en equipos sin USB host. -->
+  <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
   <application
     android:allowBackup="true"
@@ -43,6 +46,13 @@
         <category android:name="android.intent.category.BROWSABLE" />
         <data android:scheme="levoprint" android:host="emparejar" />
       </intent-filter>
+      <!-- [F2] Al enchufar una ticketera USB, Android ofrece abrir LevoPrint
+           ("usar por defecto" recuerda el permiso). Filtro: res/xml/device_filter.xml -->
+      <intent-filter>
+        <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+      </intent-filter>
+      <meta-data android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+          android:resource="@xml/device_filter" />
     </activity>
     <service
       android:name=".PrintService"
