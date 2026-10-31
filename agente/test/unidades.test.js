@@ -151,6 +151,15 @@ test('mdns: arma consulta y resuelve SRV + A', () => {
   assert.deepEqual(r, [{ nombre: 'EPSON TM-T20', ip: '192.168.1.50', puerto: 9100, servicio: '_pdl-datastream._tcp.local' }]);
 });
 
+test('usbwin [re-QA]: todo script que va por stdin a PowerShell es ASCII puro', () => {
+  const textos = { PRE: usbwin.PRE, ...usbwin.SCRIPTS };
+  assert.ok(Object.keys(usbwin.SCRIPTS).length >= 2, 'estan SCRIPT_LISTAR y SCRIPT_IMPRIMIR');
+  for (const [nombre, t] of Object.entries(textos)) {
+    const malos = [...t].filter((c) => c.charCodeAt(0) > 127 || (c.charCodeAt(0) < 32 && !'\r\n\t'.includes(c)));
+    assert.deepEqual(malos, [], nombre + ' tiene caracteres fuera de ASCII');
+  }
+});
+
 test('usbwin: clasificar puertos y drivers', () => {
   assert.equal(usbwin.clasificar({ nombre: 'POS-80', puerto: 'USB001', driver: 'POS-80C' }).via, 'USB');
   assert.ok(usbwin.clasificar({ nombre: 'POS-80', puerto: 'USB001', driver: 'POS-80C' }).ticketera);
@@ -254,6 +263,24 @@ test('motor [re-QA NUEVO-1]: reimpresion con el MISMO jobId por la LAN y luego p
   assert.equal(salidas.length, 2);
 });
 
+test('motor [re-QA A->B->A]: la pendiente compara la VERSION de la nube, no el valor', () => {
+  const m = motorDePrueba(async () => {});
+  m.ponerTransportes([{ id: 'coc', transporte: 'TCP', destino: '192.168.1.40:9100', v: 4 }]);
+  m.asignar('coc', 'TCP', '192.168.1.99:9100', { pendienteNube: true });
+  assert.deepEqual(m.asignaciones.coc.nubeAntes, { transporte: 'TCP', destino: '192.168.1.40:9100', v: 4 });
+  m.ponerTransportes([{ id: 'coc', transporte: 'TCP', destino: '192.168.1.40:9100', v: 4 }]);
+  assert.equal(m.ruta('coc').fuente, 'local', 'misma version: la pendiente se queda');
+  // el dueno paso A -> B -> A: mismo valor, version 6
+  m.ponerTransportes([{ id: 'coc', transporte: 'TCP', destino: '192.168.1.40:9100', v: 6 }]);
+  assert.equal(m.asignaciones.coc, undefined, 'A->B->A: se descarta aunque el valor coincida');
+  assert.equal(m.ruta('coc').destino, '192.168.1.40:9100');
+  // la nube acepta una asignacion y devuelve la version nueva: la siguiente parte de ella
+  m.asignar('coc', 'TCP', '192.168.1.98:9100', { pendienteNube: true });
+  m.confirmarNube('coc', 7);
+  m.asignar('coc', 'TCP', '192.168.1.97:9100', { pendienteNube: true });
+  assert.equal(m.asignaciones.coc.nubeAntes.v, 7);
+});
+
 test('colas [re-QA]: si el tope vence antes de mandar, la tarea ve abandonada y no manda', async () => {
   const c = new Colas({ timeoutMs: 100 });
   let mandado = false;
@@ -275,7 +302,7 @@ test('motor [re-QA ALTO-1]: asignacion pendiente se descarta si la nube cambio d
   assert.equal(m.asignaciones.coc, undefined, 'el dueno cambio la impresora en la app despues: se descarta la local');
   assert.equal(m.ruta('coc').destino, '192.168.1.77:9100');
   m.asignar('bar', 'TCP', '192.168.1.98:9100', { pendienteNube: true });
-  assert.deepEqual(m.asignaciones.bar.nubeAntes, { transporte: null, destino: null });
+  assert.deepEqual(m.asignaciones.bar.nubeAntes, { transporte: null, destino: null, v: null });
   m.descartarPorNube('bar');                                                 // el servidor respondio CAMBIO_EN_NUBE
   assert.equal(m.asignaciones.bar, undefined);
 });

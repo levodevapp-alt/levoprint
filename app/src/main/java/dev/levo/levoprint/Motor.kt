@@ -48,12 +48,13 @@ object Motor {
   fun estacionDe(e: JSONObject) = Estacion(e.optString("id"), e.optString("nombre"),
     e.optString("ip").ifBlank { null }, e.optInt("puerto", 9100),
     if (e.isNull("transporte")) null else e.optString("transporte").ifBlank { null },
-    if (e.isNull("destino")) null else e.optString("destino").ifBlank { null })
+    if (e.isNull("destino")) null else e.optString("destino").ifBlank { null },
+    if (e.has("v") && !e.isNull("v")) e.optLong("v") else null)
 
   private fun guardarEstaciones() {
     val arr = JSONArray()
     for (e in estaciones.values) arr.put(JSONObject().put("id", e.id).put("nombre", e.nombre).put("ip", e.ip)
-      .put("puerto", e.puerto).put("transporte", e.transporte).put("destino", e.destino))
+      .put("puerto", e.puerto).put("transporte", e.transporte).put("destino", e.destino).put("v", e.v ?: JSONObject.NULL))
     app.getSharedPreferences(P, Context.MODE_PRIVATE).edit().putString("estaciones", arr.toString()).apply()
   }
 
@@ -78,12 +79,16 @@ object Motor {
       val e = m[t.optString("id")] ?: continue
       val tr = if (t.isNull("transporte")) null else t.optString("transporte").ifBlank { null }
       val de = if (t.isNull("destino")) null else t.optString("destino").ifBlank { null }
-      m[e.id] = e.copy(transporte = tr, destino = de)
+      val v = if (t.has("v") && !t.isNull("v")) t.optLong("v") else null
+      m[e.id] = e.copy(transporte = tr, destino = de, v = v ?: e.v)
       val a = asignacion(e.id)
       // [re-QA F2] Una PENDIENTE tambien se descarta si la nube cambio desde que
       // se asigno (antes = lo que tenia la nube entonces): el cambio del dueno
       // en la app es mas nuevo y el reintento no lo debe pisar.
-      val nubeCambio = a != null && a.pendienteNube && (a.antesTransporte != tr || a.antesDestino != de)
+      // Con version conocida se compara la VERSION (A->B->A deja el mismo valor
+      // pero dos cambios del dueno); sin ella, el valor.
+      val nubeCambio = a != null && a.pendienteNube &&
+        (if (v != null && a.antesV != null) a.antesV != v else (a.antesTransporte != tr || a.antesDestino != de))
       val sincronizadaDistinta = a != null && !a.pendienteNube && (a.ruta.transporte != tr || a.ruta.destino != de)
       if (nubeCambio || sincronizadaDistinta) desasignar(e.id)
     }
@@ -91,7 +96,7 @@ object Motor {
     guardarEstaciones()
   }
 
-  data class Asignacion(val ruta: Ruta, val pendienteNube: Boolean, val antesTransporte: String?, val antesDestino: String?)
+  data class Asignacion(val ruta: Ruta, val pendienteNube: Boolean, val antesTransporte: String?, val antesDestino: String?, val antesV: Long? = null)
 
   // Guardada como "transporte|destino|1|antesTransporte|antesDestino" (1 = pendiente de
   // avisar a la nube; antes = lo que la nube tenia al asignar, vacio = nulo).
@@ -99,7 +104,7 @@ object Motor {
     val s = app.getSharedPreferences(P, Context.MODE_PRIVATE).getString("asig_$estId", null) ?: return null
     val p = s.split('|')
     if (p.size < 2 || p[0].isBlank()) return null
-    return Asignacion(Ruta(p[0], p[1]), p.getOrNull(2) == "1", p.getOrNull(3)?.ifBlank { null }, p.getOrNull(4)?.ifBlank { null })
+    return Asignacion(Ruta(p[0], p[1]), p.getOrNull(2) == "1", p.getOrNull(3)?.ifBlank { null }, p.getOrNull(4)?.ifBlank { null }, p.getOrNull(5)?.toLongOrNull())
   }
 
   // Asignacion hecha en ESTE equipo (Buscar impresoras): nace pendiente y manda
@@ -111,15 +116,16 @@ object Motor {
     // Si ya habia una local, se conserva su "antes" (la foto de la nube de entonces).
     val aT = if (previa != null) previa.antesTransporte else e?.transporte
     val aD = if (previa != null) previa.antesDestino else e?.destino
+    val aV = if (previa != null) previa.antesV else e?.v
     app.getSharedPreferences(P, Context.MODE_PRIVATE).edit()
-      .putString("asig_$estId", r.transporte + "|" + r.destino + "|" + (if (pendienteNube) "1" else "0") + "|" + (aT ?: "") + "|" + (aD ?: "")).apply()
+      .putString("asig_$estId", r.transporte + "|" + r.destino + "|" + (if (pendienteNube) "1" else "0") + "|" + (aT ?: "") + "|" + (aD ?: "") + "|" + (aV?.toString() ?: "")).apply()
   }
 
   // La nube ya la tiene: se copia a la estacion y se BORRA la local (desde ahi manda la nube).
-  fun confirmarNube(estId: String) {
+  fun confirmarNube(estId: String, v: Long? = null) {
     val a = asignacion(estId) ?: return
     estaciones[estId]?.let { e ->
-      estaciones = estaciones + (estId to e.copy(transporte = a.ruta.transporte, destino = a.ruta.destino))
+      estaciones = estaciones + (estId to e.copy(transporte = a.ruta.transporte, destino = a.ruta.destino, v = v ?: e.v))
       guardarEstaciones()
     }
     desasignar(estId)

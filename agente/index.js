@@ -328,7 +328,7 @@ async function avisarAsignacion(dev, pfx, estacion, a) {
       motor.quedarSoloLocal(estacion);
       return false;
     }
-    motor.confirmarNube(estacion);
+    motor.confirmarNube(estacion, r && r.v);
     return true;
   } catch (e) {
     if (rpcNoExiste(e)) { motor.quedarSoloLocal(estacion); return false; }

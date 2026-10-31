@@ -212,4 +212,7 @@ async function imprimir(nombre, datos, opciones = {}) {
   }
 }
 
-module.exports = { listar, imprimir, clasificar, configurar, ES_WINDOWS, DIR_TMP, entornoMinimo };
+// SCRIPTS y PRE se exportan solo para la prueba de que todo lo que viaja por
+// stdin es ASCII puro (la consola de PowerShell lee stdin con la pagina de
+// codigos del sistema: una tilde o un BOM romperia el script en otro Windows).
+module.exports = { listar, imprimir, clasificar, configurar, ES_WINDOWS, DIR_TMP, entornoMinimo, SCRIPTS, PRE };

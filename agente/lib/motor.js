@@ -82,12 +82,20 @@ class Motor {
       if (!e) continue;
       const tr = t.transporte || null; const de = t.destino || null;
       if (e.transporte !== tr || e.destino !== de) { e.transporte = tr; e.destino = de; cambio = true; }
+      // [re-QA F2 A->B->A] version de la ruta en la nube (estaciones.transporte_v)
+      const v = Number.isInteger(t.v) ? t.v : null;
+      if (v !== null && e.v !== v) { e.v = v; cambio = true; }
       const a = this.asignaciones[t.id];
       // [re-QA F2] Una PENDIENTE tambien se descarta si la nube cambio desde que
       // se asigno (nubeAntes = lo que tenia la nube en ese momento): el cambio
       // del dueno en la app es mas nuevo y el reintento no lo debe pisar.
       const antes = (a && a.nubeAntes) || {};
-      const nubeCambio = !!(a && a.pendienteNube && ((antes.transporte || null) !== tr || (antes.destino || null) !== de));
+      // Con version conocida se compara la VERSION (A->B->A deja el mismo valor
+      // pero dos cambios del dueno); sin ella, el valor.
+      const v2 = Number.isInteger(t.v) ? t.v : null;
+      const porVersion = v2 !== null && Number.isInteger(antes.v);
+      const nubeCambio = !!(a && a.pendienteNube && (porVersion ? antes.v !== v2
+        : ((antes.transporte || null) !== tr || (antes.destino || null) !== de)));
       const sincronizadaDistinta = !!(a && !a.pendienteNube && (a.transporte !== tr || a.destino !== de));
       if (nubeCambio || sincronizadaDistinta) {
         delete this.asignaciones[t.id];
@@ -109,19 +117,22 @@ class Motor {
     const est = this.estaciones.get(estacionId) || {};
     this.asignaciones[estacionId] = {
       transporte, destino: String(destino), ts: Date.now(), pendienteNube: opciones.pendienteNube !== false,
-      nubeAntes: { transporte: est.transporte || null, destino: est.destino || null },
+      nubeAntes: { transporte: est.transporte || null, destino: est.destino || null, v: Number.isInteger(est.v) ? est.v : null },
     };
     this.guardarJson(this.archivoAsignaciones, this.asignaciones);
   }
 
   // La nube ya la tiene: se copia a la estacion y se BORRA la local (desde
   // ahora manda la nube; si el dueno la cambia en la app, se respeta).
-  confirmarNube(estacionId) {
+  // v = version que devolvio la nube (agente_asignar): la proxima asignacion
+  // local parte de ella y no choca consigo misma.
+  confirmarNube(estacionId, v) {
     const a = this.asignaciones[estacionId];
     if (!a) return;
     const e = this.estaciones.get(estacionId);
     if (e) {
       e.transporte = a.transporte; e.destino = a.destino;
+      if (Number.isInteger(v)) e.v = v;
       this.guardarJson(this.archivoEstaciones, { prefijo: this.estacionesPrefijo, ts: this.estacionesTs, estaciones: [...this.estaciones.values()] });
     }
     delete this.asignaciones[estacionId];

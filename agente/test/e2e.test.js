@@ -178,6 +178,8 @@ test('F2 de punta a punta: LAN sin nube, dedupe al volver, simultaneos, atascada
   assert.ok(await hasta(() => barra.papeles.length === barraAntes + 1, 3000), 'la asignacion local manda aun sin internet');
   nube.estado.caida = false;
   assert.ok(await hasta(() => nube.estado.asignados.some((a) => a.estacion === EST_COCINA), 25000), 'al volver internet se avisa la asignacion');
+  const aviso = nube.estado.asignados.find((a) => a.estacion === EST_COCINA);
+  assert.ok(aviso.antes && 'v' in aviso.antes, 'el aviso lleva antes.v (version de la ruta en la nube)');
   nube.estado.transportes = [{ id: EST_COCINA, transporte: 'TCP', destino: `127.0.0.1:${barra.puerto}` }];   // la nube ya la guardo
   assert.ok(await hasta(async () => {
     const e = (await pedir(PL, 'GET', '/v1/estado', { cabeceras: auth })).json.estaciones.find((x) => x.id === EST_COCINA);

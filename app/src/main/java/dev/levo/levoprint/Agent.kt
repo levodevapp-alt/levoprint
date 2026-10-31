@@ -16,8 +16,9 @@ data class Cfg(
 
 // [F2] transporte/destino: columnas nuevas (plantilla impresion_local). Nulos =
 // estacion de siempre (ip:puerto por TCP).
+// [re-QA F2 A->B->A] v = version de la ruta en la nube (estaciones.transporte_v); null = no se sabe.
 data class Estacion(val id: String, val nombre: String, val ip: String?, val puerto: Int,
-                    val transporte: String? = null, val destino: String? = null)
+                    val transporte: String? = null, val destino: String? = null, val v: Long? = null)
 
 // [canje-v3] Error HTTP de una RPC con el "message" de Postgres ya leido.
 // Las RPC del agente (agente_config / print_tomar / print_marcar) pasan por
@@ -106,9 +107,10 @@ object Agent {
   fun avisarAsignacion(c: Cfg, estacion: String, r: Motor.Ruta): Boolean = try {
     val a = Motor.asignacion(estacion)
     val antes = JSONObject().put("transporte", a?.antesTransporte ?: JSONObject.NULL).put("destino", a?.antesDestino ?: JSONObject.NULL)
+      .put("v", a?.antesV ?: JSONObject.NULL)   // con version, la base compara la version (A->B->A)
     val x = asignar(c, estacion, r.transporte, r.destino, antes)
     when {
-      x.optBoolean("ok", true) -> { Motor.confirmarNube(estacion); true }
+      x.optBoolean("ok", true) -> { Motor.confirmarNube(estacion, if (x.has("v") && !x.isNull("v")) x.optLong("v") else null); true }
       x.optString("error") == "CAMBIO_EN_NUBE" -> { Motor.desasignar(estacion); false }
       else -> { Motor.quedarSoloLocal(estacion); false }
     }
