@@ -62,7 +62,9 @@ object Motor {
   fun ponerEstaciones(nuevas: Map<String, Estacion>) {
     estaciones = nuevas.mapValues { (id, e) ->
       val prev = estaciones[id]
-      if (e.transporte == null && prev?.transporte != null) e.copy(transporte = prev.transporte, destino = prev.destino) else e
+      // [F2] v (version de la ruta) solo llega por agente_lan: agente_config no la trae y no se debe perder.
+      val conRuta = if (e.transporte == null && prev?.transporte != null) e.copy(transporte = prev.transporte, destino = prev.destino) else e
+      if (conRuta.v == null && prev?.v != null) conRuta.copy(v = prev.v) else conRuta
     }
     guardarEstaciones()
   }

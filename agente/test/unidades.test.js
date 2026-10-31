@@ -281,6 +281,17 @@ test('motor [re-QA A->B->A]: la pendiente compara la VERSION de la nube, no el v
   assert.equal(m.asignaciones.coc.nubeAntes.v, 7);
 });
 
+test('motor [F2 final]: refrescar agente_config (sin v) no pierde la version de la ruta', () => {
+  const m = motorDePrueba(async () => {});
+  m.ponerTransportes([{ id: 'coc', transporte: 'TCP', destino: '192.168.1.40:9100', v: 5 }]);
+  m.ponerEstaciones([{ id: 'coc', nombre: 'Cocina', ip: '192.168.1.40', puerto: 9100 }, { id: 'bar', nombre: 'Barra', ip: '192.168.1.41', puerto: 9100 }], 'komo');
+  assert.equal(m.estaciones.get('coc').v, 5);
+  m.asignar('coc', 'TCP', '192.168.1.99:9100', { pendienteNube: true });
+  assert.equal(m.asignaciones.coc.nubeAntes.v, 5, 'la pendiente parte de la version que ya se conocia');
+  const d = path.dirname(m.archivoEstaciones);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(d, 'est.json'), 'utf8')).estaciones.find((e) => e.id === 'coc').v, 5, 'tambien en disco');
+});
+
 test('colas [re-QA]: si el tope vence antes de mandar, la tarea ve abandonada y no manda', async () => {
   const c = new Colas({ timeoutMs: 100 });
   let mandado = false;

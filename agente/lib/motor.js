@@ -61,7 +61,8 @@ class Motor {
     const nuevo = new Map();
     for (const e of lista || []) {
       const prev = this.estaciones.get(e.id) || {};
-      nuevo.set(e.id, { ...e, transporte: e.transporte !== undefined ? e.transporte : prev.transporte, destino: e.destino !== undefined ? e.destino : prev.destino });
+      // [F2] v (version de la ruta) solo llega por agente_lan: agente_config no la trae y no se debe perder.
+      nuevo.set(e.id, { ...e, transporte: e.transporte !== undefined ? e.transporte : prev.transporte, destino: e.destino !== undefined ? e.destino : prev.destino, v: e.v !== undefined ? e.v : prev.v });
     }
     this.estaciones = nuevo;
     this.estacionesTs = Date.now();
