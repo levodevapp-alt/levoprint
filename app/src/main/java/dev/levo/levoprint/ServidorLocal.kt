@@ -44,7 +44,8 @@ class ServidorLocal(private val ctx: Context, private val puerto: Int = 9120, pr
         server = s; escuchando = true; error = null
         while (!s.isClosed) {
           val c = try { s.accept() } catch (_: Exception) { break }
-          pool.submit { atender(c) }
+          abiertas.add(c)
+          pool.submit { try { atender(c) } finally { abiertas.remove(c) } }
         }
       } catch (e: Exception) {
         error = if (e is java.net.BindException) "el puerto $puerto esta ocupado" else e.message
@@ -52,7 +53,14 @@ class ServidorLocal(private val ctx: Context, private val puerto: Int = 9120, pr
     }.also { it.isDaemon = true; it.start() }
   }
 
-  @Synchronized fun detener() { try { server?.close() } catch (_: Exception) {}; server = null; escuchando = false }
+  // Al cerrar, tambien las conexiones en curso (no quedan pedidos colgados).
+  @Synchronized fun detener() {
+    try { server?.close() } catch (_: Exception) {}
+    for (c in abiertas.toList()) try { c.close() } catch (_: Exception) {}
+    abiertas.clear()
+    server = null; escuchando = false
+  }
+  private val abiertas = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Socket, Boolean>())
 
   val abierto: Boolean get() = arrancado
 

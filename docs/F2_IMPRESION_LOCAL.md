@@ -115,18 +115,21 @@ Emparejar en Ajustes de Android → LevoPrint → Buscar impresoras → aparece 
 
 ## 8. Reglas del contrato (QA 31-oct)
 
-- **Un jobId por papel y estación.** La dedupe es por `jobId|estación` (agente, APK y `print_impresos_local`): una venta que saca comanda en cocina y en barra puede usar el mismo jobId. Una reimpresión pedida lleva `payload.reimpresion = true` y **no se calla** aunque ese papel ya haya salido.
+- **Un jobId por papel y estación.** La dedupe es por `jobId|estación` (agente, APK y `print_impresos_local`): una venta que saca comanda en cocina y en barra puede usar el mismo jobId. **La dedupe vale también con `payload.reimpresion = true`** (re-QA): toda reimpresión lleva un **jobId NUEVO** (`prepararReimpresion()` en `core/front/lib/impresora.js`). Si la reimpresión saltara la dedupe, el papel que salió por la LAN volvería a salir cuando la nube lo entregue con el mismo jobId.
 - **DUDOSO:** si la impresora falla después de empezar a mandar (no es un rechazo de conexión), el papel queda DUDOSO y el reintento sale con sello REIMPRESION. Rechazo de conexión, impresora de Windows que no abre o USB sin permiso = no salió nada: el reintento sale normal.
 - **`dudoso: true` en la app** (`impresora.js`): si la LAN no contesta a tiempo o el agente responde `dudoso`, el papel PUDO salir. Quien llama **debe reintentar con el MISMO jobId**, nunca con uno nuevo.
-- **Asignación hecha en la PC o el APK:** nace local y `pendienteNube` (imprime ya, aun sin internet). Cuando la nube la acepta, se borra la local y manda la nube; si el dueño la cambia luego desde la app, el agente obedece en el siguiente latido. `/v1/estado` dice `fuente: local|nube` y si falta avisar.
+- **Asignación hecha en la PC o el APK:** nace local y `pendienteNube` (imprime ya, aun sin internet) y guarda lo que la nube tenía en ese momento (`antes`). Cuando la nube la acepta, se borra la local y manda la nube; si el dueño la cambia luego desde la app, el agente obedece en el siguiente latido. Si el dueño la cambió **mientras** la local estaba pendiente, la local se descarta: el latido trae primero la nube y `agente_asignar` compara `antes` (`CAMBIO_EN_NUBE`). `/v1/estado` dice `fuente: local|nube` y si falta avisar.
+- Si el tope de la cola vence antes de mandar (render lento), la tarea queda **abandonada** y no manda nada. Si la LAN quedó dudosa y el papel sale por WebUSB, sale con sello REIMPRESION.
+- PIN: además del tope por minuto, **150 fallos acumulados lo anulan**.
+- `LEVO_TCP_PRUEBAS` (loopback y cualquier puerto, solo pruebas) **se ignora en el .exe** (Node SEA).
 - **Una sola instancia** del .exe por carpeta (`levoprint.lock`).
 - El render del servidor (Edge `<app>-print`) ya pone el sello con `payload.reimpresion`: REIMPRESION en KOMO y KIPU, COPIA en KUTI (verificado; sin cambios).
 
 ## 9. USB en Windows: antivirus y firma
 
-- El helper son dos archivos `.ps1` (`levoprint-raw.ps1`, `levoprint-listar.ps1`) que el .exe escribe junto a sí y corre con `powershell -File`, con un entorno mínimo (sin las claves del agente). Hace falta `-ExecutionPolicy Bypass` (solo para ese proceso) porque Windows trae `Restricted` y los .ps1 no están firmados.
+- El helper viaja por la **entrada estándar** de PowerShell (`powershell -NoProfile -NonInteractive -Command -`): no hay archivo .ps1 en disco que alguien pueda cambiar, ni `-EncodedCommand`, ni `-ExecutionPolicy Bypass` (la política de ejecución solo mira archivos de script). El hijo recibe un entorno mínimo (sin las claves del agente). Probado contra la cola real de esta PC.
 - Los `.bin` temporales van a `%TEMP%\levoprint-raw`, se borran aunque falle la impresión, y al arrancar se limpian los de más de 1 hora.
-- **Pendiente antes de vender USB en PC:** firmar el .exe y los .ps1 con un certificado de firma de código de LevoDev (con eso se puede pasar a `AllSigned` y SmartScreen deja de avisar), y **probar con Windows Defender activo**: imprimir, buscar impresoras y dejarlo 24 h abierto sin que lo ponga en cuarentena.
+- **Pendiente antes de vender USB en PC:** firmar el .exe con un certificado de firma de código de LevoDev (SmartScreen deja de avisar) y **probar con Windows Defender activo**: imprimir, buscar impresoras y dejarlo 24 h abierto sin que lo ponga en cuarentena.
 
 ## 10. Antes de publicar 1.8: revisar puertos e IP de las estaciones de hoy
 

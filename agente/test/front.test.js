@@ -71,6 +71,11 @@ test('front impresora.js + agente real: LAN primero, nube de respaldo, sin dupli
   // emparejar con la direccion que publico el agente
   await I.refrescarDesdeNube();
   assert.deepEqual(I.basesSugeridas(), [`http://127.0.0.1:${PL}`]);
+  // [re-QA NUEVO-1] una reimpresion siempre lleva un jobId NUEVO
+  const pr = I.prepararReimpresion({ tipo: 'TICKET', estacion: EST, jobId: 'original-123456', payload: { a: 1 } });
+  assert.notEqual(pr.jobId, 'original-123456');
+  assert.deepEqual(pr.payload, { a: 1, reimpresion: true });
+
   // [QA BAJO] solo direcciones de la red del local
   assert.equal(I.normalizarBase('8.8.8.8'), '');
   assert.equal(I.normalizarBase('evil.com:9120'), '');

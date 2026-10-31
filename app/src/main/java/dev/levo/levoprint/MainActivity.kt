@@ -212,6 +212,7 @@ class MainActivity : AppCompatActivity() {
     }
     findViewById<Button>(R.id.btnPinLan).setOnClickListener {
       Emparejador.nuevoPin()
+      PrintService.revisarLanAhora()   // abre el 9120 ya, sin esperar la proxima vuelta del servicio
       txtBuscar.text = "Impresion sin internet activada. En la app: Estaciones > Imprimir sin internet > escribe este PIN (vence en 10 min, sirve una vez)."
       refrescarLan?.invoke()
     }

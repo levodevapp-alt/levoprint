@@ -80,28 +80,39 @@ object Motor {
       val de = if (t.isNull("destino")) null else t.optString("destino").ifBlank { null }
       m[e.id] = e.copy(transporte = tr, destino = de)
       val a = asignacion(e.id)
-      if (a != null && !a.pendienteNube && (a.ruta.transporte != tr || a.ruta.destino != de)) desasignar(e.id)
+      // [re-QA F2] Una PENDIENTE tambien se descarta si la nube cambio desde que
+      // se asigno (antes = lo que tenia la nube entonces): el cambio del dueno
+      // en la app es mas nuevo y el reintento no lo debe pisar.
+      val nubeCambio = a != null && a.pendienteNube && (a.antesTransporte != tr || a.antesDestino != de)
+      val sincronizadaDistinta = a != null && !a.pendienteNube && (a.ruta.transporte != tr || a.ruta.destino != de)
+      if (nubeCambio || sincronizadaDistinta) desasignar(e.id)
     }
     estaciones = m
     guardarEstaciones()
   }
 
-  data class Asignacion(val ruta: Ruta, val pendienteNube: Boolean)
+  data class Asignacion(val ruta: Ruta, val pendienteNube: Boolean, val antesTransporte: String?, val antesDestino: String?)
 
-  // Guardada como "transporte|destino|1" (1 = pendiente de avisar a la nube).
+  // Guardada como "transporte|destino|1|antesTransporte|antesDestino" (1 = pendiente de
+  // avisar a la nube; antes = lo que la nube tenia al asignar, vacio = nulo).
   fun asignacion(estId: String): Asignacion? {
     val s = app.getSharedPreferences(P, Context.MODE_PRIVATE).getString("asig_$estId", null) ?: return null
     val p = s.split('|')
     if (p.size < 2 || p[0].isBlank()) return null
-    return Asignacion(Ruta(p[0], p[1]), p.getOrNull(2) == "1")
+    return Asignacion(Ruta(p[0], p[1]), p.getOrNull(2) == "1", p.getOrNull(3)?.ifBlank { null }, p.getOrNull(4)?.ifBlank { null })
   }
 
   // Asignacion hecha en ESTE equipo (Buscar impresoras): nace pendiente y manda
   // hasta que la nube la confirme (confirmarNube); el latido reintenta avisarla.
   fun asignar(estId: String, r: Ruta, pendienteNube: Boolean = true) {
     validar(r)?.let { throw IllegalArgumentException(it) }
+    val previa = asignacion(estId)
+    val e = estaciones[estId]
+    // Si ya habia una local, se conserva su "antes" (la foto de la nube de entonces).
+    val aT = if (previa != null) previa.antesTransporte else e?.transporte
+    val aD = if (previa != null) previa.antesDestino else e?.destino
     app.getSharedPreferences(P, Context.MODE_PRIVATE).edit()
-      .putString("asig_$estId", r.transporte + "|" + r.destino + "|" + (if (pendienteNube) "1" else "0")).apply()
+      .putString("asig_$estId", r.transporte + "|" + r.destino + "|" + (if (pendienteNube) "1" else "0") + "|" + (aT ?: "") + "|" + (aD ?: "")).apply()
   }
 
   // La nube ya la tiene: se copia a la estacion y se BORRA la local (desde ahi manda la nube).
@@ -215,8 +226,10 @@ object Motor {
   private fun procesarInterno(clave: String, jobId: String, origen: String, estId: String?, tipo: String, payloadIn: JSONObject, ancho: Int,
                               renderRemoto: ((JSONObject) -> String?)?): Resultado {
     val previo = diario.estado(clave)
-    // [QA F2 MEDIO-2] Una reimpresion PEDIDA (payload.reimpresion) no se calla.
-    if (previo == "IMPRESO" && !payloadIn.optBoolean("reimpresion")) return Resultado(true, duplicado = true)
+    // [re-QA F2 NUEVO-1] La dedupe es SIEMPRE por jobId|estacion, tambien con
+    // payload.reimpresion: una reimpresion lleva un jobId NUEVO (lo genera la
+    // app). Si no, el papel que salio por la LAN volveria a salir desde la nube.
+    if (previo == "IMPRESO") return Resultado(true, duplicado = true)
     val payload = JSONObject(payloadIn.toString())
     // DUDOSO: no se sabe si salio; si vuelve, sale con sello (no como pedido nuevo).
     val dudoso = previo == "DUDOSO"
@@ -229,10 +242,13 @@ object Motor {
     val k = r.transporte + "|" + r.destino
     val via = describir(r)
     val enviando = java.util.concurrent.atomic.AtomicBoolean(false)
+    val abandonada = java.util.concurrent.atomic.AtomicBoolean(false)
     pendientes.merge(k, 1, Int::plus)
     val tarea = ejecutor(k).submit<Unit> {
       val base = (try { renderRemoto?.invoke(job) } catch (_: Exception) { null }) ?: Agent.render(job, ancho)
       val texto = if (dudoso) Agent.conSelloReimpresion(base) else base
+      // El tope vencio (o se cancelo) mientras se armaba el papel: no se manda nada.
+      if (abandonada.get() || Thread.currentThread().isInterrupted) throw SinEnviar("abandonada por tiempo antes de enviar")
       diario.poner(clave, e = "IMPRIMIENDO", o = origen, j = jobId, est = estId, t = tipo)
       enviando.set(true)
       enviar(r, texto)
@@ -244,6 +260,7 @@ object Motor {
     } catch (e: java.util.concurrent.TimeoutException) {
       // Impresora colgada: se descarta su hilo para que la fila siga. Si ya se
       // estaba mandando, pudo salir: DUDOSO [QA F2 MEDIO-1].
+      abandonada.set(true)
       tarea.cancel(true)
       ejecutores.remove(k)?.shutdownNow()
       val d = enviando.get()

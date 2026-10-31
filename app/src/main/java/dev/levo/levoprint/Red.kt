@@ -83,6 +83,7 @@ object Emparejador {
   private val azar = SecureRandom()
   @Volatile var pin: String? = null
   @Volatile var pinVence = 0L
+  private var fallosPin = 0      // [re-QA F2] 150 fallos acumulados contra el mismo PIN lo anulan
   private val porIp = LinkedHashMap<String, Pair<Int, Long>>()
   private val fallos = ArrayList<Long>()
 
@@ -90,7 +91,7 @@ object Emparejador {
 
   @Synchronized fun nuevoPin(): String {
     val v = String.format(java.util.Locale.US, "%06d", azar.nextInt(1000000))
-    pin = v; pinVence = System.currentTimeMillis() + 10 * 60000L
+    pin = v; pinVence = System.currentTimeMillis() + 10 * 60000L; fallosPin = 0
     return v
   }
 
@@ -133,6 +134,10 @@ object Emparejador {
       }
       porIp[ip] = if (n >= 5) Pair(0, ahora + 60000L) else Pair(n, 0L)
       fallos.add(ahora)
+      if (++fallosPin >= 150) {
+        pin = null
+        return org.json.JSONObject().put("ok", false).put("error", "SIN_PIN").put("mensaje", "Demasiados intentos: el PIN se anulo. Toca Activar impresion sin internet para ver otro.")
+      }
       return org.json.JSONObject().put("ok", false).put("error", "PIN_INVALIDO").put("mensaje", "PIN incorrecto o vencido. Revisa el que muestra LevoPrint.")
     }
     porIp.remove(ip); pin = null

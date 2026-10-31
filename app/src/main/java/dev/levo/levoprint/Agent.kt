@@ -93,17 +93,25 @@ object Agent {
     return rpc(c, c.prefijo + "_agente_lan", p)
   }
 
-  fun asignar(c: Cfg, estacion: String, transporte: String, destino: String): JSONObject =
+  fun asignar(c: Cfg, estacion: String, transporte: String, destino: String, antes: JSONObject? = null): JSONObject =
     rpc(c, c.prefijo + "_agente_asignar", JSONObject().put("device", c.device).put("estacion", estacion)
-      .put("transporte", transporte).put("destino", destino))
+      .put("transporte", transporte).put("destino", destino).put("antes", antes ?: JSONObject.NULL))
 
   // [QA F2 ALTO-1] Avisa a la nube una asignacion hecha en este equipo. Si la
   // acepta, se borra la local (desde ahi manda la nube); si la base no tiene la
   // RPC o la rechaza, queda solo local; sin internet, queda pendiente y el
   // latido la reintenta. Devuelve true si quedo en la nube.
+  // [re-QA F2] Manda "antes" (lo que la nube tenia al asignar): si la nube
+  // cambio despues, responde CAMBIO_EN_NUBE y la local se descarta.
   fun avisarAsignacion(c: Cfg, estacion: String, r: Motor.Ruta): Boolean = try {
-    val x = asignar(c, estacion, r.transporte, r.destino)
-    if (x.optBoolean("ok", true)) { Motor.confirmarNube(estacion); true } else { Motor.quedarSoloLocal(estacion); false }
+    val a = Motor.asignacion(estacion)
+    val antes = JSONObject().put("transporte", a?.antesTransporte ?: JSONObject.NULL).put("destino", a?.antesDestino ?: JSONObject.NULL)
+    val x = asignar(c, estacion, r.transporte, r.destino, antes)
+    when {
+      x.optBoolean("ok", true) -> { Motor.confirmarNube(estacion); true }
+      x.optString("error") == "CAMBIO_EN_NUBE" -> { Motor.desasignar(estacion); false }
+      else -> { Motor.quedarSoloLocal(estacion); false }
+    }
   } catch (e: RpcError) {
     if (e.http == 404) Motor.quedarSoloLocal(estacion)
     false

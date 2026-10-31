@@ -79,6 +79,9 @@ class PrintService : Service() {
     @Volatile var lanEscuchando = false
     @Volatile var lanError: String? = null
     const val PUERTO_LAN = 9120
+    // [re-QA F2] Para que el boton del PIN abra el 9120 al instante (no en la proxima vuelta).
+    @Volatile var instancia: PrintService? = null
+    fun revisarLanAhora() { instancia?.let { s -> Thread { try { s.revisarLan() } catch (_: Exception) {} }.start() } }
 
     fun esperaDesactivado(desde: Long): Long {
       val t = System.currentTimeMillis() - desde
@@ -102,6 +105,7 @@ class PrintService : Service() {
 
   override fun onCreate() {
     super.onCreate()
+    instancia = this
     try {
       ContextCompat.registerReceiver(this, receptor, IntentFilter(ACCION_REINTENTO), ContextCompat.RECEIVER_NOT_EXPORTED)
       receptorRegistrado = true
@@ -191,11 +195,12 @@ class PrintService : Service() {
         val pendAsig = Motor.pendientesNube()
         val hayPorReportar = Motor.diario.sinReportar(1).isNotEmpty() || pendAsig.isNotEmpty()
         val ahora = System.currentTimeMillis()
-        if (ahora - ultimoLatido > (if (hayPorReportar) 16000L else 60000L)) {
-          ultimoLatido = ahora
-          for ((id, ruta) in pendAsig) Agent.avisarAsignacion(cfg, id, ruta)
-        }
-        if (ahora > lanNoExisteHasta && ultimoLatido == ahora) {
+        // [re-QA F2] Primero se trae lo de la nube (agente_lan) y DESPUES se
+        // avisan las pendientes: si el dueno cambio la impresora en la app
+        // mientras tanto, ponerTransportes descarta la local antes de reintentar.
+        val tocaLatido = ahora - ultimoLatido > (if (hayPorReportar) 16000L else 60000L)
+        if (tocaLatido) ultimoLatido = ahora
+        if (tocaLatido && ahora > lanNoExisteHasta) {
           try {
             val imp = Motor.diario.sinReportar(200)
             val r = Agent.latidoLan(cfg, if (servidor?.escuchando == true) Red.ipsLocales() else emptyList(), PUERTO_LAN, imp)
@@ -205,6 +210,7 @@ class PrintService : Service() {
             if (e.http == 404) lanNoExisteHasta = ahora + 10 * 60000L   // la base aun no tiene impresion_local
           } catch (_: Exception) {}
         }
+        if (tocaLatido) for ((id, ruta) in Motor.pendientesNube()) Agent.avisarAsignacion(cfg, id, ruta)
       } catch (e: RpcError) {
         if (e.agenteInvalido) {
           // [qa4] Desactivado/reemplazado: se conserva el token y se reintenta
@@ -244,7 +250,7 @@ class PrintService : Service() {
 
   // [QA F2 MEDIO-3] El 9120 solo abierto si hace falta: PIN vigente
   // ("Activar impresion sin internet") o equipos emparejados.
-  private fun revisarLan() {
+  fun revisarLan() {
     val s = servidor ?: return
     val falta = Emparejador.pinVigente() != null || Emparejador.equipos(this).isNotEmpty()
     if (falta && !s.abierto) s.iniciar()
@@ -335,6 +341,7 @@ class PrintService : Service() {
   }
 
   override fun onDestroy() {
+    instancia = null
     corriendo = false
     activo = false
     desactivado = false
