@@ -49,7 +49,12 @@ class AgentRenderTest {
     var n = 0
     for (ancho in listOf(32, 42, 48, 64)) for (j in casosKomoKipu()) {
       n++
-      assertEquals("difiere ${j.optString("tipo")} ancho $ancho", dev.levo.levoprint.original.Agent.render(j, ancho), Agent.render(j, ancho))
+      // [MM3-01] bajo 36 columnas el pie de marca va en su forma corta; la copia congelada solo
+      // tiene la larga, asi que se cambia ahi antes de comparar (el resto, byte a byte).
+      val orig = dev.levo.levoprint.original.Agent.render(j, ancho).let {
+        if (ancho >= 36) it else it.replace(Agent.pieTexto("KOMO", 48), Agent.pieTexto("KOMO", ancho))
+      }
+      assertEquals("difiere ${j.optString("tipo")} ancho $ancho", orig, Agent.render(j, ancho, "KOMO"))
     }
     assertEquals(144, n)
   }
@@ -75,5 +80,18 @@ class AgentRenderTest {
     assertTrue(c, c.startsWith("*** COPIA ***") && c.contains("NV01-00000042"))
     val k = texto(Agent.render(job("CIERRE", o("""{"negocio":"Barbería Demo","lineas":[{"izq":"Ventas (3)","der":"S/ 105.00","negrita":true},{"sep":"-"},{"izq":"Diferencia","der":"S/ -0.50"}]}""")), 32))
     assertTrue(k, k.contains("CORTE DE CAJA") && k.contains("Ventas (3)") && k.contains("S/ -0.50") && k.contains("-".repeat(32)))
+  }
+
+  // [MM3-01] Pie de marca: el nombre sale de la configuracion del local (prefijo), si no del payload.
+  @Test fun pieDeMarcaPorApp() {
+    val m = 0xB7.toChar()
+    assertEquals("Sistema KUTI $m LevoDev $m levodev.app\nkuti.levodev.app\n", Agent.pieTexto("kuti"))
+    assertEquals("Sistema KIPU $m LevoDev $m levodev.app\nkipu.levodev.app\n", Agent.pieTexto("KIPU"))
+    assertEquals("LevoDev $m levodev.app\n", Agent.pieTexto("otra"))
+    assertEquals("Sistema KOMO $m LevoDev\nkomo.levodev.app\n", Agent.pieTexto("komo", 32))
+    val t = Agent.render(job("PRUEBA", o("""{"x":1}""")), 32, "kipu")
+    assertTrue(t, t.contains("Sistema KIPU") && t.contains("kipu.levodev.app") && !t.contains("Paracas"))
+    val p = Agent.render(job("PRUEBA", o("""{"app":"KUTI"}""")), 32)
+    assertTrue(p, p.contains("Sistema KUTI"))
   }
 }

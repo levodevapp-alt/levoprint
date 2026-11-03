@@ -1,5 +1,5 @@
 // ============================================================
-// KOMO · build del agente a LevoPrint.exe (Node SEA)  ⚡ by Levo.dev
+// KOMO · build del agente a LevoPrint.exe (Node SEA) · LevoDev
 // Uso:  node build-exe.mjs
 // Requiere Node >= 20 (Single Executable Applications).
 // Produce dist/LevoPrint.exe (autonomo, sin Node instalado).

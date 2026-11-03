@@ -155,7 +155,7 @@ class PrintService : Service() {
           val id = job.optString("id")
           try {
             val est = estaciones[job.optString("estacion")]
-            val texto = Agent.render(job, cfg.ancho)
+            val texto = Agent.render(job, cfg.ancho, cfg.prefijo)
             val btMac = Prefs.getBtMac(this)
             when {
               est?.ip != null -> { Agent.imprimirTcp(est.ip, est.puerto, texto); ultimoLog = "OK " + job.optString("tipo") + " -> " + est.nombre }

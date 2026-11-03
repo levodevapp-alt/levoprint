@@ -1,5 +1,5 @@
 // ============================================================
-// LevoPrint · Agente de impresión v1.7 (ventana visual + emparejamiento por código + render servidor)  ⚡ <Levodev.app />
+// LevoPrint · Agente de impresión v1.7 (ventana visual + emparejamiento por código + render servidor) · LevoDev
 // Corre en la PC del local. Poll cada 2s a komo_print_tomar,
 // renderiza ESC/POS y lo manda a la IP:puerto de cada estación.
 // Se empaqueta a LevoPrint.exe (Node SEA). El dueño solo edita
@@ -347,13 +347,27 @@ function renderCartaQr(pl) {
   return t;
 }
 
+// [MM3-01 · 3-nov] Pie de marca del ticket (IDENTIDAD_VISUAL §12.12): «Sistema <APP> · LevoDev ·
+// levodev.app» + «<app>.levodev.app». Reemplaza al tag de desarrollador «<Levodev.app />» (§4.5 lo
+// deja para la web de desarrolladores) y al nombre de la app en negrita, que ahora va dentro de la
+// línea. El nombre sale de la configuración del local (PREFIJO: komo/kipu/kuti); si no se conoce,
+// del payload; si tampoco, el pie genérico. Bajo 36 columnas (58 mm) la línea se partiría a media
+// palabra: va «Sistema <APP> · LevoDev» y la dirección de la app abajo. ASCII salvo el 0xB7.
+// Misma regla que komo-print / kipu-print / kuti-print (render servidor) y que el APK (Agent.kt).
+const APPS_PIE = { komo: 'KOMO', kipu: 'KIPU', kuti: 'KUTI' };
+function pieMarca(app, ancho){
+  const M=String.fromCharCode(0xB7);
+  const a=String(app||'').trim().toUpperCase();
+  if(!APPS_PIE[a.toLowerCase()]) return 'LevoDev '+M+' levodev.app\n';
+  return 'Sistema '+a+' '+M+' LevoDev'+(ancho>=36?' '+M+' levodev.app':'')+'\n'+a.toLowerCase()+'.levodev.app\n';
+}
+
 function firma(pl){
-  const app=(pl&&pl.app)||process.env.LEVO_APP||"";
+  const app=APPS_PIE[String(PREFIJO||'').toLowerCase()]||(pl&&pl.app)||process.env.LEVO_APP||"";
   const lema=(pl&&pl.lema)||process.env.LEVO_LEMA||"";
   let f=CMD.centro;
-  if(app) f+=CMD.negritaOn+String(app).toUpperCase()+"\n"+CMD.negritaOff;
   if(lema) f+="\x1b\x21\x00"+lema+"\n";
-  f+="\x1b\x21\x00<Levodev.app />\n";
+  f+="\x1b\x21\x00"+pieMarca(app, ANCHO);
   return f;
 }
 
@@ -811,7 +825,7 @@ function paginaHtml() {
     </div>
     <div id="msgPrueba" class="msg"></div>
 
-    <footer>&lt;Levodev.app /&gt;</footer>
+    <footer>LevoPrint · LevoDev · levodev.app</footer>
   </div>
 
 <script>
@@ -989,7 +1003,7 @@ function iniciarGui() {
 async function arrancar() {
   await canjearCodigo();
   if (faltaUrlAnon()) { abortarSinConfig(); return; }
-  console.log('LevoPrint agente de impresion v1.7 (ventana visual + emparejamiento por codigo) — <Levodev.app />');
+  console.log('LevoPrint agente de impresion v1.7 (ventana visual + emparejamiento por codigo) - LevoDev');
   console.log(MODO_CONSOLA ? 'MODO CONSOLA (sin impresoras reales)' : 'Modo impresión real');
   iniciarGui();
   if (!faltaConfig()) ciclo();

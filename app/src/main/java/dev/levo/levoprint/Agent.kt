@@ -42,7 +42,22 @@ object Agent {
   private val NORMAL = GS + "!" + 0.toChar()
   private val FONT0 = ESC + "!" + 0.toChar()
   private val CORTE = NL + NL + NL + GS + "V" + 0.toChar()
-  private val PIE = FONT0 + "Hecho con carino en Paracas" + NL + "<Levo.dev />" + NL + CORTE
+  // [MM3-01 3-nov] Pie de marca unico del ticket termico (IDENTIDAD_VISUAL 12.12): antes era el
+  // pie viejo con ciudad y el tag de desarrollador, fijo para todas las apps. Ahora la linea
+  // "Sistema <APP> . LevoDev . levodev.app" + "<app>.levodev.app" (con punto medio 0xB7), con el
+  // nombre de la app que sale de la configuracion del local (KOMO, KIPU o KUTI). Sin signo (la
+  // termica de 58 mm empasta los medianiles) y en ASCII salvo el 0xB7, que latin1 envia tal cual
+  // (igual que el .exe). Prefijo desconocido -> pie generico "LevoDev . levodev.app".
+  // La primera linea mide 36 columnas: en 58 mm (32) se partiria a media palabra, asi que bajo 36
+  // columnas va "Sistema <APP> . LevoDev" y la direccion de la app abajo (ya dice levodev.app).
+  private val MIDDOT = 0xB7.toChar().toString()
+  fun pieTexto(app: String, ancho: Int = 48): String {
+    val a = app.trim().uppercase()
+    if (a != "KOMO" && a != "KIPU" && a != "KUTI") return "LevoDev " + MIDDOT + " levodev.app" + NL
+    val l1 = "Sistema " + a + " " + MIDDOT + " LevoDev" + (if (ancho >= 36) " " + MIDDOT + " levodev.app" else "")
+    return l1 + NL + a.lowercase() + ".levodev.app" + NL
+  }
+  private fun pie(app: String, ancho: Int) = FONT0 + pieTexto(app, ancho) + CORTE
 
   // ---- RPC (mismo contrato que el agente .exe) ----
   fun rpc(c: Cfg, fn: String, p: JSONObject): JSONObject {
@@ -119,7 +134,7 @@ object Agent {
     return b.toString()
   }
 
-  private fun renderComanda(pl: JSONObject, ancho: Int): String {
+  private fun renderComanda(pl: JSONObject, ancho: Int, app: String): String {
     val titulo = if (pl.optBoolean("correccion")) "*** CORRECCION ***" else "COMANDA"
     val b = StringBuilder(INIT + CENTRO + GRANDE + titulo + NL + NORMAL)
     b.append(GRANDE + "MESA " + pl.optString("mesa") + NL + NORMAL + IZQ + linea(ancho, "="))
@@ -137,11 +152,11 @@ object Agent {
     }
     val nota = pl.optString("nota")
     if (nota.isNotBlank()) b.append(linea(ancho) + "NOTA: " + nota + NL)
-    b.append(linea(ancho, "=") + CENTRO + PIE)
+    b.append(linea(ancho, "=") + CENTRO + pie(app, ancho))
     return b.toString()
   }
 
-  private fun renderPrecuenta(pl: JSONObject, ancho: Int): String {
+  private fun renderPrecuenta(pl: JSONObject, ancho: Int, app: String): String {
     val b = StringBuilder(INIT + CENTRO + GRANDE + "PRECUENTA" + NL + NORMAL)
     b.append("MESA " + pl.optString("mesa") + NL)
     val c = pl.optJSONObject("cuenta")
@@ -155,14 +170,14 @@ object Agent {
         money(it.optDouble("cantidad", 1.0) * it.optDouble("precio", 0.0)), ancho))
     }
     b.append(linea(ancho, "=") + NEG_ON + fila("TOTAL", money(pl.optDouble("total", 0.0)), ancho) + NEG_OFF + linea(ancho, "="))
-    b.append(CENTRO + "[QR] " + pl.optString("qr") + NL + "NO ES COMPROBANTE DE PAGO" + NL + PIE)
+    b.append(CENTRO + "[QR] " + pl.optString("qr") + NL + "NO ES COMPROBANTE DE PAGO" + NL + pie(app, ancho))
     return b.toString()
   }
 
-  private fun renderTicket(pl: JSONObject, ancho: Int): String {
+  private fun renderTicket(pl: JSONObject, ancho: Int, app: String): String {
     // [kuti] KUTI manda "refTipo" (KOMO/KIPU no): su nota de venta va aparte y
     // lo de KOMO/KIPU sale byte a byte igual que antes (AgentRenderTest).
-    if (pl.has("refTipo")) return renderTicketKuti(pl, ancho)
+    if (pl.has("refTipo")) return renderTicketKuti(pl, ancho, app)
     val b = StringBuilder(INIT + CENTRO + GRANDE + "COBRADO" + NL + NORMAL)
     b.append("MESA " + pl.optString("mesa", "-") + NL + IZQ + linea(ancho, "="))
     b.append(fila("Mozo: " + pl.optString("mozo", "-"), pl.optString("hora", ""), ancho) + linea(ancho))
@@ -178,7 +193,7 @@ object Agent {
       val p = pg.getJSONObject(i)
       b.append(fila("  " + p.optString("medio"), money(p.optDouble("monto", 0.0)), ancho))
     }
-    b.append(linea(ancho, "=") + CENTRO + "NO ES COMPROBANTE DE PAGO" + NL + PIE)
+    b.append(linea(ancho, "=") + CENTRO + "NO ES COMPROBANTE DE PAGO" + NL + pie(app, ancho))
     return b.toString()
   }
 
@@ -189,7 +204,7 @@ object Agent {
   // negocio, local, VENTA o ALQUILER DE SILLA, nota, quien atendio, cliente
   // (en alquiler, el profesional), servicios con su profesional en una segunda
   // linea, TOTAL, pagos y propinas APARTE (no suman al total).
-  private fun renderTicketKuti(pl: JSONObject, ancho: Int): String {
+  private fun renderTicketKuti(pl: JSONObject, ancho: Int, app: String): String {
     val b = StringBuilder(INIT + CENTRO)
     if (txt(pl, "negocio").isNotBlank()) b.append(NEG_ON + GRANDE + txt(pl, "negocio").uppercase() + NL + NORMAL + NEG_OFF)
     if (txt(pl, "local").isNotBlank()) b.append(txt(pl, "local") + NL)
@@ -221,14 +236,14 @@ object Agent {
         b.append(fila(("  " + txt(p, "profesional") + " (" + txt(p, "medio") + ")").take(ancho - 12), money(p.optDouble("monto", 0.0)), ancho))
       }
     }
-    b.append(linea(ancho, "=") + CENTRO + "NO ES COMPROBANTE DE PAGO" + NL + PIE)
+    b.append(linea(ancho, "=") + CENTRO + "NO ES COMPROBANTE DE PAGO" + NL + pie(app, ancho))
     return b.toString()
   }
 
   // [kuti] Corte de caja: las lineas {izq, der, sep, negrita} ya vienen formateadas
   // desde la base. Sin "lineas" (KOMO/KIPU) sigue el render generico de siempre.
-  private fun renderCierre(pl: JSONObject, ancho: Int): String {
-    val ls = pl.optJSONArray("lineas") ?: return renderGenerico("CIERRE", pl, ancho)
+  private fun renderCierre(pl: JSONObject, ancho: Int, app: String): String {
+    val ls = pl.optJSONArray("lineas") ?: return renderGenerico("CIERRE", pl, ancho, app)
     val b = StringBuilder(INIT + CENTRO)
     if (pl.optString("negocio").isNotBlank()) b.append(NEG_ON + pl.optString("negocio").uppercase() + NL + NEG_OFF)
     b.append(GRANDE + "CORTE DE CAJA" + NL + NORMAL + IZQ + linea(ancho, "="))
@@ -239,11 +254,11 @@ object Agent {
       val f = fila(l.optString("izq").take(maxOf(1, ancho - der.length - 1)), der, ancho)
       b.append(if (l.optBoolean("negrita")) NEG_ON + f + NEG_OFF else f)
     }
-    b.append(linea(ancho, "=") + CENTRO + PIE)
+    b.append(linea(ancho, "=") + CENTRO + pie(app, ancho))
     return b.toString()
   }
 
-  private fun renderCpe(pl: JSONObject, ancho: Int): String {
+  private fun renderCpe(pl: JSONObject, ancho: Int, app: String): String {
     val e = pl.optJSONObject("empresa") ?: JSONObject()
     val cl = pl.optJSONObject("cliente") ?: JSONObject()
     val tot = pl.optJSONObject("totales") ?: JSONObject()
@@ -279,41 +294,44 @@ object Agent {
     b.append(linea(ancho, "=") + CENTRO)
     if (pl.optString("qr").isNotBlank()) b.append(qr(pl.optString("qr")) + NL)
     if (pl.optString("hash").isNotBlank()) b.append("Hash: " + pl.optString("hash").take(28) + NL)
-    b.append("Representacion impresa del" + NL + "comprobante electronico." + NL + "Consulte en sunat.gob.pe" + NL + PIE)
+    b.append("Representacion impresa del" + NL + "comprobante electronico." + NL + "Consulte en sunat.gob.pe" + NL + pie(app, ancho))
     return b.toString()
   }
 
-  private fun renderCartaQr(pl: JSONObject, ancho: Int): String {
+  private fun renderCartaQr(pl: JSONObject, ancho: Int, app: String): String {
     val b = StringBuilder(INIT + CENTRO + NEG_ON + GRANDE + pl.optString("titulo") + NL + NORMAL + NEG_OFF)
     b.append(FONT0 + (pl.optString("sub").ifBlank { "Escanea nuestra carta" }) + NL + NL)
     if (pl.optString("url").isNotBlank()) b.append(qr(pl.optString("url"), 8) + NL)
-    b.append(FONT0 + pl.optString("url") + NL + PIE)
+    b.append(FONT0 + pl.optString("url") + NL + pie(app, ancho))
     return b.toString()
   }
 
-  private fun renderGenerico(tipo: String, pl: JSONObject, ancho: Int): String {
+  private fun renderGenerico(tipo: String, pl: JSONObject, ancho: Int, app: String): String {
     val b = StringBuilder(INIT + CENTRO + GRANDE + tipo + NL + NORMAL + IZQ + linea(ancho, "="))
     val its = items(pl)
     for (i in 0 until its.length()) {
       val it = its.getJSONObject(i)
       b.append(cant(it.optDouble("cantidad", 1.0)) + " x " + it.optString("nombre") + NL)
     }
-    b.append(linea(ancho, "=") + CENTRO + PIE)
+    b.append(linea(ancho, "=") + CENTRO + pie(app, ancho))
     return b.toString()
   }
 
-  fun render(job: JSONObject, ancho: Int): String {
+  // [MM3-01] appCfg = prefijo de la configuracion del local (komo/kipu/kuti). Si viene vacio
+  // (pruebas, equipos viejos) se usa el "app" del payload; si tampoco hay, el pie generico.
+  fun render(job: JSONObject, ancho: Int, appCfg: String = ""): String {
     val tipo = job.optString("tipo")
     val pl = job.optJSONObject("payload") ?: JSONObject()
+    val app = appCfg.ifBlank { pl.optString("app") }
     val t = when (tipo) {
-      "PRUEBA" -> INIT + CENTRO + "PRUEBA LEVOPRINT OK" + NL + PIE
-      "COMANDA" -> renderComanda(pl, ancho)
-      "PRECUENTA" -> renderPrecuenta(pl, ancho)
-      "TICKET" -> renderTicket(pl, ancho)
-      "CPE" -> renderCpe(pl, ancho)
-      "CARTA_QR" -> renderCartaQr(pl, ancho)
-      "CIERRE" -> renderCierre(pl, ancho)
-      else -> renderGenerico(tipo.ifBlank { "COMPROBANTE" }, pl, ancho)
+      "PRUEBA" -> INIT + CENTRO + "PRUEBA LEVOPRINT OK" + NL + pie(app, ancho)
+      "COMANDA" -> renderComanda(pl, ancho, app)
+      "PRECUENTA" -> renderPrecuenta(pl, ancho, app)
+      "TICKET" -> renderTicket(pl, ancho, app)
+      "CPE" -> renderCpe(pl, ancho, app)
+      "CARTA_QR" -> renderCartaQr(pl, ancho, app)
+      "CIERRE" -> renderCierre(pl, ancho, app)
+      else -> renderGenerico(tipo.ifBlank { "COMPROBANTE" }, pl, ancho, app)
     }
     // [kuti] Toda reimpresion de KUTI trae "copia": sello arriba. KOMO/KIPU no lo mandan.
     if (!pl.optBoolean("copia") || !t.startsWith(INIT)) return t
