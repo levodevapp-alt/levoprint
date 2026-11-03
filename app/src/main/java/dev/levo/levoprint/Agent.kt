@@ -44,17 +44,18 @@ object Agent {
   private val CORTE = NL + NL + NL + GS + "V" + 0.toChar()
   // [MM3-01 3-nov] Pie de marca unico del ticket termico (IDENTIDAD_VISUAL 12.12): antes era el
   // pie viejo con ciudad y el tag de desarrollador, fijo para todas las apps. Ahora la linea
-  // "Sistema <APP> . LevoDev . levodev.app" + "<app>.levodev.app" (con punto medio 0xB7), con el
+  // "Sistema <APP> - LevoDev - levodev.app" + "<app>.levodev.app", con el
   // nombre de la app que sale de la configuracion del local (KOMO, KIPU o KUTI). Sin signo (la
-  // termica de 58 mm empasta los medianiles) y en ASCII salvo el 0xB7, que latin1 envia tal cual
-  // (igual que el .exe). Prefijo desconocido -> pie generico "LevoDev . levodev.app".
+  // termica de 58 mm empasta los medianiles) y en ASCII PURO [QA MM3 M1]: guion y no el punto
+  // medio 0xB7, que depende de la pagina de codigos de la impresora. Prefijo desconocido -> pie
+  // generico "LevoDev - levodev.app".
   // La primera linea mide 36 columnas: en 58 mm (32) se partiria a media palabra, asi que bajo 36
   // columnas va "Sistema <APP> . LevoDev" y la direccion de la app abajo (ya dice levodev.app).
-  private val MIDDOT = 0xB7.toChar().toString()
+  private val SEP = " - "
   fun pieTexto(app: String, ancho: Int = 48): String {
     val a = app.trim().uppercase()
-    if (a != "KOMO" && a != "KIPU" && a != "KUTI") return "LevoDev " + MIDDOT + " levodev.app" + NL
-    val l1 = "Sistema " + a + " " + MIDDOT + " LevoDev" + (if (ancho >= 36) " " + MIDDOT + " levodev.app" else "")
+    if (a != "KOMO" && a != "KIPU" && a != "KUTI") return "LevoDev" + SEP + "levodev.app" + NL
+    val l1 = "Sistema " + a + SEP + "LevoDev" + (if (ancho >= 36) SEP + "levodev.app" else "")
     return l1 + NL + a.lowercase() + ".levodev.app" + NL
   }
   private fun pie(app: String, ancho: Int) = FONT0 + pieTexto(app, ancho) + CORTE

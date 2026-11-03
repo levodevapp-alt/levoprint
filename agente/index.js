@@ -347,19 +347,19 @@ function renderCartaQr(pl) {
   return t;
 }
 
-// [MM3-01 · 3-nov] Pie de marca del ticket (IDENTIDAD_VISUAL §12.12): «Sistema <APP> · LevoDev ·
+// [MM3-01 · 3-nov] Pie de marca del ticket (IDENTIDAD_VISUAL §12.12): «Sistema <APP> - LevoDev -
 // levodev.app» + «<app>.levodev.app». Reemplaza al tag de desarrollador «<Levodev.app />» (§4.5 lo
 // deja para la web de desarrolladores) y al nombre de la app en negrita, que ahora va dentro de la
 // línea. El nombre sale de la configuración del local (PREFIJO: komo/kipu/kuti); si no se conoce,
 // del payload; si tampoco, el pie genérico. Bajo 36 columnas (58 mm) la línea se partiría a media
-// palabra: va «Sistema <APP> · LevoDev» y la dirección de la app abajo. ASCII salvo el 0xB7.
+// palabra: va «Sistema <APP> - LevoDev» y la dirección de la app abajo. [QA MM3 · M1] ASCII puro
+// (guion en vez del punto medio 0xB7, que depende de la página de códigos de la impresora).
 // Misma regla que komo-print / kipu-print / kuti-print (render servidor) y que el APK (Agent.kt).
 const APPS_PIE = { komo: 'KOMO', kipu: 'KIPU', kuti: 'KUTI' };
 function pieMarca(app, ancho){
-  const M=String.fromCharCode(0xB7);
   const a=String(app||'').trim().toUpperCase();
-  if(!APPS_PIE[a.toLowerCase()]) return 'LevoDev '+M+' levodev.app\n';
-  return 'Sistema '+a+' '+M+' LevoDev'+(ancho>=36?' '+M+' levodev.app':'')+'\n'+a.toLowerCase()+'.levodev.app\n';
+  if(!APPS_PIE[a.toLowerCase()]) return 'LevoDev - levodev.app\n';
+  return 'Sistema '+a+' - LevoDev'+(ancho>=36?' - levodev.app':'')+'\n'+a.toLowerCase()+'.levodev.app\n';
 }
 
 function firma(pl){

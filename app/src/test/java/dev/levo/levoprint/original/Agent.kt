@@ -45,7 +45,7 @@ object Agent {
   private val FONT0 = ESC + "!" + 0.toChar()
   private val CORTE = NL + NL + NL + GS + "V" + 0.toChar()
   // [MM3-01] Unico cambio a la copia congelada: el pie de marca (el de KOMO; la prueba llama al render nuevo con "KOMO").
-  private val PIE = FONT0 + "Sistema KOMO " + 0xB7.toChar() + " LevoDev " + 0xB7.toChar() + " levodev.app" + NL + "komo.levodev.app" + NL + CORTE
+  private val PIE = FONT0 + "Sistema KOMO - LevoDev - levodev.app" + NL + "komo.levodev.app" + NL + CORTE
 
   // ---- RPC (mismo contrato que el agente .exe) ----
   fun rpc(c: Cfg, fn: String, p: JSONObject): JSONObject {

@@ -84,11 +84,12 @@ class AgentRenderTest {
 
   // [MM3-01] Pie de marca: el nombre sale de la configuracion del local (prefijo), si no del payload.
   @Test fun pieDeMarcaPorApp() {
-    val m = 0xB7.toChar()
-    assertEquals("Sistema KUTI $m LevoDev $m levodev.app\nkuti.levodev.app\n", Agent.pieTexto("kuti"))
-    assertEquals("Sistema KIPU $m LevoDev $m levodev.app\nkipu.levodev.app\n", Agent.pieTexto("KIPU"))
-    assertEquals("LevoDev $m levodev.app\n", Agent.pieTexto("otra"))
-    assertEquals("Sistema KOMO $m LevoDev\nkomo.levodev.app\n", Agent.pieTexto("komo", 32))
+    // [QA MM3 M1] ASCII puro: ningun byte > 0x7F en el pie
+    assertEquals("Sistema KUTI - LevoDev - levodev.app\nkuti.levodev.app\n", Agent.pieTexto("kuti"))
+    assertEquals("Sistema KIPU - LevoDev - levodev.app\nkipu.levodev.app\n", Agent.pieTexto("KIPU"))
+    assertEquals("LevoDev - levodev.app\n", Agent.pieTexto("otra"))
+    assertEquals("Sistema KOMO - LevoDev\nkomo.levodev.app\n", Agent.pieTexto("komo", 32))
+    for (ap in listOf("komo", "kipu", "kuti", "x")) for (an in listOf(32, 48)) assertTrue(Agent.pieTexto(ap, an).all { it.code < 128 })
     val t = Agent.render(job("PRUEBA", o("""{"x":1}""")), 32, "kipu")
     assertTrue(t, t.contains("Sistema KIPU") && t.contains("kipu.levodev.app") && !t.contains("Paracas"))
     val p = Agent.render(job("PRUEBA", o("""{"app":"KUTI"}""")), 32)
