@@ -149,9 +149,16 @@ class PrintService : Service() {
 
   private fun bucle() {
     val estados = HashMap<String, EstadoV>()
+    var ultimaBusqueda = 0L
     while (corriendo) {
       val lista = cfgs
       if (lista.isEmpty()) break
+      // [LP-F3] Busqueda de impresoras al arrancar y cada 15 min, en otro hilo (no frena la impresion).
+      if (System.currentTimeMillis() - ultimaBusqueda >= Impresoras.BUSCAR_CADA_MS && !Impresoras.buscando) {
+        ultimaBusqueda = System.currentTimeMillis()
+        val ctx = applicationContext
+        Thread { try { Impresoras.buscar(ctx, false) } catch (_: Exception) {} }.start()
+      }
       // Vinculos quitados o reemplazados (token nuevo) dejan su estado: el nuevo arranca limpio.
       val claves = lista.map { clave(it) }.toSet()
       estados.keys.retainAll(claves)
@@ -202,6 +209,10 @@ class PrintService : Service() {
       if (st.forzarConfig || tocaConfig) {
         st.estaciones = Agent.estaciones(cfg)
         st.forzarConfig = false
+        Impresoras.app(cfg).estaciones = st.estaciones
+        // [LP-F3] Luego el destino de cada estacion (red / Bluetooth / USB). agente_config va primero (KUTI
+        // guarda ahi la version); si esto falla (red), se sigue imprimiendo con lo que ya se sabia.
+        try { Impresoras.informar(this, cfg, false) } catch (e: RpcError) { if (e.agenteInvalido) throw e } catch (_: Exception) {}
         ultimoLog = "Config " + cfg.prefijo.uppercase() + ": " + st.estaciones.size + " estaciones"
       }
       val jobs = Agent.tomar(cfg)
@@ -214,13 +225,20 @@ class PrintService : Service() {
         val job = jobs.getJSONObject(i)
         val id = job.optString("id")
         try {
-          val est = st.estaciones[job.optString("estacion")]
+          // [LP-F3] Destino segun el transporte de la estacion (red, Bluetooth o USB de este equipo).
+          val d = Impresoras.destino(cfg, job.optString("estacion"))
           val texto = Agent.render(job, cfg.ancho, cfg.prefijo, Prefs.getImagen(this))
           val btMac = Prefs.getBtMac(this)
+          val ok = "OK " + cfg.prefijo.uppercase() + " " + job.optString("tipo") + " -> "
           when {
-            est?.ip != null -> { Agent.imprimirTcp(est.ip, est.puerto, texto); ultimoLog = "OK " + cfg.prefijo.uppercase() + " " + job.optString("tipo") + " -> " + est.nombre }
-            Prefs.getBluetooth(this) && btMac.isNotBlank() -> { Bt.imprimir(btMac, texto); ultimoLog = "OK " + cfg.prefijo.uppercase() + " " + job.optString("tipo") + " -> Bluetooth" }
-            else -> throw RuntimeException("estacion sin IP y sin Bluetooth")
+            d != null && d.imprimible -> { Impresoras.imprimir(this, d, texto); ultimoLog = ok + d.nombre + " (" + d.texto() + ")" }
+            // Respaldo de la 1.6: estacion de red sin IP + impresora Bluetooth general encendida.
+            (d == null || (d.transporte == "red" && d.ip == null)) && Prefs.getBluetooth(this) && btMac.isNotBlank() -> {
+              Impresoras.imprimir(this, Destino("", "Bluetooth general", "bluetooth", null, 9100, btMac, null, "", true), texto)
+              ultimoLog = ok + "Bluetooth"
+            }
+            d != null -> Impresoras.imprimir(this, d, texto) // no imprimible aqui: lanza el error que corresponde
+            else -> throw RuntimeException("SIN_ESTACION: estacion sin IP y sin Bluetooth")
           }
           Agent.marcar(cfg, id, true)
         } catch (e: Exception) {

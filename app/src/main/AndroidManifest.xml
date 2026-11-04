@@ -19,6 +19,12 @@
   <!-- Bluetooth: opcional, para impresoras BT (se pide en runtime al activarlo). -->
   <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
   <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+  <!-- [LP-F3] Buscar impresoras Bluetooth cercanas (Android 12+): sin usarlo para ubicación.
+       Hasta Android 11 el descubrimiento exige la ubicación (solo se pide al tocar «Buscar de nuevo»). -->
+  <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+  <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+  <!-- [LP-F4] Impresora USB por cable OTG: opcional (el APK se instala igual en equipos sin USB host). -->
+  <uses-feature android:name="android.hardware.usb.host" android:required="false" />
   <!-- Camara: opcional, solo para el boton "Escanear QR" del emparejamiento
        (se pide en runtime; el emparejamiento por codigo escrito funciona igual sin ella). -->
   <uses-permission android:name="android.permission.CAMERA" />
@@ -47,6 +53,12 @@
         <category android:name="android.intent.category.BROWSABLE" />
         <data android:scheme="levoprint" android:host="emparejar" />
       </intent-filter>
+      <!-- [LP-F4] Impresora USB conectada (clase 7): Android ofrece abrir LevoPrint y recordar el permiso. -->
+      <intent-filter>
+        <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+      </intent-filter>
+      <meta-data android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+          android:resource="@xml/usb_impresoras" />
     </activity>
     <service
       android:name=".PrintService"

@@ -31,7 +31,8 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: gradle assembleRelease --no-daemon --stacktrace && cp app/build/outputs/apk/release/app-release.apk LevoPrint.apk
+        # [LP-F3] Las pruebas de unidad (render y busqueda) corren antes de armar el APK.
+        run: gradle testReleaseUnitTest assembleRelease --no-daemon --stacktrace && cp app/build/outputs/apk/release/app-release.apk LevoPrint.apk
       - name: Subir APK
         uses: actions/upload-artifact@v4
         with:
@@ -42,7 +43,9 @@ jobs:
       # Publica el APK a la URL estable que usan los botones de descarga de
       # la consola (mi negocio > estaciones). Si no hay SUPABASE_SERVICE_KEY
       # el paso NO falla: solo deja el artifact y avisa.
+      # [LP-F3] Solo desde main: un workflow_dispatch en una rama de trabajo no pisa la descarga publica.
       - name: Publicar al bucket de descargas (si hay service key)
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         env:
           SB_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |

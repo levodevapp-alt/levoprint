@@ -30,6 +30,21 @@ async function hasta(fn, ms, paso) {
 function puertoLibre() {
   return new Promise((resolve) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); }); });
 }
+// Base de la ventana: cada agente revisa base..base+4 buscando «otro LevoPrint abierto»; las bases de los
+// agentes de la prueba van separadas (bloques de 10) y con los 5 puertos libres.
+const basesUsadas = [];
+async function puertoGui() {
+  for (let i = 0; i < 200; i++) {
+    const base = 20000 + Math.floor(Math.random() * 3000) * 10;
+    if (basesUsadas.some((b) => Math.abs(b - base) < 10)) continue;
+    let libres = true;
+    for (let k = 0; k < 5 && libres; k++) {
+      libres = await new Promise((r) => { const s = net.createServer(); s.once('error', () => r(false)); s.listen(base + k, '127.0.0.1', () => s.close(() => r(true))); });
+    }
+    if (libres) { basesUsadas.push(base); return base; }
+  }
+  throw new Error('no hay puertos libres para la ventana');
+}
 // Impresora falsa: guarda todo lo que recibe.
 function impresora(host, puerto) {
   const recibido = [];
@@ -95,7 +110,7 @@ const DEV_OTRO = '44444444-4444-4444-8444-444444444444';
 
     // ---------------- Agente A: KOMO (backend nuevo) + KIPU (backend viejo) ----------------
     const dirA = path.join(tmp, 'a'); fs.mkdirSync(path.join(dirA, 'appdata'), { recursive: true });
-    const guiA = await puertoLibre();
+    const guiA = await puertoGui();
     const A = arrancarAgente(dirA, Object.assign({}, comunes, {
       LEVO_VINCULOS: 'komo:' + DEV_KOMO + ',kipu:' + DEV_KIPU, LEVO_PUERTO_GUI: String(guiA),
       LEVO_LOCK_DIR: path.join(dirA, 'lock'), APPDATA: path.join(dirA, 'appdata'), LOCALAPPDATA: path.join(dirA, 'local'),
@@ -206,7 +221,7 @@ const DEV_OTRO = '44444444-4444-4444-8444-444444444444';
     const lnk = path.join(inicioB, 'KOMO Agente.lnk');
     fs.writeFileSync(lnk, 'acceso falso');
     fs.writeFileSync(path.join(dirB, 'komo-agente.txt'), '﻿KOMO_URL=' + mock.url + '\r\nKOMO_ANON=x\r\nKOMO_DEVICE=' + DEV_KOMO_ANTIGUO + '\r\n');
-    const guiB = (await puertoLibre());
+    const guiB = await puertoGui();
     const B = arrancarAgente(dirB, Object.assign({}, comunes, {
       LEVO_VINCULOS: '', LEVO_PUERTO_GUI: String(guiB), LP_DOBLE_MODO: 'restringido',
       LEVO_LOCK_DIR: path.join(dirB, 'lock'), APPDATA: path.join(dirB, 'appdata'), LOCALAPPDATA: path.join(dirB, 'local'),
@@ -224,7 +239,7 @@ const DEV_OTRO = '44444444-4444-4444-8444-444444444444';
     ok(!!r && r.ok === true && !fs.existsSync(lnk), 'retirar KOMO Agente quita el acceso del arranque', r);
     // Sin vínculo de KOMO no se cierra KOMO Agente (KOMO dejaría de imprimir): se prueba con un 3.er agente solo de KIPU.
     const dirC = path.join(tmp, 'c'); fs.mkdirSync(dirC, { recursive: true });
-    const guiC = await puertoLibre();
+    const guiC = await puertoGui();
     const C = arrancarAgente(dirC, Object.assign({}, comunes, {
       LEVO_VINCULOS: 'kipu:' + DEV_KIPU, LEVO_PUERTO_GUI: String(guiC),
       LEVO_LOCK_DIR: path.join(dirC, 'lock'), APPDATA: path.join(dirC, 'appdata'), LOCALAPPDATA: path.join(dirC, 'local'),

@@ -49,6 +49,59 @@
         android:layout_height="wrap_content" android:layout_marginTop="8dp"
         android:visibility="gone" android:textColor="#EAF4FF" android:textSize="13sp" />
 
+    <!-- [LP-F3] Estaciones de las apps vinculadas con su impresora (red, Bluetooth o USB) y
+         «Elegir» / «Cambiar». Las filas las arma MainActivity. -->
+    <LinearLayout android:id="@+id/boxEstaciones" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:layout_marginTop="8dp"
+        android:orientation="vertical" />
+
+    <!-- [LP-F3] «¿Dónde está la impresora de <estación>?»: lo encontrado agrupado (red, Bluetooth,
+         USB); tocar = papel de prueba → «¿Salió?» → Sí = queda guardada en la app. -->
+    <LinearLayout android:id="@+id/cardDestino" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:layout_marginTop="12dp"
+        android:orientation="vertical" android:padding="14dp" android:background="#14406C"
+        android:visibility="gone">
+      <TextView android:id="@+id/txtDestinoTitulo" android:layout_width="match_parent"
+          android:layout_height="wrap_content" android:textColor="@color/oro" android:textSize="16sp"
+          android:textStyle="bold" />
+      <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+          android:layout_marginTop="4dp" android:textColor="#8FB6D9" android:textSize="12sp"
+          android:text="Toca una: sale un papel de prueba. Si salió, esa es." />
+      <LinearLayout android:id="@+id/boxEncontradas" android:layout_width="match_parent"
+          android:layout_height="wrap_content" android:orientation="vertical" />
+      <TextView android:id="@+id/txtDestinoMsg" android:layout_width="match_parent"
+          android:layout_height="wrap_content" android:layout_marginTop="8dp"
+          android:textColor="#8FB6D9" android:textSize="13sp" android:textStyle="bold" />
+      <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+          android:orientation="horizontal" android:layout_marginTop="8dp">
+        <Button android:id="@+id/btnBuscarImpresoras" android:layout_width="0dp"
+            android:layout_height="wrap_content" android:layout_weight="1" android:minHeight="48dp"
+            android:layout_marginEnd="4dp" android:text="Buscar de nuevo"
+            android:backgroundTint="@color/cian" android:textColor="@color/navy" />
+        <Button android:id="@+id/btnNoLaVeo" android:layout_width="0dp"
+            android:layout_height="wrap_content" android:layout_weight="1" android:minHeight="48dp"
+            android:layout_marginStart="4dp" android:layout_marginEnd="4dp" android:text="No la veo"
+            android:backgroundTint="@color/navy" android:textColor="#EAF4FF" />
+        <Button android:id="@+id/btnCerrarDestino" android:layout_width="0dp"
+            android:layout_height="wrap_content" android:layout_weight="1" android:minHeight="48dp"
+            android:layout_marginStart="4dp" android:text="Cerrar"
+            android:backgroundTint="@color/navy" android:textColor="#EAF4FF" />
+      </LinearLayout>
+      <LinearLayout android:id="@+id/boxNoLaVeo" android:layout_width="match_parent"
+          android:layout_height="wrap_content" android:orientation="vertical"
+          android:layout_marginTop="8dp" android:visibility="gone">
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:textColor="#EAF4FF" android:textSize="13sp"
+            android:text="Revisa que la impresora esté encendida. De red: conectada al mismo router o Wi-Fi que este equipo. Bluetooth: encendida y cerca (si pide un PIN, prueba 0000 o 1234). USB: con su cable conectado a este equipo. Luego toca «Buscar de nuevo»." />
+        <TextView style="@style/Etiqueta" android:text="¿Sabes su IP? (sale en el papel de autoprueba de la impresora)" />
+        <EditText android:id="@+id/inIpManual" style="@style/Campo"
+            android:hint="192.168.1.50" android:inputType="textUri" />
+        <Button android:id="@+id/btnProbarIp" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:minHeight="48dp" android:text="Probar esta IP"
+            android:backgroundTint="@color/oro" android:textColor="@color/navy" />
+      </LinearLayout>
+    </LinearLayout>
+
     <!-- [MM4-07] Ahorro de batería: se muestra con el equipo vinculado mientras Android
          pueda dormir a LevoPrint; al volver de Ajustes con el permiso, queda en verde. -->
     <LinearLayout android:id="@+id/cardBateria" android:layout_width="match_parent"

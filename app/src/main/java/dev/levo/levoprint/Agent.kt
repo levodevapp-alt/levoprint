@@ -21,16 +21,20 @@ data class Estacion(val id: String, val nombre: String, val ip: String?, val pue
 // __SCHEMA__._agente(device), que hace raise 'AGENTE_INVALIDO' si el token no
 // existe o el dispositivo esta inactivo (p. ej. lo REEMPLAZO otro equipo al
 // conectarse). PostgREST lo devuelve como HTTP 400 {"message":"AGENTE_INVALIDO"}.
-class RpcError(val fn: String, val http: Int, val pgMensaje: String, cuerpo: String) :
+class RpcError(val fn: String, val http: Int, val pgMensaje: String, cuerpo: String, val pgCodigo: String = "") :
   RuntimeException(fn + " HTTP " + http + ": " + cuerpo.take(180)) {
   val agenteInvalido: Boolean get() = pgMensaje == "AGENTE_INVALIDO"
+  // [LP-F3] Backend sin el modulo levoprint_transporte: PostgREST responde 404 con code PGRST202
+  // ("Could not find the function"). El APK sigue como la 1.6 (solo IP / Bluetooth general) por 30 min.
+  val ausente: Boolean get() = pgCodigo == "PGRST202" || http == 404 || pgMensaje.contains("Could not find the function", ignoreCase = true)
 }
 
 object Agent {
   // [O-23 · QA MEDIO-2] Versión de este APK (= versionName de app/build.gradle.kts; AgentRenderTest lo comprueba).
-  // Va en <prefijo>_agente_config (p.version = "apk/1.6.0"): KUTI (kuti_turno_print) solo manda el papel TURNO a un
-  // local cuyos agentes vivos lo saben dibujar. KOMO/KIPU la ignoran.
-  const val VERSION = "1.6.0"
+  // Va en <prefijo>_agente_config (p.version = "apk/1.7.0"): KUTI (kuti_turno_print) solo manda el papel TURNO a un
+  // local cuyos agentes vivos lo saben dibujar. KOMO/KIPU la ignoran. [LP-F3] Tambien va en <prefijo>_agente_impresoras:
+  // la consola avisa «Actualiza LevoPrint» a los equipos con menos de apk/1.7.0.
+  const val VERSION = "1.7.0"
   // ESC/POS con codigos de caracter (sin bytes de control crudos en el
   // fuente). Se construye TODO como String de chars 0..255 y se envia en
   // latin1 (ISO-8859-1), igual que el agente .exe (Buffer 'binary').
@@ -97,8 +101,8 @@ object Agent {
     val txt = s?.bufferedReader()?.use { r -> r.readText() } ?: ""
     con.disconnect()
     if (code !in 200..299) {
-      val pg = try { JSONObject(txt).optString("message") } catch (_: Exception) { "" }
-      throw RpcError(fn, code, pg.trim(), txt)
+      val j = try { JSONObject(txt) } catch (_: Exception) { JSONObject() }
+      throw RpcError(fn, code, j.optString("message").trim(), txt, j.optString("code").trim())
     }
     return if (txt.isBlank()) JSONObject() else JSONObject(txt)
   }
