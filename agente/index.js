@@ -802,7 +802,9 @@ function editarTxt(fn) {
 // Reemplaza CLAVE=... (primera aparicion) o la agrega al final.
 function ponerClave(txt, clave, valor) {
   const re = new RegExp('^[ \\t]*' + clave + '[ \\t]*=.*$', 'im');
-  if (re.test(txt)) return txt.replace(re, clave + '=' + valor);
+  // [QA LP-U1 · MEDIO 3] Reemplazo por función: un valor con «$&», «$1»… (nombre del negocio,
+  // ruta del .exe) se escribe tal cual en vez de interpretarse como patrón.
+  if (re.test(txt)) return txt.replace(re, () => clave + '=' + valor);
   return txt + (txt.endsWith('\n') || txt === '' ? '' : '\r\n') + clave + '=' + valor + '\r\n';
 }
 
@@ -934,7 +936,9 @@ async function canjearCodigo(codigoIn) {
   if (i >= 0) vinculos[i] = v; else vinculos.push(v);
   if (vinculos.length === 1) PREFIJO = v.prefijo;
   if (d.seccion) seccionVista[v.prefijo] = String(d.seccion).trim();
-  persistirVinculos(true);
+  // [QA LP-U1 · MEDIO 5] Si no se pudo escribir el .txt, el vínculo vale solo hasta cerrar: se avisa claro.
+  const guardado = persistirVinculos(true);
+  if (!guardado) console.error('[cfg] no se pudo guardar levoprint.txt en ' + DIR_TXT + ': el vinculo vale solo hasta cerrar LevoPrint.');
   guiEstado.ultimoError = null;
   // modo/reemplazara (rev 4): el servidor apaga a los anteriores recien con
   // el PRIMER trabajo IMPRESO de este agente; hasta entonces los dos imprimen.
@@ -943,10 +947,12 @@ async function canjearCodigo(codigoIn) {
   const aviso = (d.modo === 'reemplazar' && n === 1) ? 'Cuando imprimas tu primera comanda, se apagará el equipo anterior.'
     : (d.modo === 'reemplazar' && n > 1) ? `Cuando imprimas tu primera comanda, se apagarán los ${n} equipos anteriores.`
     : d.modo === 'adicional' ? 'Quedó como equipo adicional.' : '';
+  const avisoGuardado = guardado ? '' : 'Vinculado solo hasta cerrar LevoPrint: no se pudo guardar la configuración (revisa permisos de la carpeta).';
+  const avisoTotal = [aviso, avisoGuardado].filter(Boolean).join(' ');
   console.log('Vinculado como: ' + (d.nombre || 'estacion') + '. Listo.' + (aviso ? ' ' + aviso : '') + (d.reintento ? ' (reintento)' : ''));
   // vinculo: no enumerable (lleva un Map): no sale en el JSON de /vincular.
   const res = { ok: true, nombre: d.nombre, prefijo: v.prefijo, app: APP_POR_PREFIJO[v.prefijo] || v.prefijo.toUpperCase(),
-    modo: d.modo || null, reemplazara: n, reintento: !!d.reintento, aviso };
+    modo: d.modo || null, reemplazara: n, reintento: !!d.reintento, aviso: avisoTotal, guardado };
   Object.defineProperty(res, 'vinculo', { value: v, enumerable: false });
   return res;
 }
@@ -1284,7 +1290,7 @@ document.getElementById('btnVincular').addEventListener('click', async function 
   if (r && r.ok) {
     const txt = 'Listo: ' + (r.app ? r.app + ' quedó vinculado' : 'vinculado') + (r.nombre ? ' como ' + r.nombre : '') + '.'
       + (r.aviso ? ' ' + r.aviso : '') + (r.papel && r.papel.mensaje ? ' ' + r.papel.mensaje : '');
-    msg.textContent = txt; msg.className = 'msg ' + (r.papel && r.papel.ok === false ? 'warn' : 'ok');
+    msg.textContent = txt; msg.className = 'msg ' + ((r.papel && r.papel.ok === false) || r.guardado === false ? 'warn' : 'ok');
     document.getElementById('codigo').value = '';
   }
   else { msg.textContent = (r && r.mensaje) || 'No se pudo vincular. Revisa tu internet e intenta de nuevo.'; msg.className = 'msg err'; }
@@ -1427,11 +1433,29 @@ function abrirNavegador(url) {
   } catch { /* nada: entorno sin navegador */ }
 }
 
+function peticionLocalValida(req, servidor) {
+  const dir = servidor.address();
+  const puerto = dir && typeof dir === 'object' ? dir.port : 0;
+  const permitidos = ['127.0.0.1:' + puerto, 'localhost:' + puerto];
+  if (!permitidos.includes(String(req.headers.host || '').toLowerCase())) return false;
+  const origen = req.headers.origin;
+  if (origen !== undefined && !permitidos.map((h) => 'http://' + h).includes(String(origen).toLowerCase())) return false;
+  if (req.method === 'POST' && !/^application\/json\s*(;|$)/i.test(String(req.headers['content-type'] || ''))) return false;
+  return req.method === 'GET' || req.method === 'POST';
+}
+
 // Intenta 9110..9114 por si el puerto base ya esta ocupado (dos agentes,
 // otro programa, etc). No bloquea el ciclo de impresion si falla del todo.
 function iniciarGui() {
   const servidor = http.createServer((req, res) => {
     const url = (req.url || '/').split('?')[0];
+    // [QA LP-U1 · ALTO 1] Anti CSRF / DNS rebinding: una página cualquiera abierta en el navegador
+    // de la PC NO puede vincular, imprimir ni cambiar el arranque. (a) Host exacto 127.0.0.1:<puerto>
+    // o localhost:<puerto> (un dominio rebindeado a 127.0.0.1 trae su propio Host); (b) si viene
+    // Origin, el mismo de la ventana; (c) todo POST con Content-Type application/json, que obliga al
+    // navegador a hacer preflight (OPTIONS), que aquí no se responde. El reenvío entre instancias
+    // (fetch de Node) no manda Origin y sí el Host correcto.
+    if (!peticionLocalValida(req, servidor)) return responderJson(res, 403, { ok: false, error: 'PROHIBIDO' });
     if (req.method === 'GET' && url === '/') {
       // [qa5] Abrir la ventana con algún vínculo desactivado = reintento ya
       // (con tope de uno cada 10 s; /estado, que se sondea, NO despierta).
@@ -1471,14 +1495,19 @@ function iniciarGui() {
 // se abre el .exe que bajó KUTI)? Se busca en 9110-9114 una ventana que diga
 // levoprint:true con la MISMA versión. Si la hay, este proceso le pasa el
 // código (si trae uno), abre su ventana y se cierra: un solo LevoPrint
-// atiende todas las apps. Con otra versión se sigue como antes (cada uno lo suyo).
+// atiende todas las apps.
+// [QA LP-U1 · MEDIO 2] Con OTRA versión tampoco se arranca un segundo ciclo de
+// impresión (dos procesos tomando la misma cola): se le pasa el código, se
+// avisa «ciérralo y vuelve a abrir este» y se sale. Las ventanas 1.11 o
+// anteriores no dicen levoprint:true; se reconocen por version + semaforo.
 async function buscarOtraInstancia() {
   for (let i = 0; i < 5; i++) {
     const puerto = PUERTO_GUI_BASE + i;
     try {
       const r = await fetch(`http://127.0.0.1:${puerto}/estado`, { signal: AbortSignal.timeout(1500) });
       const e = await r.json();
-      if (e && e.levoprint === true && e.version === VERSION_AGENTE) return { puerto, estado: e };
+      const esLevoPrint = e && (e.levoprint === true || (typeof e.version === 'string' && typeof e.semaforo === 'string'));
+      if (esLevoPrint) return { puerto, estado: e, mismaVersion: e.version === VERSION_AGENTE };
     } catch (_) { /* nadie en ese puerto */ }
   }
   return null;
@@ -1524,6 +1553,12 @@ async function arrancar() {
       if (delArchivo) recordarCodigoArchivo(codigoInicial, r);
     }
     if (!DESDE_INICIO) abrirNavegador(url);
+    if (!otra.mismaVersion) {
+      // Se deja el aviso a la vista unos segundos (doble clic: la ventana negra se cerraría de golpe).
+      console.error('\nLevoPrint ya está abierto (versión ' + otra.estado.version + '): ciérralo y vuelve a abrir este (versión ' + VERSION_AGENTE + ').\n');
+      setTimeout(() => process.exit(0), DESDE_INICIO ? 1500 : 20000);
+      return;
+    }
     setTimeout(() => process.exit(0), 1500);
     return;
   }
@@ -1550,7 +1585,7 @@ async function arrancar() {
     if (r.ok) {
       await trasVincular(r);
       guiEstado.aviso = {
-        clase: r.papel && r.papel.ok === false ? 'warn' : 'ok',
+        clase: (r.papel && r.papel.ok === false) || r.guardado === false ? 'warn' : 'ok',
         texto: 'Listo: ' + r.app + ' quedó vinculado' + (r.nombre ? ' como ' + r.nombre : '') + '.' + (r.aviso ? ' ' + r.aviso : '')
           + (r.papel && r.papel.mensaje ? ' ' + r.papel.mensaje : ''),
       };

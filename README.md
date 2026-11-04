@@ -22,6 +22,10 @@ Todas las apps de LevoDev (KOMO, KIPU, KUTI y las que vengan) imprimen **solo co
 2. **Ábrelo** y pulsa **Permitir** en el aviso de ahorro de batería.
 3. **Escribe el código** (o **Escanear QR**, o el botón «Abrir en LevoPrint» de tu app) y pulsa **Vincular**. Para otra app, repite con su código: el equipo imprime para todas.
 
+### Pendientes (LP-U1)
+- **Quitar vínculo** desde la interfaz (ventana del `.exe` y APK): hoy un vínculo solo se reemplaza con un código nuevo de la misma app; para quitar una app hay que editar `LEVO_VINCULOS` en `levoprint.txt` (PC) o borrar los datos de la app (Android).
+- Las apps aún deben entregar el `.exe` con el código en el nombre (`LevoPrint-<código>.exe`) para el vínculo automático.
+
 ## Cómo funciona
 - Config de emparejamiento: una lista de vínculos `{prefijo (app), device}` (más `URL backend · anon key`, que ya vienen dentro del programa) y un `ancho`.
 - Bucle (para cada vínculo): `<prefijo>_agente_config` (estaciones) → `<prefijo>_print_tomar` (trabajos) →

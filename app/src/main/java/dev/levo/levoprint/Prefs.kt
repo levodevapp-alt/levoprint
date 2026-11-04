@@ -56,10 +56,26 @@ object Prefs {
         val c = Cfg(o.optString("url"), o.optString("anon"), o.optString("device"), o.optString("prefijo").ifBlank { "komo" }, ancho)
         if (c.url.isBlank() || c.anon.isBlank() || c.device.isBlank()) null else c to o.optString("nombre")
       }
-    } catch (_: Exception) { emptyList() }
+    } catch (e: Exception) {
+      // [QA LP-U1 · BAJO 8] JSON corrupto: no se pierde. Se guarda una copia en "vinculos_corrupto"
+      // (para soporte) y se registra el error; mientras tanto se usa el primer vinculo de las claves
+      // sueltas, para que el equipo siga imprimiendo al menos esa app.
+      android.util.Log.e("LevoPrint", "vinculos corrupto: " + e.message)
+      if (p.getString("vinculos_corrupto", null) != crudo) p.edit().putString("vinculos_corrupto", crudo).apply()
+      val url = p.getString("url", "") ?: ""
+      val anon = p.getString("anon", "") ?: ""
+      val device = p.getString("device", "") ?: ""
+      if (url.isBlank() || anon.isBlank() || device.isBlank()) emptyList()
+      else listOf(Cfg(url, anon, device, p.getString("prefijo", "komo") ?: "komo", ancho) to "")
+    }
   }
 
   fun leerVinculos(ctx: Context): List<Cfg> = leerVinculosConNombre(ctx).map { it.first }
+
+  // Ancho del papel (uno para todos los vinculos) sin tocar los vinculos.
+  fun setAncho(ctx: Context, ancho: Int) {
+    ctx.getSharedPreferences(F, Context.MODE_PRIVATE).edit().putInt("ancho", Agent.anchoValido(ancho)).apply()
+  }
 
   // Primer vinculo (o null si no hay ninguno): para "¿hay algo configurado?" (BootReceiver, pantalla).
   fun leer(ctx: Context): Cfg? = leerVinculos(ctx).firstOrNull()

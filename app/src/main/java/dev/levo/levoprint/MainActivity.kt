@@ -258,7 +258,25 @@ class MainActivity : AppCompatActivity() {
         )
         // [LP-U1] Con datos a medias no se guarda (antes se pisaba la config): si ya hay
         // vinculos, solo se arranca con ellos.
-        if (manual.url.isNotBlank() && manual.anon.isNotBlank() && manual.device.isNotBlank()) Prefs.guardar(this, manual)
+        // [QA LP-U1 · MEDIO 4] Los campos avanzados muestran el PRIMER vinculo: se guardan solo
+        // si el usuario cambio algo, con un prefijo conocido (komo/kipu/kuti) y sin reusar el
+        // device de otra app (un token es de UNA app). Si no cambio nada, solo cuenta el ancho.
+        val completos = manual.url.isNotBlank() && manual.anon.isNotBlank() && manual.device.isNotBlank()
+        val actual = Prefs.leer(this)
+        val cambio = completos && (actual == null || actual.url != manual.url || actual.anon != manual.anon ||
+          actual.device != manual.device || !actual.prefijo.equals(manual.prefijo, ignoreCase = true))
+        if (cambio) {
+          if (Proyectos.conocidos.none { it.prefijo == manual.prefijo }) {
+            estado.text = "App desconocida: escribe komo, kipu o kuti en «App (prefijo)»."
+            return@setOnClickListener
+          }
+          val otraApp = Prefs.leerVinculos(this).firstOrNull { it.device == manual.device && !it.prefijo.equals(manual.prefijo, ignoreCase = true) }
+          if (otraApp != null) {
+            estado.text = "Ese device ya es de " + otraApp.prefijo.uppercase() + ": usa el código de la otra app para vincularla."
+            return@setOnClickListener
+          }
+          Prefs.guardar(this, manual)
+        } else Prefs.setAncho(this, ancho)
         if (Prefs.leer(this) == null) { estado.text = "Faltan datos: URL, clave y device"; return@setOnClickListener }
         val i = Intent(this, PrintService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(i) else startService(i)

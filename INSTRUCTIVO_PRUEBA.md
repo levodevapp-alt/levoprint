@@ -86,5 +86,5 @@
 > se publica en Play Store, quitar `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` o ponerlo en un *flavor* aparte
 > (ver README).
 
-## Paso extra: revisa el logo del pie (APK 1.5.0 / .exe 1.11)
+## Paso extra: revisa el logo del pie (APK 1.6.0 / .exe 1.12)
 El papel de prueba trae el pie con el logo de LevoDev. Si en la impresora sale basura o signos raros (no imprime imágenes), apaga el logo: APK → Opciones avanzadas › «Pie con logo» apagado; .exe → botón «Pie con logo» de la ventana o `LEVO_IMAGEN=0` en `levoprint.txt`. El pie sale igual, solo en texto.
