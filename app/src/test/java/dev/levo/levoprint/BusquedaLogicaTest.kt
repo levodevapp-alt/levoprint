@@ -68,6 +68,16 @@ class BusquedaLogicaTest {
     assertEquals(32, BusquedaLogica.md5Lista(emptyList()).length)
   }
 
+  @Test fun listaSeReenviaCada20MinAunqueNoCambie() {
+    val t0 = 1_000_000_000L
+    val min = 60000L
+    assertFalse(BusquedaLogica.debeMandarLista(false, true, "a", "", 0L, t0)) // sin busqueda aun
+    assertTrue(BusquedaLogica.debeMandarLista(true, false, "b", "a", t0, t0 + min)) // cambio el md5
+    assertFalse(BusquedaLogica.debeMandarLista(true, false, "a", "a", t0, t0 + 19 * min)) // igual y reciente
+    assertTrue(BusquedaLogica.debeMandarLista(true, false, "a", "a", t0, t0 + 20 * min)) // igual, pero 20 min
+    assertTrue(BusquedaLogica.debeMandarLista(true, true, "a", "a", t0, t0 + min)) // pedida
+  }
+
   @Test fun listaConTope() {
     val l = (1..80).map { Encontrada("red", "10.0.0.$it:9100", "x") }
     assertEquals(64, BusquedaLogica.listaJson(l).length())

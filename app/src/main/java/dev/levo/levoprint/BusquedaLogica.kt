@@ -82,6 +82,14 @@ object BusquedaLogica {
     return out.filter { it !in propias }
   }
 
+  // [§8 · 4065864] La lista se reenvia completa al menos cada 20 min aunque no cambie: print_tomar solo deja
+  // tomar un trabajo BT/USB sin dueno vivo al agente que la informo en los ultimos 30 min.
+  const val INFORMAR_CADA_MS = 20 * 60000L
+
+  // ¿Va `encontradas` en esta llamada? Forzado, md5 distinto o >= 20 min desde el ultimo envio.
+  fun debeMandarLista(hayBusqueda: Boolean, forzar: Boolean, md5: String, md5Informado: String, informadoTs: Long, ahora: Long): Boolean =
+    hayBusqueda && (forzar || md5 != md5Informado || ahora - informadoTs >= INFORMAR_CADA_MS)
+
   fun macValida(mac: String?): Boolean = mac != null && MAC.matches(mac)
 
   // Equipo USB: "vvvv:pppp" y, si se pudo leer, ":serie" (sin ":" ni espacios, hasta 60).

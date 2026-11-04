@@ -19,7 +19,6 @@ import java.util.concurrent.ConcurrentHashMap
 //     como la 1.6 (solo IP y la impresora Bluetooth general).
 //   · <prefijo>_agente_estacion_elegir tras la prueba («¿Salio?» -> Si).
 object Impresoras {
-  private const val INFORMAR_CADA_MS = 30 * 60000L
   private const val SIN_TRANSPORTE_MS = 30 * 60000L
   const val BUSCAR_CADA_MS = 15 * 60000L
 
@@ -120,7 +119,7 @@ object Impresoras {
       .put("equipo", equipo()).put("capacidades", capacidades(ctx))
     val lista = encontradas()
     val md5Lista = md5
-    val mandaLista = ts > 0 && (forzar || md5Lista != st.md5Informado || ahora - st.informadoTs >= INFORMAR_CADA_MS)
+    val mandaLista = BusquedaLogica.debeMandarLista(ts > 0, forzar, md5Lista, st.md5Informado, st.informadoTs, ahora)
     if (mandaLista) p.put("encontradas", BusquedaLogica.listaJson(lista))
     val buscado = st.buscadoPendiente && ts > 0
     if (buscado) p.put("buscado", true)

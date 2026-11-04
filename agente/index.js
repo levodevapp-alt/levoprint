@@ -649,7 +649,14 @@ function imprimirRaw(ip, puerto, datos) {
 const AJUSTE_PRUEBA = (k) => (esExe ? '' : String(process.env[k] || '').trim());
 const PUERTO_IMPRESORA = parseInt(AJUSTE_PRUEBA('LEVO_BUSCAR_PUERTO') || '9100', 10) || 9100;
 const BUSCAR_CADA_MS = 15 * 60000;     // búsqueda sola cada 15 min
-const INFORMAR_CADA_MS = 30 * 60000;   // la lista se reenvía igual cada 30 min aunque no cambie
+// [§8 · 4065864] La lista se reenvía completa al menos cada 20 min aunque no cambie: print_tomar solo deja
+// tomar un trabajo Bluetooth/USB sin dueño vivo al agente que la informó en los últimos 30 min
+// (el servidor refresca visto_ts como mucho cada 5 min), así que 20 min deja margen.
+const INFORMAR_CADA_MS = 20 * 60000;
+// ¿Va la lista `encontradas` en esta llamada? Forzado (búsqueda pedida), md5 distinto o ≥ 20 min desde el último envío.
+function debeMandarLista(hayBusqueda, forzar, md5, md5Informado, informadoTs, ahora) {
+  return !!hayBusqueda && (!!forzar || md5 !== md5Informado || ahora - informadoTs >= INFORMAR_CADA_MS);
+}
 const SIN_TRANSPORTE_MS = 30 * 60000;  // backend sin las RPC nuevas: modo 1.12 por 30 min
 const MAX_ENCONTRADAS = 64;            // mismo tope que lp_impresoras_vistas
 const SONDEO_MS = 400, SONDEO_PARALELO = 48;
@@ -1004,7 +1011,7 @@ function buscarImpresoras(motivo) {
 async function informarImpresoras(v, forzar) {
   if (v.sinTransporteHasta > Date.now()) return null;
   const p = { device: v.device, version: 'exe/' + VERSION_AGENTE, equipo: nombreEquipo(), capacidades: capacidades() };
-  if (busqueda.ts && (forzar || busqueda.md5 !== v.md5Informado || Date.now() - v.informadoTs >= INFORMAR_CADA_MS)) p.encontradas = encontradasActuales();
+  if (debeMandarLista(busqueda.ts, forzar, busqueda.md5, v.md5Informado, v.informadoTs, Date.now())) p.encontradas = encontradasActuales();
   if (v.buscadoPendiente && busqueda.ts) p.buscado = true;
   let r;
   try {

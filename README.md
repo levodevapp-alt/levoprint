@@ -29,6 +29,7 @@ Cada estación (Cocina, Caja…) tiene **su** impresora, que puede ser de **red*
   - PC: además, las impresoras **instaladas en Windows** (USB o Bluetooth instalada como impresora). Se les manda el ticket en RAW por la cola de Windows. Las de PDF, XPS, Fax y OneNote no salen.
   - Android: además, las **Bluetooth** emparejadas (y, con «Buscar de nuevo», las cercanas: al tocarla se empareja; PIN 0000 o 1234) y las **USB** por cable OTG.
 - Tras vincular, la ventana (PC) o la pantalla (Android) pregunta **«¿Dónde está la impresora de <estación>?»**: tocas una → sale un papel de prueba → **¿Salió?** → **Sí** y queda guardada en la app. **No la veo** muestra consejos y deja escribir la IP a mano.
+- La lista de lo encontrado se manda a la app cuando cambia y, aunque no cambie, **al menos cada 20 min** (la app solo deja que un equipo tome los trabajos de una impresora Bluetooth/USB sin dueño activo si la informó en los últimos 30 min).
 - Una impresora Bluetooth o USB es **de un equipo**: los trabajos de esa estación solo los imprime ese equipo (si otro los recibe, se marcan `IMPRESORA_EN_OTRO_EQUIPO`).
 - **App sin actualizar** (sin `<app>_agente_impresoras`): LevoPrint sigue como antes (solo IP; en Android también la impresora Bluetooth general) por 30 min y, al elegir, dice «Escribe esta IP en tu consola de … ».
 - **USB en Windows bloqueado** (PowerShell restringido por la empresa o el antivirus): la ventana lo avisa y quedan las de red.

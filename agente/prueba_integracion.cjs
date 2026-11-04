@@ -80,6 +80,24 @@ const DEV_KIPU = '22222222-2222-4222-8222-222222222222';
 const DEV_KOMO_ANTIGUO = '33333333-3333-4333-8333-333333333333';
 const DEV_OTRO = '44444444-4444-4444-8444-444444444444';
 
+// [§8 · 4065864] Reenvío de la lista: se evalúa debeMandarLista (tomada de index.js) con un reloj que avanza.
+(function relojDeLaLista() {
+  const src = fs.readFileSync(path.join(__dirname, 'index.js'), 'utf8');
+  const a = src.indexOf('const INFORMAR_CADA_MS'), b = src.indexOf('\n', src.indexOf('function debeMandarLista'));
+  const fin = src.indexOf('\n}', b) + 2;
+  const f = new Function(src.slice(a, fin) + '; return debeMandarLista;')();
+  const t0 = 1e12, min = 60000;
+  let ahora = t0;
+  const informado = { md5: 'x', ts: t0 };
+  const manda = (md5) => { const m = f(1, false, md5, informado.md5, informado.ts, ahora); if (m) { informado.md5 = md5; informado.ts = ahora; } return m; };
+  ok(!manda('x'), 'lista igual al minuto 0: no se reenvía');
+  ahora = t0 + 19 * min; ok(!manda('x'), 'lista igual a los 19 min: no se reenvía');
+  ahora = t0 + 20 * min; ok(manda('x'), 'lista igual a los 20 min: se reenvía completa (print_tomar exige < 30 min)');
+  ahora = t0 + 25 * min; ok(!manda('x'), 'recién reenviada: espera otros 20 min');
+  ok(manda('y'), 'cambió el md5: se manda al instante');
+  ok(f(0, true, 'z', 'y', t0, ahora) === false, 'sin búsqueda hecha no se manda nada');
+})();
+
 (async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'levoprint-int-'));
   const agentes = [];
