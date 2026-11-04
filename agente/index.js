@@ -1,5 +1,5 @@
 // ============================================================
-// LevoPrint · Agente de impresión v1.9 (ventana visual + vinculación por código + render servidor) · LevoDev
+// LevoPrint · Agente de impresión v1.10 (ventana visual + vinculación por código + render servidor) · LevoDev
 // Corre en la PC del local. Poll cada 2s a komo_print_tomar,
 // renderiza ESC/POS y lo manda a la IP:puerto de cada estación.
 // Se empaqueta a LevoPrint.exe (Node SEA). El dueño solo edita
@@ -182,6 +182,8 @@ const CMD = {
   centro: ESC + 'a\x01', izq: ESC + 'a\x00',
   negritaOn: ESC + 'E\x01', negritaOff: ESC + 'E\x00',
   grande: GS + '!\x11', normal: GS + '!\x00',
+  // [O-23] triple de ancho y alto: el número del turno sin cita se lee desde lejos
+  enorme: GS + '!\x22',
   corte: '\n\n\n' + GS + 'V\x00',
 };
 const linea = (c = '-') => c.repeat(ANCHO) + '\n';
@@ -450,8 +452,66 @@ function renderCierre(pl) {
   return t;
 }
 
+// [O-23 · 04-nov] Ticket del cliente SIN CITA de KUTI (tipo TURNO). Mismo papel que kuti-print
+// (render.ts) y que el APK (Agent.kt): negocio, local, «TURNO SIN CITA», el número de la cola
+// (definitivo) o el provisional del equipo (sin red) en triple alto, nombre, con quién, hora y las
+// notas de la hoja de KUTI en ASCII PURO (la página de códigos de la térmica varía), partidas por
+// palabra al ancho. Payload: negocio, local, definitivo, numero, provisional, nombre, con, fecha,
+// delante (n.º o null).
+function envolver(texto, ancho) {
+  const out = [];
+  let l = '';
+  for (let w of String(texto == null ? '' : texto).split(/\s+/).filter(Boolean)) {
+    while (w.length > ancho) { if (l) { out.push(l); l = ''; } out.push(w.slice(0, ancho)); w = w.slice(ancho); }
+    if (!w) continue;
+    if (!l) l = w;
+    else if (l.length + 1 + w.length <= ancho) l += ' ' + w;
+    else { out.push(l); l = w; }
+  }
+  if (l) out.push(l);
+  return out;
+}
+function numeroTurno(pl) {
+  const v = pl.definitivo ? pl.numero : (pl.provisional || pl.numero);
+  return String(v == null ? '' : v).replace(/[^\x21-\x7e]/g, '').slice(0, Math.max(1, Math.floor(ANCHO / 3)));
+}
+function notasTurno(pl) {
+  const n = [];
+  if (pl.definitivo) {
+    const d = pl.delante == null || pl.delante === '' ? NaN : Number(pl.delante);
+    if (d === 0) n.push('Es el siguiente en la cola.');
+    else if (d === 1) n.push('Hay 1 persona delante.');
+    else if (Number.isFinite(d) && d > 1) n.push('Hay ' + Math.floor(d) + ' personas delante.');
+    n.push('Mira la pantalla de la sala: ahi sale tu numero cuando te toque.');
+  } else {
+    n.push('Numero provisional: se tomo sin internet.');
+    n.push('Cuando vuelva la red recibes tu numero de la cola. En la pantalla de la sala lo veras junto a este, por ejemplo:');
+    n.push('15 - ' + numeroTurno(pl) + ' (el 15 es un ejemplo)');
+    n.push('No pierdes tu lugar: la cola va por la hora en que llegaste.');
+  }
+  return n;
+}
+function renderTurno(pl) {
+  pl = pl || {};
+  let t = CMD.init + CMD.centro;
+  const neg = String(pl.negocio || ''), loc = String(pl.local || '');
+  if (neg) t += CMD.negritaOn + CMD.grande + neg.toUpperCase() + '\n' + CMD.normal + CMD.negritaOff;
+  if (loc && loc !== neg) t += loc + '\n';
+  t += CMD.negritaOn + 'TURNO SIN CITA\n' + CMD.negritaOff + linea('=');
+  t += (pl.definitivo ? 'Tu numero' : 'Tu numero provisional') + '\n';
+  t += CMD.negritaOn + CMD.enorme + numeroTurno(pl) + '\n' + CMD.normal + CMD.negritaOff;
+  if (pl.nombre) t += String(pl.nombre).slice(0, ANCHO) + '\n';
+  if (pl.con) t += ('Con ' + pl.con).slice(0, ANCHO) + '\n';
+  if (pl.fecha || pl.hora) t += String(pl.fecha || pl.hora) + '\n';
+  t += CMD.izq + linea();
+  for (const nota of notasTurno(pl)) for (const l of envolver(nota, ANCHO)) t += l + '\n';
+  t += linea('=') + firma(pl) + CMD.corte;
+  return t;
+}
+
 function renderBase(job) {
   if (job.tipo === 'CARTA_QR') return renderCartaQr(job.payload);
+  if (job.tipo === 'TURNO') return renderTurno(job.payload);
   if (job.tipo === 'COMANDA') return renderComanda(job.payload);
   if (job.tipo === 'PRECUENTA') return renderPrecuenta(job.payload);
   if (job.tipo === 'TICKET') return renderTicket(job.payload);
@@ -800,7 +860,7 @@ function estadoActual() {
   else semaforo = 'conectado';
   return {
     ok: true,
-    version: '1.9',
+    version: '1.10',
     modoConsola: MODO_CONSOLA,
     ancho: ANCHO,
     prefijo: PREFIJO,
@@ -1070,7 +1130,7 @@ function iniciarGui() {
 async function arrancar() {
   const canje = await canjearCodigo();
   if (faltaUrlAnon()) { abortarSinConfig(); return; }
-  console.log('LevoPrint agente de impresion v1.9 (ventana visual + vinculacion por codigo) - LevoDev');
+  console.log('LevoPrint agente de impresion v1.10 (ventana visual + vinculacion por codigo) - LevoDev');
   // [MM4-06] Codigo del .txt canjeado recien: papel de prueba (sin bloquear el arranque).
   if (canje && canje.ok && !canje.reintento) imprimirVinculado(canje.nombre);
   console.log(MODO_CONSOLA ? 'MODO CONSOLA (sin impresoras reales)' : 'Modo impresión real');

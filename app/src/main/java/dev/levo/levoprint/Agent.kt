@@ -40,6 +40,8 @@ object Agent {
   private val NEG_OFF = ESC + "E" + 0.toChar()
   private val GRANDE = GS + "!" + 17.toChar()
   private val NORMAL = GS + "!" + 0.toChar()
+  // [O-23] triple de ancho y alto (GS ! 0x22): el numero del turno se lee desde lejos
+  private val ENORME = GS + "!" + 34.toChar()
   private val FONT0 = ESC + "!" + 0.toChar()
   private val CORTE = NL + NL + NL + GS + "V" + 0.toChar()
   // [MM3-01 3-nov] Pie de marca unico del ticket termico (IDENTIDAD_VISUAL 12.12): antes era el
@@ -326,6 +328,69 @@ object Agent {
     return b.toString()
   }
 
+  // [O-23 · 04-nov] Ticket del cliente SIN CITA de KUTI (tipo TURNO). Mismo papel que kuti-print
+  // (render.ts) y que el agente .exe: negocio, local, "TURNO SIN CITA", el numero de la cola
+  // (definitivo) o el provisional del equipo (sin red) en triple alto, nombre, con quien, hora y
+  // las notas de la hoja de KUTI en ASCII PURO (la pagina de codigos de la termica varia), partidas
+  // por palabra al ancho. Payload: negocio, local, definitivo, numero, provisional, nombre, con,
+  // fecha, delante (n o null).
+  fun envolver(texto: String, ancho: Int): List<String> {
+    val out = ArrayList<String>()
+    var l = ""
+    for (palabra in texto.split(Regex("\\s+")).filter { it.isNotEmpty() }) {
+      var w = palabra
+      while (w.length > ancho) {
+        if (l.isNotEmpty()) { out.add(l); l = "" }
+        out.add(w.substring(0, ancho)); w = w.substring(ancho)
+      }
+      if (w.isEmpty()) continue
+      l = if (l.isEmpty()) w else if (l.length + 1 + w.length <= ancho) "$l $w" else { out.add(l); w }
+    }
+    if (l.isNotEmpty()) out.add(l)
+    return out
+  }
+  private fun numeroTurno(pl: JSONObject, ancho: Int): String {
+    val v = if (pl.optBoolean("definitivo")) txt(pl, "numero") else txt(pl, "provisional").ifBlank { txt(pl, "numero") }
+    return v.replace(Regex("[^\\x21-\\x7e]"), "").take(maxOf(1, ancho / 3))
+  }
+  fun notasTurno(pl: JSONObject, ancho: Int): List<String> {
+    val n = ArrayList<String>()
+    if (pl.optBoolean("definitivo")) {
+      // NaN.toInt() da 0 en Kotlin: un "delante" que no es numero no debe decir "Es el siguiente".
+      val dd = if (!pl.has("delante") || pl.isNull("delante") || txt(pl, "delante").isBlank()) -1.0 else pl.optDouble("delante", -1.0)
+      val d = if (dd.isNaN()) -1 else dd.toInt()
+      when {
+        d == 0 -> n.add("Es el siguiente en la cola.")
+        d == 1 -> n.add("Hay 1 persona delante.")
+        d > 1 -> n.add("Hay " + d + " personas delante.")
+      }
+      n.add("Mira la pantalla de la sala: ahi sale tu numero cuando te toque.")
+    } else {
+      n.add("Numero provisional: se tomo sin internet.")
+      n.add("Cuando vuelva la red recibes tu numero de la cola. En la pantalla de la sala lo veras junto a este, por ejemplo:")
+      n.add("15 - " + numeroTurno(pl, ancho) + " (el 15 es un ejemplo)")
+      n.add("No pierdes tu lugar: la cola va por la hora en que llegaste.")
+    }
+    return n
+  }
+  private fun renderTurno(pl: JSONObject, ancho: Int, app: String): String {
+    val b = StringBuilder(INIT + CENTRO)
+    val neg = txt(pl, "negocio"); val loc = txt(pl, "local")
+    if (neg.isNotBlank()) b.append(NEG_ON + GRANDE + neg.uppercase() + NL + NORMAL + NEG_OFF)
+    if (loc.isNotBlank() && loc != neg) b.append(loc + NL)
+    b.append(NEG_ON + "TURNO SIN CITA" + NL + NEG_OFF + linea(ancho, "="))
+    b.append((if (pl.optBoolean("definitivo")) "Tu numero" else "Tu numero provisional") + NL)
+    b.append(NEG_ON + ENORME + numeroTurno(pl, ancho) + NL + NORMAL + NEG_OFF)
+    if (txt(pl, "nombre").isNotBlank()) b.append(txt(pl, "nombre").take(ancho) + NL)
+    if (txt(pl, "con").isNotBlank()) b.append(("Con " + txt(pl, "con")).take(ancho) + NL)
+    val hora = txt(pl, "fecha").ifBlank { txt(pl, "hora") }
+    if (hora.isNotBlank()) b.append(hora + NL)
+    b.append(IZQ + linea(ancho))
+    for (nota in notasTurno(pl, ancho)) for (l in envolver(nota, ancho)) b.append(l + NL)
+    b.append(linea(ancho, "=") + CENTRO + pie(app, ancho))
+    return b.toString()
+  }
+
   private fun renderGenerico(tipo: String, pl: JSONObject, ancho: Int, app: String): String {
     val b = StringBuilder(INIT + CENTRO + GRANDE + tipo + NL + NORMAL + IZQ + linea(ancho, "="))
     val its = items(pl)
@@ -350,6 +415,7 @@ object Agent {
       "TICKET" -> renderTicket(pl, ancho, app)
       "CPE" -> renderCpe(pl, ancho, app)
       "CARTA_QR" -> renderCartaQr(pl, ancho, app)
+      "TURNO" -> renderTurno(pl, ancho, app)
       "CIERRE" -> renderCierre(pl, ancho, app)
       else -> renderGenerico(tipo.ifBlank { "COMPROBANTE" }, pl, ancho, app)
     }

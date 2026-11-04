@@ -13,6 +13,7 @@ import org.junit.Test
 //     siempre (mismos casos que la comparacion del .exe, cmprender.mjs de QA).
 //  2) KUTI: nota de venta (VENTA / ALQUILER DE SILLA, nota, quien atendio,
 //     cliente, profesional por servicio, propinas aparte), COPIA y corte.
+//  3) [O-23] KUTI: ticket del cliente sin cita (TURNO), definitivo y provisional.
 class AgentRenderTest {
   private fun o(s: String) = JSONObject(s)
   // Payload + extras (las extras pisan claves del payload, como el spread del .exe).
@@ -105,6 +106,53 @@ class AgentRenderTest {
       assertFalse(t, t.contains("Sistema ") || t.contains("levodev.app"))
       assertTrue(t, t.endsWith("=".repeat(ancho) + "\n\n\n\n" + 29.toChar() + "V" + 0.toChar()))
     }
+  }
+
+  // [O-23] Ticket del cliente sin cita de KUTI (TURNO): mismo papel que kuti-print (prueba_render.mjs).
+  private val turnoDef = """{"app":"KUTI","negocio":"Barbería Demo","local":"Sede Centro","definitivo":true,"numero":15,"provisional":"","nombre":"Carlos P.","con":"Jorge","fecha":"04/11/2026 10:05","delante":2}"""
+
+  @Test fun kutiTurnoDefinitivo() {
+    for (ancho in listOf(32, 48)) {
+      val crudo = Agent.render(job("TURNO", o(turnoDef)), ancho, "kuti")
+      val t = texto(crudo)
+      assertTrue(t, t.contains("BARBERÍA DEMO") && t.contains("Sede Centro") && t.contains("TURNO SIN CITA") && t.contains("Tu numero\n15\n"))
+      // triple alto (GS ! 0x22) para el numero
+      assertTrue(crudo, crudo.contains(29.toChar() + "!" + 34.toChar() + "15\n"))
+      assertTrue(t, t.contains("Carlos P.\nCon Jorge\n04/11/2026 10:05\n") && t.contains("Hay 2 personas delante.") && !t.contains("null") && !t.contains("COPIA"))
+      assertTrue(t, t.contains("Sistema KUTI - LevoDev") && t.contains("kuti.levodev.app"))
+      // ninguna linea pasa del ancho (salvo el nombre del negocio en doble ancho) y lo fijo es ASCII puro
+      assertTrue(t, t.split("\n").filter { !it.startsWith("BARBER") }.all { it.length <= ancho })
+      val fijo = t.substring(t.indexOf("TURNO SIN CITA")).replace("Carlos P.", "").replace("Jorge", "")
+      assertTrue(fijo, fijo.all { it.code < 128 })
+    }
+    val cero = texto(Agent.render(job("TURNO", o(turnoDef).put("delante", 0)), 48, "kuti"))
+    assertTrue(cero, cero.contains("Es el siguiente en la cola."))
+    val uno = texto(Agent.render(job("TURNO", o(turnoDef).put("delante", 1)), 48, "kuti"))
+    assertTrue(uno, uno.contains("Hay 1 persona delante."))
+    val raro = texto(Agent.render(job("TURNO", o(turnoDef).put("delante", "x")), 48, "kuti"))
+    assertTrue(raro, !raro.contains("siguiente") && !raro.contains("delante."))
+  }
+
+  @Test fun kutiTurnoProvisionalYCopia() {
+    val prov = o(turnoDef).put("definitivo", false).put("numero", "A-07").put("provisional", "A-07").put("nombre", "").put("con", JSONObject.NULL).put("delante", JSONObject.NULL)
+    for (ancho in listOf(32, 48)) {
+      val t = texto(Agent.render(job("TURNO", prov), ancho, "kuti"))
+      val u = t.replace("\n", " ")
+      assertTrue(t, t.contains("Tu numero provisional\nA-07\n") && u.contains("se tomo sin internet") && t.contains("\n15 - A-07 (el 15 es un ejemplo)\n"))
+      assertTrue(t, u.contains("No pierdes tu lugar") && !t.contains("Con ") && !t.contains("delante") && !t.contains("null"))
+      assertTrue(t, t.split("\n").filter { !it.startsWith("BARBER") }.all { it.length <= ancho })
+    }
+    val c = texto(Agent.render(job("TURNO", o(turnoDef).put("copia", true)), 48, "kuti"))
+    assertTrue(c, c.startsWith("*** COPIA ***") && c.contains("TURNO SIN CITA"))
+    // el numero grande solo lleva ASCII visible y cabe en triple (32 columnas -> 10)
+    val largo = texto(Agent.render(job("TURNO", prov.put("provisional", "ZZZZ-9999·xx")), 32, "kuti"))
+    assertTrue(largo, largo.contains("\nZZZZ-9999x\n"))
+  }
+
+  @Test fun envolverPorPalabra() {
+    assertEquals(listOf("hola que", "tal"), Agent.envolver("hola  que tal", 8))
+    assertEquals(listOf("abcdefgh", "ij x"), Agent.envolver("abcdefghij x", 8))
+    assertEquals(emptyList<String>(), Agent.envolver("   ", 8))
   }
 
   // [MM4-06] Papel al vincular: titulo, estacion y negocio en lineas aparte (sin el punto medio), hora y pie.
