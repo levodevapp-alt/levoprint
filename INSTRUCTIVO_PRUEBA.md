@@ -86,5 +86,24 @@
 > se publica en Play Store, quitar `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` o ponerlo en un *flavor* aparte
 > (ver README).
 
-## Paso extra: revisa el logo del pie (APK 1.6.0 / .exe 1.12)
+## D. Impresora por estación (LP-F3/F4 · .exe 1.13 · APK 1.7.0)
+Necesita el backend `levoprint_transporte` aplicado en la app (si no, LevoPrint sigue como antes y al elegir dice «Escribe esta IP en…»).
+
+**PC**
+1. Abre LevoPrint 1.13 y vincula con el código. En unos segundos la ventana pregunta **«¿Dónde está la impresora de <estación>?»** con dos grupos: *En la red* y *Conectadas a esta PC (USB)*.
+2. Toca **Probar** en una → sale un papel → **Sí, salió** → «Listo: <estación> imprime en …». En tu app, la estación muestra esa impresora.
+3. Con una impresora USB instalada en Windows: elige la USB y haz una venta: debe salir por USB.
+4. **No la veo** → escribe la IP a mano → Probar.
+5. Si tienes el programa antiguo de KOMO: deja `komo-agente.txt` junto a LevoPrint y ábrelo; debe aparecer KOMO vinculado y el aviso **Cerrar y quitar KOMO Agente**.
+
+**Android**
+1. Instala el APK 1.7.0 encima del anterior (versionCode 12) y vincula.
+2. La pantalla pregunta **«¿Dónde está la impresora de <estación>?»** con *En la red*, *Bluetooth* y *USB*. **Buscar de nuevo** pide permiso de Bluetooth cercano y busca 12 s.
+3. Bluetooth sin emparejar: al tocarla Android pide el PIN (0000 o 1234), luego sale el papel → **Sí, salió**.
+4. USB (cable OTG): al conectarla Android ofrece abrir LevoPrint; marca «usar por defecto» para no volver a pedir permiso.
+
+**Qué reportar:** marca/modelo, si es red/Bluetooth/USB, el texto exacto del error y, en PC, `levoprint.log`.
+**Consola:** en otro equipo, un trabajo de una estación USB/BT de este equipo NO debe imprimirse ahí.
+
+## Paso extra: revisa el logo del pie (APK 1.7.0 / .exe 1.13)
 El papel de prueba trae el pie con el logo de LevoDev. Si en la impresora sale basura o signos raros (no imprime imágenes), apaga el logo: APK → Opciones avanzadas › «Pie con logo» apagado; .exe → botón «Pie con logo» de la ventana o `LEVO_IMAGEN=0` en `levoprint.txt`. El pie sale igual, solo en texto.

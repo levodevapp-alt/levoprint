@@ -135,6 +135,8 @@ object Impresoras {
     }
     st.transporte = true
     st.sinTransporteHasta = 0L
+    // {ok:false, error:"PARAMETRO_INVALIDO"}: no se borra lo que ya se sabia de cada estacion.
+    if (!r.optBoolean("ok", true)) return true
     if (mandaLista) { st.md5Informado = md5Lista; st.informadoTs = ahora }
     if (buscado) st.buscadoPendiente = false
     st.estacionVinculo = if (r.isNull("estacionVinculo")) null else r.optString("estacionVinculo").ifBlank { null }
@@ -195,6 +197,7 @@ object Impresoras {
     "ESTACION_NO_EXISTE" -> "Esa estación ya no existe en tu app. Revisa " + Emparejamiento.consolaDe(prefijo) + "."
     "PARAMETRO_INVALIDO" -> "Los datos de la impresora no son válidos. Busca de nuevo y vuelve a intentar."
     "DESTINO_NO_VISTO" -> "Tu app aún no ve esa impresora. Toca «Buscar de nuevo» y vuelve a elegirla."
+    "EQUIPO_OTRO_LOCAL" -> "Este equipo es de otro local que esa estación: elige su impresora desde un equipo de ese local."
     "AGENTE_INVALIDO" -> Emparejamiento.msgDesactivado(prefijo)
     else -> "No se pudo guardar (" + err.ifBlank { "error" } + ")."
   }

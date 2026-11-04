@@ -990,6 +990,8 @@ async function informarImpresoras(v, forzar) {
     throw e;
   }
   v.transporte = true; v.sinTransporteHasta = 0;
+  // {ok:false, error:'PARAMETRO_INVALIDO'}: no se borra lo que ya se sabía de cada estación.
+  if (!r || r.ok === false) { console.error(`[impresoras ${v.prefijo}] el servidor respondio ${(r && r.error) || 'vacio'}`); return null; }
   if (p.encontradas) { v.md5Informado = busqueda.md5; v.informadoTs = Date.now(); }
   if (p.buscado) v.buscadoPendiente = false;
   v.estacionVinculo = (r && r.estacionVinculo) || null;
@@ -1008,6 +1010,7 @@ const ERRORES_ELEGIR = {
   ESTACION_NO_EXISTE: 'Esa estación ya no existe en tu app. Actualiza la página de tu app y vuelve a intentar.',
   PARAMETRO_INVALIDO: 'Los datos de la impresora no son válidos. Busca de nuevo y vuelve a intentar.',
   DESTINO_NO_VISTO: 'Tu app aún no ve esa impresora. Pulsa «Buscar de nuevo» y vuelve a elegirla.',
+  EQUIPO_OTRO_LOCAL: 'Esta PC es de otro local que esa estación: elige su impresora desde un equipo de ese local.',
   AGENTE_INVALIDO: 'Este equipo está desactivado en tu app: vincúlalo de nuevo con un código.',
 };
 async function elegirDestino(v, estacion, transporte, ref, nombre) {
