@@ -285,6 +285,7 @@ function paraConsola(t, sep) {
   let i;
   while ((i = t.indexOf('\x1dv0')) >= 0) {
     const xl = t.charCodeAt(i + 4) + 256 * t.charCodeAt(i + 5), yl = t.charCodeAt(i + 6) + 256 * t.charCodeAt(i + 7);
+    if (!(xl * yl >= 0)) { t = t.slice(0, i) + '[logo]'; break } // [Re-QA BAJO-7] encabezado incompleto: no reinyectar
     t = t.slice(0, i) + '[logo]' + t.slice(i + 8 + xl * yl);
   }
   return t.replace(/[\x00-\x1f]/g, sep || '').trim();
