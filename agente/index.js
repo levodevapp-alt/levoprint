@@ -748,7 +748,7 @@ function estadoActual() {
   else semaforo = 'conectado';
   return {
     ok: true,
-    version: '1.7',
+    version: '1.8',
     modoConsola: MODO_CONSOLA,
     ancho: ANCHO,
     prefijo: PREFIJO,
