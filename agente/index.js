@@ -1206,7 +1206,7 @@ async function j(url, opts) {
 }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]; }); }
 let ultimo = null;
-let avisoVisto = false;
+let avisoVisto = '';
 
 async function refrescar() {
   let e;
@@ -1230,8 +1230,8 @@ async function refrescar() {
   semTxt.textContent = texto;
 
   // Aviso del vínculo automático (código en el nombre del programa o en levoprint.txt): se muestra una vez.
-  if (e.aviso && !avisoVisto) {
-    avisoVisto = true;
+  if (e.aviso && avisoVisto !== e.aviso.texto) {
+    avisoVisto = e.aviso.texto;
     const m = document.getElementById('msgVinculo');
     m.textContent = e.aviso.texto; m.className = 'msg ' + (e.aviso.clase || '');
   }
@@ -1417,6 +1417,16 @@ async function manejarImagen(req, res) {
 }
 
 // [LP-U1] Botón «Activar / Quitar» del arranque con Windows.
+// [QA LP-U1 · BAJO-b] Otra copia (de otra versión) que se cerró deja su aviso en esta ventana.
+async function manejarAviso(req, res) {
+  const body = await leerBodyJson(req);
+  const texto = String(body.texto || '').replace(/[\x00-\x1f]/g, ' ').trim().slice(0, 300);
+  if (!texto) return responderJson(res, 400, { ok: false, error: 'AVISO_VACIO' });
+  console.log('[aviso] ' + texto);
+  guiEstado.aviso = { clase: 'warn', texto };
+  return responderJson(res, 200, { ok: true });
+}
+
 async function manejarInicio(req, res) {
   const body = await leerBodyJson(req);
   if (typeof body.activo !== 'boolean') return responderJson(res, 400, { ok: false, error: 'INICIO_INVALIDO' });
@@ -1472,6 +1482,7 @@ function iniciarGui() {
     if (req.method === 'POST' && url === '/ancho') return void manejarAncho(req, res);
     if (req.method === 'POST' && url === '/imagen') return void manejarImagen(req, res);
     if (req.method === 'POST' && url === '/inicio') return void manejarInicio(req, res);
+    if (req.method === 'POST' && url === '/aviso') return void manejarAviso(req, res);
     responderJson(res, 404, { ok: false, error: 'NO_ENCONTRADO' });
   });
   function intentarPuertos(intento) {
@@ -1527,6 +1538,99 @@ function recordarCodigoArchivo(cod, r) {
   process.env.LEVO_CODIGOS_ARCHIVO = lista;
 }
 
+// [QA LP-U1 · BAJO-a] Candado de una instancia: dos arranques A LA VEZ (autoarranque de Windows +
+// doble clic) no se ven por el puerto (ninguno escucha aún) y quedarían dos ciclos. levoprint.lock
+// guarda el pid; se crea con 'wx' (atómico). Si ya existe y ese pid sigue vivo, este proceso se
+// comporta como «otra instancia» (reenvía el código / avisa y sale); si el pid murió (corte de
+// luz, cierre forzado), se retoma. Va en %LOCALAPPDATA%\LevoPrint (uno por usuario de Windows,
+// aunque haya .exe en varias carpetas); sin LOCALAPPDATA, en la carpeta del .txt.
+// LEVO_LOCK_DIR solo para pruebas.
+const DIR_LOCK = process.env.LEVO_LOCK_DIR || DIR_RESPALDO || DIR_TXT;
+const RUTA_LOCK = path.join(DIR_LOCK, 'levoprint.lock');
+let lockMio = false;
+function pidVivo(pid) {
+  if (!pid || pid === process.pid) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return !!(e && e.code === 'EPERM'); }
+}
+// Devuelve 0 si el candado es nuestro, o el pid vivo que lo tiene.
+function tomarLock() {
+  try { fs.mkdirSync(DIR_LOCK, { recursive: true }); } catch { /* ya existe */ }
+  for (let intento = 0; intento < 2; intento++) {
+    try {
+      const fd = fs.openSync(RUTA_LOCK, 'wx');
+      fs.writeSync(fd, String(process.pid));
+      fs.closeSync(fd);
+      lockMio = true;
+      return 0;
+    } catch (e) {
+      if (!e || e.code !== 'EEXIST') return 0; // carpeta sin permisos: se sigue sin candado (como antes)
+      let pid = 0;
+      try { pid = parseInt(fs.readFileSync(RUTA_LOCK, 'utf8'), 10) || 0; } catch { /* a medio escribir */ }
+      if (pidVivo(pid)) return pid;
+      try { fs.unlinkSync(RUTA_LOCK); } catch { /* otro lo retomó primero: se reintenta */ }
+    }
+  }
+  return -1; // otro proceso lo retomó en la misma carrera
+}
+function soltarLock() {
+  if (!lockMio) return;
+  lockMio = false;
+  try { if (parseInt(fs.readFileSync(RUTA_LOCK, 'utf8'), 10) === process.pid) fs.unlinkSync(RUTA_LOCK); } catch { /* nada */ }
+}
+process.on('exit', soltarLock);
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
+  try { process.on(sig, () => { soltarLock(); process.exit(0); }); } catch { /* señal no soportada */ }
+}
+
+// El dueño del candado aún no abre su ventana: se espera hasta 15 s a que aparezca.
+async function esperarOtraInstancia() {
+  for (let i = 0; i < 15; i++) {
+    const otra = await buscarOtraInstancia();
+    if (otra) return otra;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  return null;
+}
+
+// Comportamiento «ya hay un LevoPrint abierto»: le pasa el código, abre su ventana y sale.
+// [QA LP-U1 · BAJO-b] Con OTRA versión deja constancia en levoprint.log (fecha, versiones) y
+// en la ventana del abierto (POST /aviso), sobre todo en el arranque con Windows, donde nadie
+// ve la consola.
+async function usarOtraInstancia(otra, codigoInicial, delArchivo) {
+  const url = `http://127.0.0.1:${otra.puerto}`;
+  console.log('LevoPrint ya esta abierto en esta PC (' + url + '): se usa ese.');
+  if (codigoInicial) {
+    let r = null;
+    try {
+      const resp = await fetch(url + '/vincular', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ codigo: codigoInicial }), signal: AbortSignal.timeout(60000),
+      });
+      r = await resp.json();
+    } catch (e) { r = { ok: false, error: 'RED', mensaje: e.message }; }
+    console.log(r && r.ok ? 'Vinculado en el LevoPrint abierto: ' + (r.app || '') + ' ' + (r.nombre || '') : 'No se pudo vincular: ' + ((r && r.mensaje) || 'error'));
+    if (delArchivo) recordarCodigoArchivo(codigoInicial, r);
+  }
+  if (!DESDE_INICIO) abrirNavegador(url);
+  if (!otra.mismaVersion) {
+    const texto = 'LevoPrint ya está abierto (versión ' + otra.estado.version + '): ciérralo y vuelve a abrir este (versión ' + VERSION_AGENTE + ').';
+    console.error('\n' + texto + '\n');
+    console.error('[instancia] ' + new Date().toISOString() + ' sali sin imprimir: version propia ' + VERSION_AGENTE
+      + ', version abierta ' + otra.estado.version + (DESDE_INICIO ? ' (arranque con Windows)' : '') + ' — ' + BASE_DIR);
+    try {
+      await fetch(url + '/aviso', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ texto: 'Se intentó abrir LevoPrint ' + VERSION_AGENTE + (DESDE_INICIO ? ' al encender la PC' : '')
+          + ' y se cerró porque este (versión ' + otra.estado.version + ') ya estaba abierto. Para actualizar, cierra este y abre el nuevo.' }),
+        signal: AbortSignal.timeout(3000),
+      });
+    } catch (_) { /* versiones anteriores no tienen /aviso */ }
+    setTimeout(() => process.exit(0), DESDE_INICIO ? 1500 : 20000);
+    return;
+  }
+  setTimeout(() => process.exit(0), 1500);
+}
+
 async function arrancar() {
   // Código pendiente: el de levoprint.txt (LEVO_CODIGO) o, si no hay, el del
   // nombre del .exe si aún no se usó.
@@ -1536,32 +1640,18 @@ async function arrancar() {
     delArchivo = true;
   }
 
-  const otra = await buscarOtraInstancia();
-  if (otra) {
-    const url = `http://127.0.0.1:${otra.puerto}`;
-    console.log('LevoPrint ya esta abierto en esta PC (' + url + '): se usa ese.');
-    if (codigoInicial) {
-      let r = null;
-      try {
-        const resp = await fetch(url + '/vincular', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ codigo: codigoInicial }), signal: AbortSignal.timeout(60000),
-        });
-        r = await resp.json();
-      } catch (e) { r = { ok: false, error: 'RED', mensaje: e.message }; }
-      console.log(r && r.ok ? 'Vinculado en el LevoPrint abierto: ' + (r.app || '') + ' ' + (r.nombre || '') : 'No se pudo vincular: ' + ((r && r.mensaje) || 'error'));
-      if (delArchivo) recordarCodigoArchivo(codigoInicial, r);
-    }
-    if (!DESDE_INICIO) abrirNavegador(url);
-    if (!otra.mismaVersion) {
-      // Se deja el aviso a la vista unos segundos (doble clic: la ventana negra se cerraría de golpe).
-      console.error('\nLevoPrint ya está abierto (versión ' + otra.estado.version + '): ciérralo y vuelve a abrir este (versión ' + VERSION_AGENTE + ').\n');
-      setTimeout(() => process.exit(0), DESDE_INICIO ? 1500 : 20000);
-      return;
-    }
-    setTimeout(() => process.exit(0), 1500);
+  // [QA LP-U1 · BAJO-a] Primero el candado (carrera de dos arranques a la vez), luego el puerto
+  // (otra copia en otra carpeta, o una versión anterior sin candado).
+  const duenoLock = tomarLock();
+  if (duenoLock !== 0) {
+    const otraL = await esperarOtraInstancia();
+    if (otraL) return usarOtraInstancia(otraL, codigoInicial, delArchivo);
+    console.error('[instancia] ' + new Date().toISOString() + ' LevoPrint ya se esta abriendo (pid ' + duenoLock + ') y su ventana no respondio: salgo sin imprimir.');
+    setTimeout(() => process.exit(0), DESDE_INICIO ? 1500 : 10000);
     return;
   }
+  const otra = await buscarOtraInstancia();
+  if (otra) return usarOtraInstancia(otra, codigoInicial, delArchivo);
 
   if (faltaUrlAnon()) {
     console.error('Falta LEVO_URL/LEVO_ANON: revisa levoprint.txt (o borra esas lineas para usar las de LevoPrint).');

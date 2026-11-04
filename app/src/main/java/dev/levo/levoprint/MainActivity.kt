@@ -266,8 +266,10 @@ class MainActivity : AppCompatActivity() {
         val cambio = completos && (actual == null || actual.url != manual.url || actual.anon != manual.anon ||
           actual.device != manual.device || !actual.prefijo.equals(manual.prefijo, ignoreCase = true))
         if (cambio) {
-          if (Proyectos.conocidos.none { it.prefijo == manual.prefijo }) {
-            estado.text = "App desconocida: escribe komo, kipu o kuti en «App (prefijo)»."
+          // [QA LP-U1 · BAJO-c] Se acepta cualquier prefijo bien formado (una app nueva de LevoDev
+          // puede no estar aún en Proyectos.conocidos); solo se avisa si no se reconoce.
+          if (!Regex("^[a-z][a-z0-9_]{1,15}$").matches(manual.prefijo)) {
+            estado.text = "Prefijo no válido: usa solo letras minúsculas, números o «_» (por ejemplo komo, kipu o kuti)."
             return@setOnClickListener
           }
           val otraApp = Prefs.leerVinculos(this).firstOrNull { it.device == manual.device && !it.prefijo.equals(manual.prefijo, ignoreCase = true) }
@@ -276,6 +278,11 @@ class MainActivity : AppCompatActivity() {
             return@setOnClickListener
           }
           Prefs.guardar(this, manual)
+          if (Proyectos.conocidos.none { it.prefijo == manual.prefijo }) {
+            // Aviso suave (ambar): se guarda igual.
+            txtEmparejar.text = "Ojo: «" + manual.prefijo + "» no es una app conocida por esta versión (komo, kipu, kuti). Se guardó igual; revisa que esté bien escrito."
+            txtEmparejar.setTextColor(COLOR_AVISO)
+          }
         } else Prefs.setAncho(this, ancho)
         if (Prefs.leer(this) == null) { estado.text = "Faltan datos: URL, clave y device"; return@setOnClickListener }
         val i = Intent(this, PrintService::class.java)
