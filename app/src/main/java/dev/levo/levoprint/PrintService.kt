@@ -15,6 +15,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 
 // Servicio en primer plano: mantiene vivo el bucle de impresion aunque
@@ -284,7 +285,11 @@ class PrintService : Service() {
       .setContentIntent(abrir)
       .setAutoCancel(true)
       .build()
-    getSystemService(NotificationManager::class.java)?.notify(4, n)
+    // [QA LP-F3 · BAJO] Solo se da por avisada si la notificacion se puede mostrar (permiso concedido);
+    // si no, el proximo chequeo (12 h) vuelve a intentar. La tarjeta de la pantalla avisa igual.
+    if (!NotificationManagerCompat.from(ctx).areNotificationsEnabled()) return
+    val nm = getSystemService(NotificationManager::class.java) ?: return
+    nm.notify(4, n)
     Prefs.setAvisoVersion(ctx, info.versionCode)
   }
 

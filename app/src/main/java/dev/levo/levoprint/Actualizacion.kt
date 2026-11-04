@@ -27,11 +27,26 @@ object Actualizacion {
         else -> 0
       }
       val url = o.optString("url").trim()
-      if (codigo <= 0 || !url.startsWith("https://")) return null
+      if (codigo <= 0 || !urlPermitida(url)) return null
       Info(codigo, o.optString("versionName").trim().take(20).ifBlank { codigo.toString() }, url,
         if (o.isNull("notas")) "" else o.optString("notas").trim().take(300))
     } catch (_: Exception) { null }
   }
+
+  // [QA LP-F3 · MEDIO] Solo se abre una url de las descargas de LevoDev: https, sin usuario ni puerto, y
+  // host + carpeta conocidos. Un JSON alterado no puede mandar al navegador a otro sitio.
+  private val ORIGENES = listOf(
+    "krfljsososdakbatevci.supabase.co" to "/storage/v1/object/public/descargas/levoprint/",
+    "archivos.levodev.app" to "/descargas/levoprint/"
+  )
+
+  fun urlPermitida(url: String): Boolean = try {
+    val u = java.net.URI(url)
+    val host = (u.host ?: "").lowercase()
+    val ruta = u.path ?: ""
+    u.scheme.equals("https", ignoreCase = true) && u.rawUserInfo == null && u.port == -1 &&
+      !ruta.contains("..") && ORIGENES.any { (h, p) -> host == h && ruta.startsWith(p) && ruta.length > p.length }
+  } catch (_: Exception) { false }
 
   fun hayNueva(info: Info?, propio: Int = Agent.VERSION_CODE): Boolean = info != null && info.versionCode > propio
 

@@ -39,6 +39,20 @@ class ActualizacionTest {
     assertFalse(Actualizacion.hayNueva(null, 1))
   }
 
+  @Test fun soloUrlsDeLasDescargasDeLevoDev() {
+    assertTrue(Actualizacion.urlPermitida(url))
+    assertTrue(Actualizacion.urlPermitida("https://archivos.levodev.app/descargas/levoprint/LevoPrint.apk"))
+    assertFalse(Actualizacion.urlPermitida("https://evil.example/storage/v1/object/public/descargas/levoprint/LevoPrint.apk"))
+    assertFalse(Actualizacion.urlPermitida("https://krfljsososdakbatevci.supabase.co/storage/v1/object/public/otra/LevoPrint.apk"))
+    assertFalse(Actualizacion.urlPermitida("https://krfljsososdakbatevci.supabase.co.evil.example/storage/v1/object/public/descargas/levoprint/x.apk"))
+    assertFalse(Actualizacion.urlPermitida("https://user@krfljsososdakbatevci.supabase.co/storage/v1/object/public/descargas/levoprint/x.apk"))
+    assertFalse(Actualizacion.urlPermitida("https://archivos.levodev.app:8443/descargas/levoprint/x.apk"))
+    assertFalse(Actualizacion.urlPermitida("https://archivos.levodev.app/descargas/levoprint/../../x.apk"))
+    assertFalse(Actualizacion.urlPermitida("http://archivos.levodev.app/descargas/levoprint/x.apk"))
+    assertFalse(Actualizacion.urlPermitida("https://archivos.levodev.app/descargas/levoprint/"))
+    assertNull(Actualizacion.parse("""{"versionCode":13,"url":"https://evil.example/LevoPrint.apk"}"""))
+  }
+
   @Test fun versionPropiaEsLaDelGradle() {
     assertEquals(12, Agent.VERSION_CODE)
   }
