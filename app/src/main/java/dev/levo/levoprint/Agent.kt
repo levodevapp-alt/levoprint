@@ -27,6 +27,10 @@ class RpcError(val fn: String, val http: Int, val pgMensaje: String, cuerpo: Str
 }
 
 object Agent {
+  // [O-23 · QA MEDIO-2] Versión de este APK (= versionName de app/build.gradle.kts; AgentRenderTest lo comprueba).
+  // Va en <prefijo>_agente_config (p.version = "apk/1.4.3"): KUTI (kuti_turno_print) solo manda el papel TURNO a un
+  // local cuyos agentes vivos lo saben dibujar. KOMO/KIPU la ignoran.
+  const val VERSION = "1.4.3"
   // ESC/POS con codigos de caracter (sin bytes de control crudos en el
   // fuente). Se construye TODO como String de chars 0..255 y se envia en
   // latin1 (ISO-8859-1), igual que el agente .exe (Buffer 'binary').
@@ -91,7 +95,7 @@ object Agent {
   }
 
   fun estaciones(c: Cfg): Map<String, Estacion> {
-    val r = rpc(c, c.prefijo + "_agente_config", JSONObject().put("device", c.device))
+    val r = rpc(c, c.prefijo + "_agente_config", JSONObject().put("device", c.device).put("version", "apk/" + VERSION))
     val arr = r.optJSONArray("estaciones") ?: JSONArray()
     val m = HashMap<String, Estacion>()
     for (i in 0 until arr.length()) {
@@ -376,7 +380,8 @@ object Agent {
   private fun renderTurno(pl: JSONObject, ancho: Int, app: String): String {
     val b = StringBuilder(INIT + CENTRO)
     val neg = txt(pl, "negocio"); val loc = txt(pl, "local")
-    if (neg.isNotBlank()) b.append(NEG_ON + GRANDE + neg.uppercase() + NL + NORMAL + NEG_OFF)
+    // [QA BAJO] el negocio va en doble ancho: a lo sumo la mitad de las columnas (no se parte ni desborda)
+    if (neg.isNotBlank()) b.append(NEG_ON + GRANDE + neg.uppercase().take(ancho / 2) + NL + NORMAL + NEG_OFF)
     if (loc.isNotBlank() && loc != neg) b.append(loc + NL)
     b.append(NEG_ON + "TURNO SIN CITA" + NL + NEG_OFF + linea(ancho, "="))
     b.append((if (pl.optBoolean("definitivo")) "Tu numero" else "Tu numero provisional") + NL)

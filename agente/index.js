@@ -81,6 +81,9 @@ const MODO_CONSOLA = ((process.env.LEVO_MODO || process.env.KOMO_MODO) || '') ==
 const INTERVALO_MS = 2000;      // con trabajo reciente: la comanda sale al toque
 const INTERVALO_MAX_MS = 6000;  // sin trabajo: se espacia de a poco hasta 6 s
 const CONFIG_CADA_MS = 60000;   // estaciones/impresoras: cada minuto
+// [O-23 · QA MEDIO-2] Versión de este agente: va en <prefijo>_agente_config (p.version = 'exe/1.10'). KUTI
+// (kuti_turno_print) solo manda el papel TURNO a un local cuyos agentes vivos lo saben dibujar; KOMO/KIPU la ignoran.
+const VERSION_AGENTE = '1.10';
 let ANCHO = parseInt(process.env.LEVO_ANCHO || '48', 10) || 48; // columnas típicas de térmica 58mm (48) u 80mm (64/72)
 // [ventana] LEVO_SINVENTANA=1 (o corriendo como servicio de Windows): no abrir
 // navegador, pero la mini-GUI web se sigue sirviendo igual (soporte remoto).
@@ -495,7 +498,8 @@ function renderTurno(pl) {
   pl = pl || {};
   let t = CMD.init + CMD.centro;
   const neg = String(pl.negocio || ''), loc = String(pl.local || '');
-  if (neg) t += CMD.negritaOn + CMD.grande + neg.toUpperCase() + '\n' + CMD.normal + CMD.negritaOff;
+  // [QA BAJO] el negocio va en doble ancho: a lo sumo la mitad de las columnas (no se parte ni desborda)
+  if (neg) t += CMD.negritaOn + CMD.grande + neg.toUpperCase().slice(0, Math.floor(ANCHO / 2)) + '\n' + CMD.normal + CMD.negritaOff;
   if (loc && loc !== neg) t += loc + '\n';
   t += CMD.negritaOn + 'TURNO SIN CITA\n' + CMD.negritaOff + linea('=');
   t += (pl.definitivo ? 'Tu numero' : 'Tu numero provisional') + '\n';
@@ -592,7 +596,7 @@ const guiEstado = {
 };
 
 async function refrescarConfig(dev, pfx) {
-  const cfg = await rpc(`${pfx}_agente_config`, { device: dev });
+  const cfg = await rpc(`${pfx}_agente_config`, { device: dev, version: 'exe/' + VERSION_AGENTE });
   estaciones = new Map((cfg.estaciones || []).map((e) => [e.id, e]));
   guiEstado.ultimaSync = Date.now();
   console.log(`[cfg] ${estaciones.size} estaciones:`,
@@ -860,7 +864,7 @@ function estadoActual() {
   else semaforo = 'conectado';
   return {
     ok: true,
-    version: '1.10',
+    version: VERSION_AGENTE,
     modoConsola: MODO_CONSOLA,
     ancho: ANCHO,
     prefijo: PREFIJO,

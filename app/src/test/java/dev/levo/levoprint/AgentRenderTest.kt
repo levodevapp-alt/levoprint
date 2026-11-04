@@ -120,8 +120,8 @@ class AgentRenderTest {
       assertTrue(crudo, crudo.contains(29.toChar() + "!" + 34.toChar() + "15\n"))
       assertTrue(t, t.contains("Carlos P.\nCon Jorge\n04/11/2026 10:05\n") && t.contains("Hay 2 personas delante.") && !t.contains("null") && !t.contains("COPIA"))
       assertTrue(t, t.contains("Sistema KUTI - LevoDev") && t.contains("kuti.levodev.app"))
-      // ninguna linea pasa del ancho (salvo el nombre del negocio en doble ancho) y lo fijo es ASCII puro
-      assertTrue(t, t.split("\n").filter { !it.startsWith("BARBER") }.all { it.length <= ancho })
+      // [QA BAJO] sin punto ciego: ninguna linea pasa del ancho, el negocio (doble ancho) tampoco; lo fijo es ASCII puro
+      assertTrue(t, t.split("\n").all { it.length <= ancho } && t.split("\n")[0].length * 2 <= ancho)
       val fijo = t.substring(t.indexOf("TURNO SIN CITA")).replace("Carlos P.", "").replace("Jorge", "")
       assertTrue(fijo, fijo.all { it.code < 128 })
     }
@@ -140,13 +140,29 @@ class AgentRenderTest {
       val u = t.replace("\n", " ")
       assertTrue(t, t.contains("Tu numero provisional\nA-07\n") && u.contains("se tomo sin internet") && t.contains("\n15 - A-07 (el 15 es un ejemplo)\n"))
       assertTrue(t, u.contains("No pierdes tu lugar") && !t.contains("Con ") && !t.contains("delante") && !t.contains("null"))
-      assertTrue(t, t.split("\n").filter { !it.startsWith("BARBER") }.all { it.length <= ancho })
+      assertTrue(t, t.split("\n").all { it.length <= ancho })
     }
     val c = texto(Agent.render(job("TURNO", o(turnoDef).put("copia", true)), 48, "kuti"))
     assertTrue(c, c.startsWith("*** COPIA ***") && c.contains("TURNO SIN CITA"))
     // el numero grande solo lleva ASCII visible y cabe en triple (32 columnas -> 10)
     val largo = texto(Agent.render(job("TURNO", prov.put("provisional", "ZZZZ-9999·xx")), 32, "kuti"))
     assertTrue(largo, largo.contains("\nZZZZ-9999x\n"))
+  }
+
+  // [QA BAJO] un negocio largo va en doble ancho: se corta a la mitad de las columnas
+  @Test fun kutiTurnoNegocioLargo() {
+    for (ancho in listOf(32, 48)) {
+      val pl = o(turnoDef).put("negocio", "Barbería y Spa Los Hermanos del Centro Histórico")
+      val primera = texto(Agent.render(job("TURNO", pl), ancho, "kuti")).split("\n")[0]
+      assertTrue(primera, primera.length <= ancho / 2 && primera.startsWith("BARBERÍA Y SPA"))
+    }
+  }
+
+  // [QA MEDIO-2] La versión que manda el APK (agente_config p.version) es la de app/build.gradle.kts (versionName)
+  @Test fun versionIgualAlGradle() {
+    val f = listOf(java.io.File("build.gradle.kts"), java.io.File("app/build.gradle.kts")).first { it.exists() }
+    val m = Regex("versionName\\s*=\\s*\"([^\"]+)\"").find(f.readText())
+    assertEquals(m?.groupValues?.get(1), Agent.VERSION)
   }
 
   @Test fun envolverPorPalabra() {

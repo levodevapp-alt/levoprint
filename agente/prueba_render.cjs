@@ -42,7 +42,10 @@ for (const an of [48, 32]) {
   const crudo = R.render({ tipo: 'TURNO', payload: def }); const t = texto(crudo)
   ok(t.includes('BARBERÍA DEMO') && t.includes('Sede Centro') && t.includes('TURNO SIN CITA') && t.includes('Tu numero\n15\n') && crudo.includes('\x1d!\x22' + '15\n'), `TURNO ${an}: definitivo con el número de la cola en triple alto`, t)
   ok(t.includes('Carlos P.\nCon Jorge\n04/11/2026 10:05\n') && t.includes('Hay 2 personas delante.') && t.includes('Sistema KUTI - LevoDev'), `TURNO ${an}: nombre, con quién, hora, cuántos delante y pie`, t)
-  ok(t.split('\n').filter((l) => !l.startsWith('BARBER')).every((l) => l.length <= an), `TURNO ${an}: ninguna línea pasa del ancho`, t)
+  // [QA BAJO] sin punto ciego: ninguna línea pasa del ancho y el negocio (doble ancho) tampoco
+  ok(t.split('\n').every((l) => l.length <= an) && t.split('\n')[0].length * 2 <= an, `TURNO ${an}: ninguna línea pasa del ancho`, t)
+  const largo = texto(R.render({ tipo: 'TURNO', payload: { ...def, negocio: 'Barbería y Spa Los Hermanos del Centro Histórico' } })).split('\n')[0]
+  ok(largo.length <= Math.floor(an / 2) && largo.startsWith('BARBERÍA Y SPA'), `TURNO ${an}: un negocio largo (doble ancho) se corta a la mitad de las columnas`, largo)
   ok(ascii(t.slice(t.indexOf('TURNO SIN CITA')).replace(/Carlos P\.|Jorge/g, '')), `TURNO ${an}: lo fijo y el pie en ASCII puro`)
   const p = texto(R.render({ tipo: 'TURNO', payload: prov }))
   ok(p.includes('Tu numero provisional\nA-07\n') && p.replace(/\n/g, ' ').includes('se tomo sin internet') && p.includes('\n15 - A-07 (el 15 es un ejemplo)\n') && !p.includes('Con ') && !p.includes('null') && !p.includes('delante'), `TURNO ${an}: provisional con su explicación, sin nombre ni profesional`, p)
@@ -66,6 +69,14 @@ ok(tn.includes('VENTA') && tn.includes('NV01-00000042') && tn.includes('S/ 13.00
 ok(texto(R.render({ tipo: 'TICKET', payload: { ...nv, copia: true, reimpresion: true } })).startsWith('*** COPIA ***'), 'TICKET KUTI: reimpresión con COPIA')
 ok(texto(R.render({ tipo: 'COMANDA', payload: { mesa: '3', mozo: 'Ana', items: [], atrasada: true, hora: '12:00' } })).startsWith('*** ATRASADA ***'), 'COMANDA atrasada con su sello')
 ok(texto(R.render({ tipo: 'PRUEBA', payload: {} })).includes('PRUEBA LEVOPRINT OK'), 'PRUEBA')
+
+// ---------- [QA MEDIO-2] la versión que el agente manda en agente_config ----------
+{
+  const m = /const VERSION_AGENTE = '([0-9.]+)';/.exec(src)
+  const cab = /Agente de impresión v([0-9.]+) /.exec(src)
+  ok(m && cab && m[1] === cab[1] && src.includes("_agente_config`, { device: dev, version: 'exe/' + VERSION_AGENTE }"),
+    'agente_config lleva version = exe/' + (m && m[1]) + ' (la misma de la cabecera)', { m: m && m[1], cab: cab && cab[1] })
+}
 
 console.log(fallas ? fallas + ' falla(s)' : 'render del agente: todo OK')
 process.exit(fallas ? 1 : 0)
