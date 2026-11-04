@@ -84,7 +84,7 @@ const CONFIG_CADA_MS = 60000;   // estaciones/impresoras: cada minuto
 // [O-23 · QA MEDIO-2] Versión de este agente: va en <prefijo>_agente_config (p.version = 'exe/1.11'). KUTI
 // (kuti_turno_print) solo manda el papel TURNO a un local cuyos agentes vivos lo saben dibujar; KOMO/KIPU la ignoran.
 const VERSION_AGENTE = '1.11';
-let ANCHO = parseInt(process.env.LEVO_ANCHO || '48', 10) || 48; // columnas típicas de térmica 58mm (48) u 80mm (64/72)
+let ANCHO = Math.min(100, Math.max(20, parseInt(process.env.LEVO_ANCHO || '48', 10) || 48)); // [Re-QA] 20–100 como la ventana // columnas típicas de térmica 58mm (48) u 80mm (64/72)
 // [ventana] LEVO_SINVENTANA=1 (o corriendo como servicio de Windows): no abrir
 // navegador, pero la mini-GUI web se sigue sirviendo igual (soporte remoto).
 // [MM3-01 · MM3-P1 · 4-nov] LEVO_IMAGEN=0 (o no/false/texto): impresora vieja sin soporte de imagen (GS v 0) → el pie
@@ -266,12 +266,14 @@ function qrEscPos(texto, tam = 5) {
 
 // [QA M2 · 4-nov] El nombre del negocio va en doble ancho (cabe la mitad de las columnas): se parte por palabras en varios
 // renglones dobles; una palabra que sola no cabe baja a tamaño normal en negrita (partida al ancho si hace falta). Nunca se pierde un carácter.
+// [Re-QA B4] Mayúsculas sin salir de latin1: lo que no cabe en un byte sale «?» (igual en los 6 render; la impresora no lo entiende).
+const mayus = (s) => s.toUpperCase().replace(/[^\x00-\xff]/g, '?');
 function negocioGrande(nombre) {
   const mitad = Math.floor(ANCHO / 2);
   let out = '', l = '';
   const sale = (s) => { out += CMD.negritaOn + (s.length <= mitad ? CMD.grande : '') + s + '\n' + CMD.normal + CMD.negritaOff; };
-  for (const w of String(nombre == null ? '' : nombre).toUpperCase().split(/\s+/).filter(Boolean)) {
-    if (w.length > mitad) { if (l) { sale(l); l = ''; } for (let i = 0; i < w.length; i += ANCHO) sale(w.slice(i, i + ANCHO)); continue; }
+  for (const w of mayus(String(nombre == null ? '' : nombre)).split(/\s+/).filter(Boolean)) {
+    if (w.length > mitad) { if (l) { sale(l); l = ''; } for (let i = 0; i < w.length; i += Math.max(1, ANCHO)) sale(w.slice(i, i + ANCHO)); continue; }
     if (l && l.length + 1 + w.length <= mitad) l += ' ' + w; else { if (l) sale(l); l = w; }
   }
   if (l) sale(l);
@@ -409,9 +411,11 @@ const ISOTIPO_B64 = 'P/+AAAAAD8B//8AAAAB/8P//4AAAAP/4///gAAAB//z//+AAAAH//v//4AA
 const ISOTIPO = '\x1bJ\x08' + '\x1dv0\x00\x08\x00\x40\x00' + Buffer.from(ISOTIPO_B64, 'base64').toString('binary') + '\x1bJ\x06';
 function pieMarca(app, ancho, imagen){
   const a=String(app||'').trim().toUpperCase();
-  const lema=ancho>=40?'Tu negocio, inteligente y bajo control.\n':'Tu negocio, inteligente\ny bajo control.\n';
-  const quien=APPS_PIE[a.toLowerCase()]?'Hecho con '+a+' - levodev.app\n':'LevoDev - levodev.app\n';
-  return ((imagen===undefined?CON_IMAGEN:imagen)?ISOTIPO:'')+quien+lema;
+  const lema=ancho>=40?'Tu negocio, inteligente y bajo control.\n':ancho>=24?'Tu negocio, inteligente\ny bajo control.\n':'Tu negocio,\ninteligente y\nbajo control.\n';
+  // [Re-QA B4] bajo 28 columnas «Hecho con <APP> - levodev.app» no cabe: la dirección baja a su renglón.
+  let quien=APPS_PIE[a.toLowerCase()]?'Hecho con '+a+' - levodev.app':'LevoDev - levodev.app';
+  if(quien.length>ancho) quien=quien.replace(' - ','\n');
+  return ((imagen===undefined?CON_IMAGEN:imagen)?ISOTIPO:'')+quien+'\n'+lema;
 }
 
 // [MM4-06 · 3-nov] Papel corto al vincular: el cajero ve en papel que funciona. «nombre» es el del
@@ -497,6 +501,7 @@ function renderCierre(pl) {
 // palabra al ancho. Payload: negocio, local, definitivo, numero, provisional, nombre, con, fecha,
 // delante (n.º o null).
 function envolver(texto, ancho) {
+  ancho = Math.max(1, ancho);
   const out = [];
   let l = '';
   for (let w of String(texto == null ? '' : texto).split(/\s+/).filter(Boolean)) {

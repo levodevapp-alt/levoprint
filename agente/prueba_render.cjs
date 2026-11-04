@@ -140,6 +140,24 @@ for (const ancho of [48, 32]) {
   ok(papel.includes('\x1dv0') && c.includes('[logo]') && !/[\x00-\x1f\x80-\xff]/.test(c) && c.includes('Hecho con'), 'B3: en modo consola el logo sale «[logo]» y no sus bytes', c.slice(0, 200))
 }
 
+// [Re-QA MEDIO-1 · B4] anchos absurdos no cuelgan, el pie cabe a 24 y a 20 columnas y las mayúsculas fuera de latin1 salen «?»
+for (const an of [20, 24, 100]) {
+  R.setAncho(an)
+  const t = R.render({ tipo: 'TICKET', payload: { negocio: 'Pollería Don Lucho SAC ' + 'X'.repeat(60), mesa: '3', items: [], total: 0, pagos: [] } })
+  ok(t.includes('COBRADO') && R.render({ tipo: 'COMANDA', payload: { mesa: '3', items: [{ cantidad: 1, nombre: 'Y'.repeat(90) }] } }).includes('1 x Y'), 'ancho ' + an + ': el render termina (negocio y nombre larguísimos)')
+}
+for (const an of [24, 20]) {
+  R.setAncho(an)
+  const sinImg = texto(R.render({ tipo: 'PRUEBA', payload: { app: 'KOMO' } }))
+  const pie = sinImg.slice(sinImg.indexOf('Hecho con ')).split('\n').slice(0, an === 24 ? 4 : 5)
+  ok(sinImg.includes('Hecho con KUTI\nlevodev.app\n') && pie.every((l) => l.length <= an), 'ancho ' + an + ': el pie cabe en las columnas (la dirección baja a su renglón)', pie)
+}
+R.setAncho(48)
+{
+  const t = R.render({ tipo: 'TICKET', payload: { negocio: 'Ωmega Pollería', mesa: '3', items: [], total: 0, pagos: [] } })
+  ok(t.includes('?MEGA') && t.includes('POLLER') && !/[^\x00-\xff]/.test(t), 'mayúsculas: «Ωmega» sale «?MEGA» (latin1)')
+}
+
 // ---------- [QA MEDIO-2] la versión que el agente manda en agente_config ----------
 {
   const m = /const VERSION_AGENTE = '([0-9.]+)';/.exec(src)

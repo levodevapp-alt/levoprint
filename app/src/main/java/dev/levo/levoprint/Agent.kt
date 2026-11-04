@@ -72,8 +72,10 @@ object Agent {
   fun pieTexto(app: String, ancho: Int = 48): String {
     val a = app.trim().uppercase()
     val quien = if (a == "KOMO" || a == "KIPU" || a == "KUTI") "Hecho con " + a + SEP + "levodev.app" else "LevoDev" + SEP + "levodev.app"
-    val lema = if (ancho >= 40) LEMA + NL else "Tu negocio, inteligente" + NL + "y bajo control." + NL
-    return quien + NL + lema
+    val lema = if (ancho >= 40) LEMA + NL else if (ancho >= 24) "Tu negocio, inteligente" + NL + "y bajo control." + NL
+      else "Tu negocio," + NL + "inteligente y" + NL + "bajo control." + NL
+    // [Re-QA B4] bajo 28 columnas "Hecho con <APP> - levodev.app" no cabe: la direccion baja a su renglon.
+    return (if (quien.length > ancho) quien.replace(SEP, NL) else quien) + NL + lema
   }
   fun pieConImagen(app: String, ancho: Int, imagen: Boolean): String = (if (imagen) ISOTIPO else "") + pieTexto(app, ancho)
   private fun pie(app: String, ancho: Int) = FONT0 + pieConImagen(app, ancho, conImagen.get() == true) + CORTE
@@ -190,7 +192,8 @@ object Agent {
   // [MM4-06 · 3-nov] Papel corto al vincular: el cajero ve en papel que funciona en su primer
   // turno. "nombre" es el del canje ("<estacion> · <negocio>"): cada parte va en su linea (sin el
   // punto medio, que depende de la pagina de codigos). Solo local: no pasa por la cola del servidor.
-  fun renderVinculado(nombre: String, hora: String, ancho: Int, app: String, imagen: Boolean = true): String {
+  fun renderVinculado(nombre: String, hora: String, anchoIn: Int, app: String, imagen: Boolean = true): String {
+    val ancho = anchoValido(anchoIn)
     conImagen.set(imagen)
     val b = StringBuilder(INIT + CENTRO + "LevoPrint" + NL + NEG_ON + GRANDE + "VINCULADO" + NL + NORMAL + NEG_OFF)
     b.append(linea(ancho, "="))
@@ -250,12 +253,17 @@ object Agent {
   // linea, TOTAL, pagos y propinas APARTE (no suman al total).
   // [QA M2 · 4-nov] El nombre del negocio va en doble ancho (cabe la mitad de las columnas): se parte por palabras en varios
   // renglones dobles; una palabra que sola no cabe baja a tamano normal en negrita (partida al ancho si hace falta). Nunca se pierde un caracter.
+  // [Re-QA BAJO-1] el ancho valido es 20-100 (como la ventana del .exe); fuera de eso se acota, nunca <= 0.
+  fun anchoValido(n: Int): Int = n.coerceIn(20, 100)
+  // [Re-QA B4] mayusculas sin salir de latin1: lo que no cabe en un byte sale "?" (igual en los 6 render).
+  private fun mayus(s: String): String = String(s.uppercase().map { if (it.code > 255) '?' else it }.toCharArray())
+  private val ESPACIOS = Regex("[\\s\\u00A0]+") // incluye el espacio duro (NBSP), como \s de JS
   private fun negocioGrande(nombre: String, ancho: Int): String {
     val mitad = ancho / 2
     val out = StringBuilder(); var l = ""
     fun sale(s: String) { out.append(NEG_ON + (if (s.length <= mitad) GRANDE else "") + s + NL + NORMAL + NEG_OFF) }
-    for (w in nombre.uppercase().split(Regex("\\s+")).filter { it.isNotEmpty() }) {
-      if (w.length > mitad) { if (l.isNotEmpty()) { sale(l); l = "" }; w.chunked(ancho).forEach { sale(it) }; continue }
+    for (w in mayus(nombre).split(ESPACIOS).filter { it.isNotEmpty() }) {
+      if (w.length > mitad) { if (l.isNotEmpty()) { sale(l); l = "" }; w.chunked(maxOf(1, ancho)).forEach { sale(it) }; continue }
       if (l.isNotEmpty() && l.length + 1 + w.length <= mitad) l += " " + w else { if (l.isNotEmpty()) sale(l); l = w }
     }
     if (l.isNotEmpty()) sale(l)
@@ -369,10 +377,11 @@ object Agent {
   // las notas de la hoja de KUTI en ASCII PURO (la pagina de codigos de la termica varia), partidas
   // por palabra al ancho. Payload: negocio, local, definitivo, numero, provisional, nombre, con,
   // fecha, delante (n o null).
-  fun envolver(texto: String, ancho: Int): List<String> {
+  fun envolver(texto: String, anchoIn: Int): List<String> {
+    val ancho = maxOf(1, anchoIn)
     val out = ArrayList<String>()
     var l = ""
-    for (palabra in texto.split(Regex("\\s+")).filter { it.isNotEmpty() }) {
+    for (palabra in texto.split(ESPACIOS).filter { it.isNotEmpty() }) {
       var w = palabra
       while (w.length > ancho) {
         if (l.isNotEmpty()) { out.add(l); l = "" }
@@ -440,7 +449,8 @@ object Agent {
 
   // [MM3-01] appCfg = prefijo de la configuracion del local (komo/kipu/kuti). Si viene vacio
   // (pruebas, equipos viejos) se usa el "app" del payload; si tampoco hay, el pie generico.
-  fun render(job: JSONObject, ancho: Int, appCfg: String = "", imagen: Boolean = true): String {
+  fun render(job: JSONObject, anchoIn: Int, appCfg: String = "", imagen: Boolean = true): String {
+    val ancho = anchoValido(anchoIn)
     val tipo = job.optString("tipo")
     val pl = job.optJSONObject("payload") ?: JSONObject()
     // [MM3-01 · MM3-P1] sin imagen si la impresora no la soporta (interruptor del equipo) o el payload lo pide

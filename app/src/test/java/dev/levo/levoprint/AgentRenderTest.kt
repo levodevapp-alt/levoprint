@@ -240,4 +240,30 @@ class AgentRenderTest {
       assertTrue("$tipo $ancho: $cab", plano.contains(neg.uppercase().replace(Regex("\\s"), "")))
     }
   }
+
+  // [Re-QA BAJO-1] el ancho valido es 20-100: nunca <= 0 (chunked(0) lanzaba) ni absurdo, al guardar y al usar.
+  @Test fun anchoValidoYRenderConAnchosAbsurdos() {
+    assertEquals(20, Agent.anchoValido(-10)); assertEquals(20, Agent.anchoValido(0)); assertEquals(20, Agent.anchoValido(1))
+    assertEquals(48, Agent.anchoValido(48)); assertEquals(100, Agent.anchoValido(999))
+    for (an in listOf(-10, 0, 1, 999)) {
+      val pl = o(kuti).put("negocio", "Supercalifragilisticoespialidosoextraordinariamente SAC")
+      val t = Agent.render(job("TICKET", pl), an, "kuti")
+      // el nombre entero, aunque parta la palabra larga a lo ancho (sin separadores)
+      assertTrue("ancho $an", texto(t).replace("\n", "").contains("SUPERCALIFRAGILISTICOESPIALIDOSOEXTRAORDINARIAMENTE") && t.contains("VENTA"))
+      assertTrue(Agent.render(job("COMANDA", o("""{"mesa":"3","items":[{"cantidad":1,"nombre":"YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY"}]}""")), an, "komo").contains("1 x Y"))
+    }
+    assertEquals(listOf("a", "b"), Agent.envolver("a b", 0))
+  }
+
+  // [Re-QA BAJO-4] el espacio duro (NBSP) corta palabras como en JS; las mayusculas fuera de latin1 salen "?"; a 24 columnas el pie cabe.
+  @Test fun nbspMayusculasYPieA24() {
+    assertEquals(listOf("hola que", "tal"), Agent.envolver("hola" + 160.toChar() + "que tal", 8))
+    val t = Agent.render(job("TICKET", o(kuti).put("negocio", "Ωmega" + 160.toChar() + "Barbería")), 48, "kuti", false)
+    assertTrue(t, t.contains("?MEGA") && t.contains("BARBER") && t.none { it.code > 255 })
+    for (an in listOf(24, 20)) {
+      val p = Agent.render(job("PRUEBA", o("""{"app":"KOMO"}""")), an, "komo", false)
+      val pie = texto(p).let { it.substring(it.indexOf("Hecho con ")) }.split("\n").take(if (an == 24) 4 else 5)
+      assertTrue(pie.toString(), pie.all { it.length <= an } && texto(p).contains("Hecho con KOMO\nlevodev.app\n"))
+    }
+  }
 }

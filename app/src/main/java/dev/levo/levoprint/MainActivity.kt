@@ -237,7 +237,8 @@ class MainActivity : AppCompatActivity() {
       if (PrintService.activo) {
         stopService(Intent(this, PrintService::class.java))
       } else {
-        val ancho = inAncho.text.toString().toIntOrNull() ?: 48
+        val ancho = Agent.anchoValido(inAncho.text.toString().toIntOrNull() ?: 48) // [Re-QA BAJO-1] 20-100
+        inAncho.setText(ancho.toString())
         Prefs.guardar(this, Cfg(
           inUrl.text.toString().trim(), inAnon.text.toString().trim(),
           inDevice.text.toString().trim(),
