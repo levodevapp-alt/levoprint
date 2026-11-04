@@ -1,5 +1,5 @@
 // ============================================================
-// LevoPrint · Agente de impresión v1.10 (ventana visual + vinculación por código + render servidor) · LevoDev
+// LevoPrint · Agente de impresión v1.11 (ventana visual + vinculación por código + render servidor + pie con isotipo) · LevoDev
 // Corre en la PC del local. Poll cada 2s a komo_print_tomar,
 // renderiza ESC/POS y lo manda a la IP:puerto de cada estación.
 // Se empaqueta a LevoPrint.exe (Node SEA). El dueño solo edita
@@ -81,12 +81,15 @@ const MODO_CONSOLA = ((process.env.LEVO_MODO || process.env.KOMO_MODO) || '') ==
 const INTERVALO_MS = 2000;      // con trabajo reciente: la comanda sale al toque
 const INTERVALO_MAX_MS = 6000;  // sin trabajo: se espacia de a poco hasta 6 s
 const CONFIG_CADA_MS = 60000;   // estaciones/impresoras: cada minuto
-// [O-23 · QA MEDIO-2] Versión de este agente: va en <prefijo>_agente_config (p.version = 'exe/1.10'). KUTI
+// [O-23 · QA MEDIO-2] Versión de este agente: va en <prefijo>_agente_config (p.version = 'exe/1.11'). KUTI
 // (kuti_turno_print) solo manda el papel TURNO a un local cuyos agentes vivos lo saben dibujar; KOMO/KIPU la ignoran.
-const VERSION_AGENTE = '1.10';
+const VERSION_AGENTE = '1.11';
 let ANCHO = parseInt(process.env.LEVO_ANCHO || '48', 10) || 48; // columnas típicas de térmica 58mm (48) u 80mm (64/72)
 // [ventana] LEVO_SINVENTANA=1 (o corriendo como servicio de Windows): no abrir
 // navegador, pero la mini-GUI web se sigue sirviendo igual (soporte remoto).
+// [MM3-01 · MM3-P1 · 4-nov] LEVO_IMAGEN=0 (o no/false/texto): impresora vieja sin soporte de imagen (GS v 0) → el pie
+// de marca sale solo en texto. Se cambia también desde la ventana («Pie con logo») y se guarda en levoprint.txt.
+let CON_IMAGEN = !/^(0|no|false|texto)$/i.test(String(process.env.LEVO_IMAGEN || '1').trim());
 const SIN_VENTANA = /^(1|true|si|s[ií])$/i.test(String(process.env.LEVO_SINVENTANA || ''));
 const PUERTO_GUI_BASE = parseInt(process.env.LEVO_PUERTO_GUI || '9110', 10) || 9110;
 
@@ -104,6 +107,9 @@ const PLANTILLA = [
   '',
   '# Opcional: para probar sin impresora, quita el # de la linea de abajo.',
   '# LEVO_MODO=consola',
+  '',
+  '# Impresora vieja que no imprime imagenes: quita el # y el pie sale solo en texto.',
+  '# LEVO_IMAGEN=0',
   ''
 ].join('\r\n');
 
@@ -197,19 +203,28 @@ const fila = (izq, der) => {
 };
 const money = (n) => 'S/ ' + Number(n).toFixed(2);
 
+// [MM3-01 · 4-nov] Comanda de cocina: jerarquía para leerla de pie y de lejos, y SIN marca. Título chico, la
+// MESA enorme (GS ! 0x22), mozo y hora en negrita, cada ítem en doble alto y negrita (el nombre largo baja con
+// sangría) y su nota en negrita debajo. Mismo papel que komo-print / kipu-print, el agente de KOMO y el APK.
+const alto = GS + '!\x01';
 function renderComanda(pl) {
-  const titulo = pl.correccion ? '*** CORRECCION ***' : 'COMANDA';
-  let t = CMD.init + CMD.centro + CMD.grande + titulo + '\n' + CMD.normal;
-  t += CMD.grande + `MESA ${pl.mesa}\n` + CMD.normal + CMD.izq + linea('=');
-  t += fila(`Mozo: ${pl.mozo || '-'}`, pl.hora || '');
-  if (pl.ronda) t += fila(`Ronda ${pl.ronda}`, '');
+  let t = CMD.init + CMD.centro;
+  t += pl.correccion ? CMD.negritaOn + CMD.grande + '*** CORRECCION ***\n' + CMD.normal + CMD.negritaOff : CMD.negritaOn + 'COMANDA\n' + CMD.negritaOff;
+  const mesa = 'MESA ' + (pl.mesa || '-');
+  t += CMD.negritaOn + (mesa.length * 3 <= ANCHO ? GS + '!\x22' : mesa.length * 2 <= ANCHO ? CMD.grande : '') + mesa + '\n' + CMD.normal + CMD.negritaOff;
+  t += CMD.izq + linea('=');
+  t += CMD.negritaOn + fila('Mozo: ' + (pl.mozo || '-'), pl.hora || '') + CMD.negritaOff;
+  if (pl.ronda) t += fila('Ronda ' + pl.ronda, '');
   t += linea('=');
   if (pl.mensaje) t += CMD.negritaOn + CMD.grande + pl.mensaje + '\n' + CMD.normal + CMD.negritaOff + linea();
   for (const it of pl.items || []) {
-    t += CMD.negritaOn + `${fmtCant(it.cantidad)} x ${it.nombre}\n` + CMD.negritaOff;
-    if (it.nota) t += `   >> ${it.nota}\n`;
+    const cab = fmtCant(it.cantidad) + ' x ';
+    envolver(it.nombre, Math.max(8, ANCHO - cab.length)).forEach((l, i) => {
+      t += CMD.negritaOn + alto + (i === 0 ? cab : ' '.repeat(cab.length)) + l + '\n' + CMD.normal + CMD.negritaOff;
+    });
+    if (it.nota) for (const l of envolver(it.nota, ANCHO - 6)) t += CMD.negritaOn + '   >> ' + l + CMD.negritaOff + '\n';
   }
-  if (pl.nota) t += linea() + `NOTA: ${pl.nota}\n`;
+  if (pl.nota) { t += linea(); for (const l of envolver('NOTA: ' + pl.nota, ANCHO)) t += CMD.negritaOn + l + CMD.negritaOff + '\n'; }
   // [MM4-09 · P6 · 3-nov] La comanda no lleva pie: al cliente nunca le llega y eran líneas de rollo
   // por ronda que se botan. Solo el corte (el pie sigue en precuenta, ticket, CPE y carta QR).
   t += linea('=') + CMD.corte;
@@ -356,23 +371,23 @@ function renderCartaQr(pl) {
   return t;
 }
 
-// [MM3-01 · 3-nov] Pie de marca del ticket (IDENTIDAD_VISUAL §12.12): «Sistema <APP> - LevoDev -
-// levodev.app» + «<app>.levodev.app». Reemplaza al tag de desarrollador «<Levodev.app />» (§4.5 lo
-// deja para la web de desarrolladores) y al nombre de la app en negrita, que ahora va dentro de la
-// línea. El nombre sale de la configuración del local (PREFIJO: komo/kipu/kuti); si no se conoce,
-// del payload; si tampoco, el pie genérico. Bajo 36 columnas (58 mm) la línea se partiría a media
-// palabra: va «Sistema <APP> - LevoDev» y la dirección de la app abajo. [QA MM3 · M1] ASCII puro
-// (guion en vez del punto medio 0xB7, que depende de la página de códigos de la impresora).
-// Misma regla que komo-print / kipu-print / kuti-print (render servidor) y que el APK (Agent.kt).
+// [MM3-01 · MM3-P1 · 4-nov] Pie de marca del ticket térmico (IDENTIDAD_VISUAL §12.12). El ticket es del
+// NEGOCIO del cliente (su nombre va arriba); LevoDev va discreta al pie: isotipo D2 Yupana en 1 bit (64x64
+// puntos, GS v 0; mapa generado por levodev-modules/tools/marca/isotipo_termico.mjs, el mismo de
+// komo-print/kipu-print/kuti-print, el agente de KOMO y el APK) + «Hecho con <APP> - levodev.app» + el lema
+// «Tu negocio, inteligente y bajo control.». Sin ciudades, sin país, sin precios, sin invitación (MM3-P5: la
+// invitación va solo en el ticket digital). El nombre sale de la configuración del local (PREFIJO: komo/kipu/
+// kuti); si no se conoce, del payload; si tampoco, «LevoDev - levodev.app». ASCII puro [QA MM3 · M1]: el 0xB7
+// y las tildes dependen de la página de códigos. Bajo 40 columnas (58 mm) el lema va en dos líneas. Sin imagen
+// (LEVO_IMAGEN=0 o payload.sinImagen) las mismas líneas salen solo en texto.
 const APPS_PIE = { komo: 'KOMO', kipu: 'KIPU', kuti: 'KUTI' };
-// [MM4-10 · P4 · 3-nov] Una sola dirección y un motivo para entrar: «Sistema <APP> - LevoDev» +
-// «Tu negocio tambien: <app>.levodev.app» (sin tilde: ASCII puro). Antes salían dos direcciones
-// seguidas; el ticket lo leen otros dueños. Bajo 36 columnas el gancho se partiría a media palabra:
-// «Tu negocio tambien:» y la dirección en su propia línea.
-function pieMarca(app, ancho){
+const ISOTIPO_B64 = 'P/+AAAAAD8B//8AAAAB/8P//4AAAAP/4///gAAAB//z//+AAAAH//v//4AAAA//+///gAAAD/////+AAAAf/////4AAAB//////gAAAH/////+AAAAf/////4AAAB//////gAAAD//7//+AAAAP//v//4AAAAf/+///gAAAB//z//+AAAAD/+H//wAAAAD/gP/+AAAAAD4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH//wAAAAAAA///gAAAAAAD//+AAAAAAAP//4AAAAAAA///gAAAAAAD//+AAAAAAAP//4AAAAAAA///gAAAAAAD//+AAAAAAAP//4AAAAAAA///gAAAAAAD//+AAAAAAAP//4AAAAAAA///gAAAAAAD//+AAAAAAAP//4AAAAAAA///gAAAAAAB//8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/+A//8B//x//8H//4P//v//4f//h//////h//+H/////+H//4f/////4f//h//////h//+H/////+H//4f/////4f//h//////h//+H/////+H//4f/////4f//h//////h//+H/////+H//4f/////4f//h//////h//+H/////+H//4f//3//wf//g//+P/+A//8B//w=';
+const ISOTIPO = '\x1bJ\x08' + '\x1dv0\x00\x08\x00\x40\x00' + Buffer.from(ISOTIPO_B64, 'base64').toString('binary') + '\x1bJ\x06';
+function pieMarca(app, ancho, imagen){
   const a=String(app||'').trim().toUpperCase();
-  if(!APPS_PIE[a.toLowerCase()]) return 'LevoDev - levodev.app\n';
-  return 'Sistema '+a+' - LevoDev\n'+'Tu negocio tambien:'+(ancho>=36?' ':'\n')+a.toLowerCase()+'.levodev.app\n';
+  const lema=ancho>=40?'Tu negocio, inteligente y bajo control.\n':'Tu negocio, inteligente\ny bajo control.\n';
+  const quien=APPS_PIE[a.toLowerCase()]?'Hecho con '+a+' - levodev.app\n':'LevoDev - levodev.app\n';
+  return ((imagen===undefined?CON_IMAGEN:imagen)?ISOTIPO:'')+quien+lema;
 }
 
 // [MM4-06 · 3-nov] Papel corto al vincular: el cajero ve en papel que funciona. «nombre» es el del
@@ -421,11 +436,7 @@ async function imprimirVinculado(nombre){
 
 function firma(pl){
   const app=APPS_PIE[String(PREFIJO||'').toLowerCase()]||(pl&&pl.app)||process.env.LEVO_APP||"";
-  const lema=(pl&&pl.lema)||process.env.LEVO_LEMA||"";
-  let f=CMD.centro;
-  if(lema) f+="\x1b\x21\x00"+lema+"\n";
-  f+="\x1b\x21\x00"+pieMarca(app, ANCHO);
-  return f;
+  return CMD.centro+"\x1b\x21\x00"+pieMarca(app, ANCHO, CON_IMAGEN&&!(pl&&pl.sinImagen));
 }
 
 // Copia de un papel que SI salio: sello arriba (cocina no lo toma por pedido nuevo).
@@ -522,7 +533,7 @@ function renderBase(job) {
   if (job.tipo === 'CPE') return renderCpe(job.payload);
   // [kuti] Corte con lineas ya formateadas por la base (KOMO/KIPU: JSON como antes).
   if (job.tipo === 'CIERRE' && Array.isArray((job.payload || {}).lineas)) return renderCierre(job.payload);
-  if (job.tipo === 'PRUEBA') return CMD.init + CMD.centro + 'PRUEBA LEVOPRINT OK\n' + CMD.corte;
+  if (job.tipo === 'PRUEBA') return CMD.init + CMD.centro + 'PRUEBA LEVOPRINT OK\n' + firma(job.payload) + CMD.corte; // [MM3-01] la prueba lleva el pie: se ve si la impresora imprime el logo (si no, LEVO_IMAGEN=0)
   return CMD.init + JSON.stringify(job.payload, null, 1) + CMD.corte;
 }
 
@@ -544,7 +555,7 @@ async function renderRemoto(job, pfx) {
     signal: AbortSignal.timeout(8000),
     method: 'POST',
     headers: { apikey: ANON, Authorization: `Bearer ${ANON}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ tipo: job.tipo, payload: job.payload, ancho: ANCHO }),
+    body: JSON.stringify({ tipo: job.tipo, payload: job.payload, ancho: ANCHO, imagen: CON_IMAGEN }),
   });
   if (!r.ok) throw new Error('render remoto HTTP ' + r.status);
   const j = await r.json();
@@ -820,6 +831,10 @@ async function canjearCodigo(codigoIn) {
 }
 
 // Persiste LEVO_ANCHO en levoprint.txt (mismo patron que LEVO_DEVICE arriba).
+// [MM3-01 · MM3-P1] Persiste LEVO_IMAGEN (1 = pie con isotipo, 0 = solo texto).
+function persistirImagen(valor) {
+  try { editarTxt((txt) => ponerClave(txt, 'LEVO_IMAGEN', valor)); return true; } catch (_) { return false; }
+}
 function persistirAncho(valor) {
   try {
     const ruta = path.join(BASE_DIR, 'levoprint.txt');
@@ -867,6 +882,7 @@ function estadoActual() {
     version: VERSION_AGENTE,
     modoConsola: MODO_CONSOLA,
     ancho: ANCHO,
+    imagen: CON_IMAGEN,
     prefijo: PREFIJO,
     sinUrlAnon,
     vinculado,
@@ -935,6 +951,11 @@ function paginaHtml() {
       <span id="anchoTexto" class="muted">-</span>
     </div>
 
+    <div class="fila">
+      <span>Pie con logo (imagen)</span>
+      <span><span id="imagenTexto" class="muted">-</span> <button id="btnImagen" class="secundario" style="margin-left:8px">Cambiar</button></span>
+    </div>
+
     <div style="margin-top:14px; display:flex; gap:10px;">
       <button id="btnPrueba">Imprimir prueba</button>
       <button id="btn58" class="secundario">58mm</button>
@@ -986,6 +1007,8 @@ async function refrescar() {
   }
 
   document.getElementById('anchoTexto').textContent = e.ancho + ' columnas (' + (e.ancho > 56 ? '80mm' : '58mm') + ')';
+  document.getElementById('imagenTexto').textContent = e.imagen ? 'con logo' : 'solo texto';
+  window.__imagen = e.imagen;
   document.getElementById('btnPrueba').disabled = !e.vinculado;
 }
 
@@ -1025,6 +1048,11 @@ function cambiarAncho(v) {
   j('/ancho', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ancho: v }) })
     .then(function (r) { msg.textContent = (r && r.ok) ? 'Ancho actualizado.' : 'No se pudo cambiar.'; msg.className = 'msg ' + ((r && r.ok) ? 'ok' : 'err'); refrescar(); });
 }
+document.getElementById('btnImagen').addEventListener('click', function () {
+  const msg = document.getElementById('msgPrueba');
+  j('/imagen', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ imagen: !window.__imagen }) })
+    .then(function (r) { msg.textContent = (r && r.ok) ? (r.imagen ? 'El pie sale con el logo.' : 'El pie sale solo en texto.') : 'No se pudo cambiar.'; msg.className = 'msg ' + ((r && r.ok) ? 'ok' : 'err'); refrescar(); });
+});
 document.getElementById('btn58').addEventListener('click', function () { cambiarAncho(48); });
 document.getElementById('btn80').addEventListener('click', function () { cambiarAncho(64); });
 
@@ -1084,6 +1112,14 @@ async function manejarAncho(req, res) {
   return responderJson(res, 200, { ok: true, ancho: ANCHO, persistido });
 }
 
+async function manejarImagen(req, res) {
+  const body = await leerBodyJson(req);
+  if (typeof body.imagen !== 'boolean') return responderJson(res, 400, { ok: false, error: 'IMAGEN_INVALIDA' });
+  CON_IMAGEN = body.imagen;
+  process.env.LEVO_IMAGEN = CON_IMAGEN ? '1' : '0';
+  return responderJson(res, 200, { ok: true, imagen: CON_IMAGEN, persistido: persistirImagen(CON_IMAGEN ? '1' : '0') });
+}
+
 function abrirNavegador(url) {
   try {
     const cmd = process.platform === 'win32' ? `start "" "${url}"`
@@ -1112,6 +1148,7 @@ function iniciarGui() {
     if (req.method === 'POST' && url === '/prueba') return void manejarPrueba(req, res);
     if (req.method === 'POST' && url === '/vincular') return void manejarVincular(req, res);
     if (req.method === 'POST' && url === '/ancho') return void manejarAncho(req, res);
+    if (req.method === 'POST' && url === '/imagen') return void manejarImagen(req, res);
     responderJson(res, 404, { ok: false, error: 'NO_ENCONTRADO' });
   });
   function intentarPuertos(intento) {
@@ -1134,7 +1171,7 @@ function iniciarGui() {
 async function arrancar() {
   const canje = await canjearCodigo();
   if (faltaUrlAnon()) { abortarSinConfig(); return; }
-  console.log('LevoPrint agente de impresion v1.10 (ventana visual + vinculacion por codigo) - LevoDev');
+  console.log('LevoPrint agente de impresion v1.11 (ventana visual + vinculacion por codigo) - LevoDev');
   // [MM4-06] Codigo del .txt canjeado recien: papel de prueba (sin bloquear el arranque).
   if (canje && canje.ok && !canje.reintento) imprimirVinculado(canje.nombre);
   console.log(MODO_CONSOLA ? 'MODO CONSOLA (sin impresoras reales)' : 'Modo impresión real');

@@ -21,17 +21,23 @@ const b = src.indexOf('function imprimirRaw(')
 if (a < 0 || b < 0 || b < a) { console.error('FALLA: no se encontraron las anclas del render en index.js'); process.exit(1) }
 
 function cargar (prefijo) {
-  const ctx = { PREFIJO: prefijo, ANCHO: 48, process: { env: {} }, Buffer, console }
+  const ctx = { PREFIJO: prefijo, ANCHO: 48, CON_IMAGEN: true, process: { env: {} }, Buffer, console }
   vm.createContext(ctx)
-  vm.runInContext('var PREFIJO = this.PREFIJO, ANCHO = this.ANCHO;\n' + src.slice(a, b).replace(/^const /gm, 'var ') +
-    '\nthis.render = render; this.pieMarca = pieMarca; this.setAncho = (n) => { ANCHO = n };', ctx)
+  vm.runInContext('var PREFIJO = this.PREFIJO, ANCHO = this.ANCHO, CON_IMAGEN = this.CON_IMAGEN;\n' + src.slice(a, b).replace(/^const /gm, 'var ') +
+    '\nthis.render = render; this.pieMarca = pieMarca; this.setAncho = (n) => { ANCHO = n }; this.setImagen = (v) => { CON_IMAGEN = v };', ctx)
   return ctx
 }
 const R = cargar('kuti')
 let fallas = 0
 const ok = (c, m, det) => { console.log((c ? 'OK    ' : 'FALLA ') + m + (c || det === undefined ? '' : '\n      ' + String(det).slice(0, 1200))); if (!c) fallas++ }
 // Texto impreso sin los comandos ESC/POS (ESC @, ESC a n, ESC E n, ESC ! n, GS ! n, GS V n)
-const texto = (t) => t.replace(/\x1b@|\x1b[aE!][\s\S]|\x1d[!V][\s\S]/g, '')
+// [MM3-01] El isotipo (GS v 0 + 512 bytes de mapa de bits) también se quita: queda solo el texto impreso.
+const RASTER = '\x1dv0\x00\x08\x00\x40\x00'
+const sinImagen = (t) => { const i = t.indexOf(RASTER); return i < 0 ? t : t.slice(0, i) + t.slice(i + RASTER.length + 512) }
+const texto = (t) => sinImagen(t).replace(/\x1b@|\x1b[aE!J][\s\S]|\x1d[!V][\s\S]/g, '')
+const LEMA48 = 'Tu negocio, inteligente y bajo control.\n'
+const LEMA32 = 'Tu negocio, inteligente\ny bajo control.\n'
+const PROHIBIDO = ['Paracas', 'Peru', 'Ica', 'Pisco', 'Luis', 'S/ 39', 'S/ 40', 'Tu negocio tambien', 'Sistema ', '<Levodev', 'Hecho con carino']
 const ascii = (s) => [...s].every((c) => c.charCodeAt(0) < 128)
 
 // ---------- [O-23] TURNO ----------
@@ -41,7 +47,7 @@ for (const an of [48, 32]) {
   R.setAncho(an)
   const crudo = R.render({ tipo: 'TURNO', payload: def }); const t = texto(crudo)
   ok(t.includes('BARBERÍA DEMO') && t.includes('Sede Centro') && t.includes('TURNO SIN CITA') && t.includes('Tu numero\n15\n') && crudo.includes('\x1d!\x22' + '15\n'), `TURNO ${an}: definitivo con el número de la cola en triple alto`, t)
-  ok(t.includes('Carlos P.\nCon Jorge\n04/11/2026 10:05\n') && t.includes('Hay 2 personas delante.') && t.includes('Sistema KUTI - LevoDev'), `TURNO ${an}: nombre, con quién, hora, cuántos delante y pie`, t)
+  ok(t.includes('Carlos P.\nCon Jorge\n04/11/2026 10:05\n') && t.includes('Hay 2 personas delante.') && t.includes('Hecho con KUTI - levodev.app'), `TURNO ${an}: nombre, con quién, hora, cuántos delante y pie`, t)
   // [QA BAJO] sin punto ciego: ninguna línea pasa del ancho y el negocio (doble ancho) tampoco
   ok(t.split('\n').every((l) => l.length <= an) && t.split('\n')[0].length * 2 <= an, `TURNO ${an}: ninguna línea pasa del ancho`, t)
   const largo = texto(R.render({ tipo: 'TURNO', payload: { ...def, negocio: 'Barbería y Spa Los Hermanos del Centro Histórico' } })).split('\n')[0]
@@ -57,9 +63,42 @@ ok(!/siguiente|delante\./.test(texto(R.render({ tipo: 'TURNO', payload: { ...def
 R.setAncho(32)
 ok(texto(R.render({ tipo: 'TURNO', payload: { ...prov, provisional: 'ZZZZ-9999·xx' } })).includes('\nZZZZ-9999x\n'), 'TURNO: el número grande solo lleva ASCII visible y cabe en triple (32 columnas → 10)')
 
-// ---------- pie de marca ----------
-ok(R.pieMarca('KUTI', 48) === 'Sistema KUTI - LevoDev\nTu negocio tambien: kuti.levodev.app\n' && R.pieMarca('KOMO', 32) === 'Sistema KOMO - LevoDev\nTu negocio tambien:\nkomo.levodev.app\n' && R.pieMarca('otra', 48) === 'LevoDev - levodev.app\n', 'pie de marca por app y partido en 58 mm')
-ok(['KOMO', 'KIPU', 'KUTI', 'x'].every((ap) => [32, 48].every((an) => ascii(R.pieMarca(ap, an)) && R.pieMarca(ap, an).split('\n').every((l) => l.length <= an))), 'pie de marca en ASCII puro y dentro del ancho')
+// ---------- pie de marca (MM3-01 · MM3-P1) ----------
+const pieTxt = (ap, an) => 'Hecho con ' + ap + ' - levodev.app\n' + (an >= 40 ? LEMA48 : LEMA32)
+ok(['KOMO', 'KIPU', 'KUTI'].every((ap) => [32, 48, 64].every((an) => R.pieMarca(ap, an, false) === pieTxt(ap, an))) && R.pieMarca('otra', 48, false) === 'LevoDev - levodev.app\n' + LEMA48, 'pie de marca en texto: «Hecho con <APP> - levodev.app» + lema (una línea desde 40 columnas, dos en 58 mm)')
+{
+  const p = R.pieMarca('KUTI', 48, true)
+  ok(p.startsWith('\x1bJ\x08' + RASTER) && p.endsWith('\x1bJ\x06' + pieTxt('KUTI', 48)) && p.length === 3 + RASTER.length + 512 + 3 + pieTxt('KUTI', 48).length, 'pie con imagen: isotipo GS v 0 de 64x64 (512 bytes) y debajo el mismo texto')
+}
+ok(['KOMO', 'KIPU', 'KUTI', 'x'].every((ap) => [32, 48].every((an) => ascii(R.pieMarca(ap, an, false)) && R.pieMarca(ap, an, false).split('\n').every((l) => l.length <= an))), 'pie de marca en ASCII puro y dentro del ancho')
+{
+  const b64 = /const ISOTIPO_B64 = '([^']+)'/.exec(src)[1]
+  ok(Buffer.from(b64, 'base64').length === 512 && Buffer.from(b64, 'base64')[0] === 0x3f, 'ISOTIPO_B64 decodifica a 512 bytes (64x64 a 1 bit)')
+}
+for (const an of [48, 32]) {
+  R.setAncho(an)
+  for (const pref of ['kuti', 'komo', 'kipu']) {
+    const Rp = cargar(pref); Rp.setAncho(an)
+    const APP = pref.toUpperCase()
+    const nvp = { negocio: 'Pollos Don Lucho', mesa: '3', items: [{ cantidad: 1, nombre: 'Lomo', precio: 28.5 }], total: 28.5, pagos: [], lema: 'Turnos y caja para barberias y salones', url: 'https://x.y', qr: 'q' }
+    for (const tipo of ['TICKET', 'PRECUENTA', 'CARTA_QR', 'PRUEBA']) {
+      const t = Rp.render({ tipo, payload: nvp }), s = texto(t)
+      ok(t.includes(RASTER) && t.indexOf(RASTER) === t.lastIndexOf(RASTER), `${APP} ${tipo} ${an}: un solo isotipo en el pie`)
+      ok(s.includes(pieTxt(APP, an)) && PROHIBIDO.every((p) => !t.includes(p)) && !s.includes('barberias'), `${APP} ${tipo} ${an}: «Hecho con ${APP} - levodev.app» + lema; sin ciudades, país, precios, invitación ni el eslogan viejo`)
+      Rp.setImagen(false)
+      const x = Rp.render({ tipo, payload: nvp }); Rp.setImagen(true)
+      ok(!x.includes('\x1dv0') && texto(x) === s && Rp.render({ tipo, payload: { ...nvp, sinImagen: true } }) === x, `${APP} ${tipo} ${an}: fallback sin imagen (LEVO_IMAGEN=0 o payload.sinImagen): el mismo pie en texto`)
+    }
+    const tk = texto(Rp.render({ tipo: 'TICKET', payload: nvp }))
+    ok(tk.indexOf('POLLOS DON LUCHO') >= 0 && tk.indexOf('POLLOS DON LUCHO') < tk.indexOf('Hecho con'), `${APP} TICKET ${an}: el negocio del cliente arriba y la marca al pie`)
+  }
+  const c = R.render({ tipo: 'COMANDA', payload: { mesa: '12', mozo: 'Ana', hora: '19:42', ronda: 2, items: [{ cantidad: 2, nombre: 'Lomo saltado con arroz chaufa y una porcion extra de papas fritas', nota: 'sin cebolla' }, { cantidad: 1.5, nombre: 'Chicha' }] } })
+  ok(c.includes('\x1d!\x22MESA 12\n') && c.includes('Mozo: Ana') && c.includes('19:42') && c.includes('Ronda 2'), `COMANDA ${an}: MESA enorme, mozo, hora y ronda`)
+  ok(c.includes('\x1bE\x01\x1d!\x012 x Lomo saltado') && /\x1d!\x01 {4}\S/.test(c) && c.includes('>> sin cebolla') && c.includes('1.500 x Chicha'), `COMANDA ${an}: ítems en doble alto y negrita, nombre largo con sangría, nota y cantidad fraccionada`)
+  ok(!texto(c).split('\n').some((l) => l.length > an), `COMANDA ${an}: ningún renglón pasa del ancho`)
+  ok(!c.includes('Hecho con') && !c.includes('levodev.app') && !c.includes('\x1dv0') && !c.includes('Tu negocio') && c.endsWith('='.repeat(an) + '\n\n\n\n\x1dV\x00'), `COMANDA ${an}: sin pie, sin isotipo, sin publicidad`)
+}
+ok(texto(R.render({ tipo: 'COMANDA', payload: { mesa: '5', correccion: true, items: [{ cantidad: 1, nombre: 'Lomo' }] } })).includes('*** CORRECCION ***\nMESA 5\n'), 'COMANDA corrección: título y mesa')
 
 // ---------- nota de venta de KUTI, sellos y prueba ----------
 R.setAncho(48)

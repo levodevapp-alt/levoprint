@@ -90,6 +90,12 @@
     <TextView style="@style/Etiqueta" android:text="Ancho del papel (columnas: 48=80mm, 32=58mm)" />
     <EditText android:id="@+id/inAncho" style="@style/Campo"
         android:hint="48" android:text="48" android:inputType="number" />
+
+    <com.google.android.material.materialswitch.MaterialSwitch
+        android:id="@+id/swImagen"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_marginTop="12dp" android:checked="true"
+        android:text="Pie con logo (apagalo si tu impresora no imprime imagenes)" />
     </LinearLayout>
 
     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"

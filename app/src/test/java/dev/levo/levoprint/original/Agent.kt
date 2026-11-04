@@ -44,9 +44,10 @@ object Agent {
   private val NORMAL = GS + "!" + 0.toChar()
   private val FONT0 = ESC + "!" + 0.toChar()
   private val CORTE = NL + NL + NL + GS + "V" + 0.toChar()
-  // [MM3-01] Unico cambio a la copia congelada: el pie de marca (el de KOMO; la prueba llama al render nuevo con "KOMO").
-  // [MM4-10] Pie con gancho "Tu negocio tambien:" (forma de 48 columnas; la prueba lo cambia bajo 36).
-  private val PIE = FONT0 + "Sistema KOMO - LevoDev" + NL + "Tu negocio tambien: komo.levodev.app" + NL + CORTE
+  // [MM3-01] Unico cambio a la copia congelada: el pie de marca es un MARCADOR; la prueba lo sustituye por el
+  // pie vigente (Agent.pieConImagen("KOMO", ancho, true)). [MM3-01 · 4-nov] La COMANDA ya no se compara con esta
+  // copia (nueva jerarquia): tiene sus propias pruebas.
+  private val PIE = FONT0 + "@@PIE@@" + CORTE
 
   // ---- RPC (mismo contrato que el agente .exe) ----
   fun rpc(c: Cfg, fn: String, p: JSONObject): JSONObject {

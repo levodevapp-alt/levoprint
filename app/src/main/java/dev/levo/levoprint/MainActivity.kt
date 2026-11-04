@@ -66,6 +66,10 @@ class MainActivity : AppCompatActivity() {
     val inPrefijo = findViewById<EditText>(R.id.inPrefijo)
     val inAncho = findViewById<EditText>(R.id.inAncho)
     val swBt = findViewById<MaterialSwitch>(R.id.swBluetooth)
+    // [MM3-01 · MM3-P1] Pie con logo: se apaga si la impresora no imprime imagenes (el pie sale en texto).
+    val swImagen = findViewById<MaterialSwitch>(R.id.swImagen)
+    swImagen.isChecked = Prefs.getImagen(this)
+    swImagen.setOnCheckedChangeListener { _, on -> Prefs.setImagen(this, on) }
     val btn = findViewById<Button>(R.id.btnToggle)
     val estado = findViewById<TextView>(R.id.txtEstado)
     val log = findViewById<TextView>(R.id.txtLog)
@@ -316,7 +320,7 @@ class MainActivity : AppCompatActivity() {
   // recien con el primer trabajo de la cola que imprima este equipo.
   private fun imprimirPapelVinculado(cfg: Cfg, nombre: String): String? {
     val hora = java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.US).format(java.util.Date())
-    val texto = Agent.renderVinculado(nombre, hora, cfg.ancho, cfg.prefijo)
+    val texto = Agent.renderVinculado(nombre, hora, cfg.ancho, cfg.prefijo, Prefs.getImagen(this))
     val ests = try { Agent.estaciones(cfg).values.toList() } catch (_: Exception) { emptyList() }
     val deCodigo = nombre.substringBefore(" · ").trim()
     val conIp = ests.filter { it.ip != null }

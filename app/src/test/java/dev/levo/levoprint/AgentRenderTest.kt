@@ -25,7 +25,15 @@ class AgentRenderTest {
   private fun job(tipo: String, pl: JSONObject) = JSONObject().put("tipo", tipo).put("payload", pl)
 
   // Texto impreso sin los comandos ESC/POS (ESC @, ESC a n, ESC E n, ESC ! n, GS ! n, GS V n).
-  private fun texto(t: String) = t.replace(Regex("\u001b@|\u001b[aE!][\\s\\S]|\u001d[!V][\\s\\S]"), "")
+  private fun texto(t: String): String {
+    // [MM3-01] el isotipo (GS v 0 + 512 bytes de mapa de bits) tambien se quita: queda solo el texto impreso
+    val i = t.indexOf(RASTER)
+    val sinImg = if (i < 0) t else t.substring(0, i) + t.substring(i + RASTER.length + 512)
+    return sinImg.replace(Regex("\u001b@|\u001b[aE!J][\\s\\S]|\u001d[!V][\\s\\S]"), "")
+  }
+  // Cabecera GS v 0 m xL xH yL yH del isotipo de 64x64 puntos (8 bytes por fila): 1D 76 30 00 08 00 40 00
+  private val RASTER = 29.toChar() + "v0" + 0.toChar() + 8.toChar() + 0.toChar() + 64.toChar() + 0.toChar()
+  private val PROHIBIDO = listOf("Paracas", "Peru", "Ica", "Pisco", "Luis", "S/ 39", "S/ 40", "Tu negocio tambien", "Sistema ", "<Levodev", "Hecho con carino")
 
   private val items = """[{"cantidad":2,"nombre":"Lomo saltado","precio":28.5},{"cantidad":0.5,"nombre":"Arroz extra largo nombre de plato de prueba","precio":10.01}]"""
   private val base = """"negocio":"Chifa X","hora":"13:05","fecha":"24/10/2026 13:05","items":$items,"total":62.01,"pagos":[{"medio":"Efectivo","monto":62.01}],"app":"KOMO","lema":"POS""""
@@ -50,11 +58,10 @@ class AgentRenderTest {
     var n = 0
     for (ancho in listOf(32, 42, 48, 64)) for (j in casosKomoKipu()) {
       n++
-      // [MM3-01] bajo 36 columnas el pie de marca va en su forma corta; la copia congelada solo
-      // tiene la larga, asi que se cambia ahi antes de comparar (el resto, byte a byte).
-      val orig = dev.levo.levoprint.original.Agent.render(j, ancho).let {
-        if (ancho >= 36) it else it.replace(Agent.pieTexto("KOMO", 48), Agent.pieTexto("KOMO", ancho))
-      }
+      // [MM3-01 · MM3-P1] el pie de marca de la copia congelada es un marcador: se cambia por el vigente
+      // (con imagen); el resto, byte a byte. La COMANDA tiene jerarquia nueva y sus propias pruebas.
+      if (j.optString("tipo") == "COMANDA") continue
+      val orig = dev.levo.levoprint.original.Agent.render(j, ancho).replace("@@PIE@@", Agent.pieConImagen("KOMO", ancho, true))
       assertEquals("difiere ${j.optString("tipo")} ancho $ancho", orig, Agent.render(j, ancho, "KOMO"))
     }
     assertEquals(144, n)
@@ -83,29 +90,57 @@ class AgentRenderTest {
     assertTrue(k, k.contains("CORTE DE CAJA") && k.contains("Ventas (3)") && k.contains("S/ -0.50") && k.contains("-".repeat(32)))
   }
 
-  // [MM3-01] Pie de marca: el nombre sale de la configuracion del local (prefijo), si no del payload.
+  // [MM3-01 · MM3-P1] Pie de marca: el nombre sale de la configuracion del local (prefijo), si no del payload.
+  // Isotipo en 1 bit + "Hecho con <APP> - levodev.app" + lema; ASCII puro; sin ciudades, pais, precios ni gancho.
   @Test fun pieDeMarcaPorApp() {
-    // [QA MM3 M1] ASCII puro: ningun byte > 0x7F en el pie
-    // [MM4-10 · P4] Una sola direccion con gancho; bajo 36 columnas la direccion baja a su linea.
-    assertEquals("Sistema KUTI - LevoDev\nTu negocio tambien: kuti.levodev.app\n", Agent.pieTexto("kuti"))
-    assertEquals("Sistema KIPU - LevoDev\nTu negocio tambien: kipu.levodev.app\n", Agent.pieTexto("KIPU"))
-    assertEquals("LevoDev - levodev.app\n", Agent.pieTexto("otra"))
-    assertEquals("Sistema KOMO - LevoDev\nTu negocio tambien:\nkomo.levodev.app\n", Agent.pieTexto("komo", 32))
+    val lema48 = "Tu negocio, inteligente y bajo control.\n"
+    val lema32 = "Tu negocio, inteligente\ny bajo control.\n"
+    assertEquals("Hecho con KUTI - levodev.app\n" + lema48, Agent.pieTexto("kuti"))
+    assertEquals("Hecho con KIPU - levodev.app\n" + lema48, Agent.pieTexto("KIPU"))
+    assertEquals("LevoDev - levodev.app\n" + lema48, Agent.pieTexto("otra"))
+    assertEquals("Hecho con KOMO - levodev.app\n" + lema32, Agent.pieTexto("komo", 32))
     for (an in listOf(32, 42, 48, 64)) for (l in Agent.pieTexto("kipu", an).split("\n")) assertTrue(l, l.length <= an)
     for (ap in listOf("komo", "kipu", "kuti", "x")) for (an in listOf(32, 48)) assertTrue(Agent.pieTexto(ap, an).all { it.code < 128 })
-    val t = Agent.render(job("PRUEBA", o("""{"x":1}""")), 32, "kipu")
-    assertTrue(t, t.contains("Sistema KIPU") && t.contains("kipu.levodev.app") && !t.contains("Paracas"))
+    // con imagen: GS v 0, 64x64, 512 bytes de mapa, y debajo el mismo texto
+    val con = Agent.pieConImagen("KUTI", 48, true)
+    assertTrue(con.startsWith(27.toChar() + "J" + 8.toChar() + RASTER) && con.endsWith(27.toChar() + "J" + 6.toChar() + Agent.pieTexto("KUTI", 48)))
+    assertEquals(3 + RASTER.length + 512 + 3 + Agent.pieTexto("KUTI", 48).length, con.length)
+    assertEquals(63.toChar(), con[3 + RASTER.length]) // primer byte del mapa (0x3f): la L y el punto
+    assertEquals(Agent.pieTexto("KUTI", 48), Agent.pieConImagen("KUTI", 48, false))
+    for (app in listOf("komo", "kipu", "kuti")) for (an in listOf(32, 48)) for (tipo in listOf("PRUEBA", "TICKET", "PRECUENTA", "CARTA_QR")) {
+      val pl = o("""{"negocio":"Pollos Don Lucho","mesa":"3","items":$items,"total":28.5,"pagos":[],"qr":"q","url":"https://x.y","lema":"Turnos y caja para barberias y salones"}""")
+      val t = Agent.render(job(tipo, pl), an, app)
+      val s = texto(t)
+      assertTrue("$app $tipo $an: un solo isotipo", t.indexOf(RASTER) > 0 && t.indexOf(RASTER) == t.lastIndexOf(RASTER))
+      assertTrue(s, s.contains(Agent.pieTexto(app, an)) && !s.contains("barberias") && PROHIBIDO.none { t.contains(it) })
+      // fallback sin imagen (interruptor del equipo o payload.sinImagen): el mismo pie en texto
+      val x = Agent.render(job(tipo, pl), an, app, false)
+      assertFalse(x.contains(29.toChar() + "v0"))
+      assertEquals(s, texto(x))
+      assertEquals(x, Agent.render(job(tipo, JSONObject(pl.toString()).put("sinImagen", true)), an, app))
+    }
+    // el ticket es del negocio: su nombre va arriba y la marca al pie (KOMO/KIPU del APK no imprimen negocio, congelado desde canje-v3)
+    val tk = texto(Agent.render(job("TICKET", o(kuti)), 48, "kuti"))
+    assertTrue(tk, tk.indexOf("BARBERÍA DEMO") in 0 until tk.indexOf("Hecho con KUTI"))
     val p = Agent.render(job("PRUEBA", o("""{"app":"KUTI"}""")), 32)
-    assertTrue(p, p.contains("Sistema KUTI"))
+    assertTrue(p, texto(p).contains("Hecho con KUTI - levodev.app"))
   }
 
-  // [MM4-09 · P6] La comanda sale sin pie de marca: termina en la linea "=" y el corte.
-  @Test fun comandaSinPie() {
+  // [MM3-01 · 4-nov] Comanda con jerarquia y SIN pie: MESA enorme, mozo y hora en negrita, items en doble alto.
+  @Test fun comandaJerarquiaYSinPie() {
+    val alto = 29.toChar() + "!" + 1.toChar()
     for (ancho in listOf(32, 48)) {
-      val t = Agent.render(job("COMANDA", o("""{"mesa":"3","mozo":"Ana","items":$items,"lema":"POS"}""")), ancho, "komo")
-      assertFalse(t, t.contains("Sistema ") || t.contains("levodev.app"))
+      val pl = o("""{"mesa":"12","mozo":"Ana","hora":"19:42","ronda":2,"lema":"POS","items":[{"cantidad":2,"nombre":"Lomo saltado con arroz chaufa y una porcion extra de papas fritas","nota":"sin cebolla"},{"cantidad":1.5,"nombre":"Chicha"}]}""")
+      val t = Agent.render(job("COMANDA", pl), ancho, "komo")
+      assertTrue(t, t.contains(29.toChar() + "!" + 34.toChar() + "MESA 12" + "\n") && t.contains("Mozo: Ana") && t.contains("19:42") && t.contains("Ronda 2"))
+      assertTrue(t, t.contains(27.toChar() + "E" + 1.toChar() + alto + "2 x Lomo saltado") && Regex(alto + " {4}\\S").containsMatchIn(t))
+      assertTrue(t, t.contains(">> sin cebolla") && t.contains("1.500 x Chicha"))
+      assertTrue(texto(t), texto(t).split("\n").all { it.length <= ancho })
+      assertFalse(t, t.contains("Hecho con") || t.contains("levodev.app") || t.contains(RASTER) || t.contains("Tu negocio") || t.contains("POS" + "\n"))
       assertTrue(t, t.endsWith("=".repeat(ancho) + "\n\n\n\n" + 29.toChar() + "V" + 0.toChar()))
     }
+    val c = texto(Agent.render(job("COMANDA", o("""{"mesa":"5","correccion":true,"items":[{"cantidad":1,"nombre":"Lomo"}]}""")), 48, "komo"))
+    assertTrue(c, c.contains("*** CORRECCION ***\nMESA 5\n"))
   }
 
   // [O-23] Ticket del cliente sin cita de KUTI (TURNO): mismo papel que kuti-print (prueba_render.mjs).
@@ -119,7 +154,7 @@ class AgentRenderTest {
       // triple alto (GS ! 0x22) para el numero
       assertTrue(crudo, crudo.contains(29.toChar() + "!" + 34.toChar() + "15\n"))
       assertTrue(t, t.contains("Carlos P.\nCon Jorge\n04/11/2026 10:05\n") && t.contains("Hay 2 personas delante.") && !t.contains("null") && !t.contains("COPIA"))
-      assertTrue(t, t.contains("Sistema KUTI - LevoDev") && t.contains("kuti.levodev.app"))
+      assertTrue(t, t.contains("Hecho con KUTI - levodev.app"))
       // [QA BAJO] sin punto ciego: ninguna linea pasa del ancho, el negocio (doble ancho) tampoco; lo fijo es ASCII puro
       assertTrue(t, t.split("\n").all { it.length <= ancho } && t.split("\n")[0].length * 2 <= ancho)
       val fijo = t.substring(t.indexOf("TURNO SIN CITA")).replace("Carlos P.", "").replace("Jorge", "")
@@ -163,6 +198,7 @@ class AgentRenderTest {
     val f = listOf(java.io.File("build.gradle.kts"), java.io.File("app/build.gradle.kts")).first { it.exists() }
     val m = Regex("versionName\\s*=\\s*\"([^\"]+)\"").find(f.readText())
     assertEquals(m?.groupValues?.get(1), Agent.VERSION)
+    assertEquals("1.5.0", Agent.VERSION)
   }
 
   @Test fun envolverPorPalabra() {
@@ -176,7 +212,7 @@ class AgentRenderTest {
     for (ancho in listOf(32, 48)) {
       val t = texto(Agent.renderVinculado("Cocina · Pollería Doña Ana", "03/11/2026 21:05", ancho, "komo"))
       assertTrue(t, t.contains("LevoPrint\nVINCULADO\n") && t.contains("Cocina\nPollería Doña Ana\n") && t.contains("03/11/2026 21:05"))
-      assertTrue(t, !t.contains("·") && t.contains("Tu negocio tambien:") && t.contains("komo.levodev.app"))
+      assertTrue(t, !t.contains("·") && t.contains("Hecho con KOMO - levodev.app") && t.contains("Tu negocio, inteligente"))
       assertTrue(t, t.split("\n").all { it.length <= ancho })
     }
   }

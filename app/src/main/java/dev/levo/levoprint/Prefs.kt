@@ -37,6 +37,15 @@ object Prefs {
   fun getBluetooth(ctx: Context): Boolean =
     ctx.getSharedPreferences(F, Context.MODE_PRIVATE).getBoolean("bt", false)
 
+  // [MM3-01 · MM3-P1] Pie del ticket con el logo (imagen GS v 0). Apagado: impresora vieja sin soporte de
+  // imagen -> el pie sale solo en texto. Por defecto encendido.
+  fun setImagen(ctx: Context, on: Boolean) {
+    ctx.getSharedPreferences(F, Context.MODE_PRIVATE).edit().putBoolean("imagen", on).apply()
+  }
+
+  fun getImagen(ctx: Context): Boolean =
+    ctx.getSharedPreferences(F, Context.MODE_PRIVATE).getBoolean("imagen", true)
+
   fun setBt(ctx: Context, mac: String, nombre: String) {
     ctx.getSharedPreferences(F, Context.MODE_PRIVATE).edit()
       .putString("btMac", mac).putString("btNombre", nombre).apply()

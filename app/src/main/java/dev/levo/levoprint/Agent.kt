@@ -28,9 +28,9 @@ class RpcError(val fn: String, val http: Int, val pgMensaje: String, cuerpo: Str
 
 object Agent {
   // [O-23 · QA MEDIO-2] Versión de este APK (= versionName de app/build.gradle.kts; AgentRenderTest lo comprueba).
-  // Va en <prefijo>_agente_config (p.version = "apk/1.4.3"): KUTI (kuti_turno_print) solo manda el papel TURNO a un
+  // Va en <prefijo>_agente_config (p.version = "apk/1.5.0"): KUTI (kuti_turno_print) solo manda el papel TURNO a un
   // local cuyos agentes vivos lo saben dibujar. KOMO/KIPU la ignoran.
-  const val VERSION = "1.4.3"
+  const val VERSION = "1.5.0"
   // ESC/POS con codigos de caracter (sin bytes de control crudos en el
   // fuente). Se construye TODO como String de chars 0..255 y se envia en
   // latin1 (ISO-8859-1), igual que el agente .exe (Buffer 'binary').
@@ -48,28 +48,35 @@ object Agent {
   private val ENORME = GS + "!" + 34.toChar()
   private val FONT0 = ESC + "!" + 0.toChar()
   private val CORTE = NL + NL + NL + GS + "V" + 0.toChar()
-  // [MM3-01 3-nov] Pie de marca unico del ticket termico (IDENTIDAD_VISUAL 12.12): antes era el
-  // pie viejo con ciudad y el tag de desarrollador, fijo para todas las apps. Ahora la linea
-  // "Sistema <APP> - LevoDev - levodev.app" + "<app>.levodev.app", con el
-  // nombre de la app que sale de la configuracion del local (KOMO, KIPU o KUTI). Sin signo (la
-  // termica de 58 mm empasta los medianiles) y en ASCII PURO [QA MM3 M1]: guion y no el punto
-  // medio 0xB7, que depende de la pagina de codigos de la impresora. Prefijo desconocido -> pie
-  // generico "LevoDev - levodev.app".
-  // La primera linea mide 36 columnas: en 58 mm (32) se partiria a media palabra, asi que bajo 36
-  // columnas va "Sistema <APP> . LevoDev" y la direccion de la app abajo (ya dice levodev.app).
-  // [MM4-10 · P4 · 3-nov] Una sola direccion y un motivo para entrar: "Sistema <APP> - LevoDev" +
-  // "Tu negocio tambien: <app>.levodev.app" (sin tilde: ASCII puro). Antes salian dos direcciones
-  // seguidas; el ticket lo leen otros duenos. Bajo 36 columnas el gancho se partiria a media
-  // palabra: "Tu negocio tambien:" y la direccion en su propia linea. Misma regla que el .exe y que
-  // komo-print / kipu-print / kuti-print.
-  private val SEP = " - "
+  // [MM3-01 · MM3-P1 · 4-nov] Pie de marca del ticket termico (IDENTIDAD_VISUAL 12.12). El ticket es del
+  // NEGOCIO del cliente (su nombre va arriba); LevoDev va discreta al pie: isotipo D2 Yupana en 1 bit
+  // (64x64 puntos, GS v 0; mapa generado por levodev-modules/tools/marca/isotipo_termico.mjs, el mismo
+  // del .exe de LevoPrint, el de KOMO y las Edge *-print) + "Hecho con <APP> - levodev.app" + el lema
+  // "Tu negocio, inteligente y bajo control.". Sin ciudades, sin pais, sin precios, sin invitacion
+  // (MM3-P5: la invitacion va solo en el ticket digital). ASCII PURO [QA MM3 M1]: guion y no el punto
+  // medio 0xB7 ni tildes, que dependen de la pagina de codigos de la impresora. El nombre de la app sale
+  // de la configuracion del local (KOMO, KIPU o KUTI); prefijo desconocido -> "LevoDev - levodev.app".
+  // Bajo 40 columnas (58 mm) el lema va en dos lineas. Impresora sin soporte de imagen: el interruptor
+  // "Pie con logo" (Prefs.getImagen) o payload.sinImagen -> las mismas lineas salen solo en texto.
+  private const val ISOTIPO_B64 = "P/+AAAAAD8B//8AAAAB/8P//4AAAAP/4///gAAAB//z//+AAAAH//v//4AAAA//+///gAAAD/////+AAAAf/////4AAAB//////gAAAH/////+AAAAf/////4AAAB//////gAAAD//7//+AAAAP//v//4AAAAf/+///gAAAB//z//+AAAAD/+H//wAAAAD/gP/+AAAAAD4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH//wAAAAAAA///gAAAAAAD//+AAAAAAAP//4AAAAAAA///gAAAAAAD//+AAAAAAAP//4AAAAAAA///gAAAAAAD//+AAAAAAAP//4AAAAAAA///gAAAAAAD//+AAAAAAAP//4AAAAAAA///gAAAAAAD//+AAAAAAAP//4AAAAAAA///gAAAAAAB//8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/+A//8B//x//8H//4P//v//4f//h//////h//+H/////+H//4f/////4f//h//////h//+H/////+H//4f/////4f//h//////h//+H/////+H//4f/////4f//h//////h//+H/////+H//4f/////4f//h//////h//+H/////+H//4f//3//wf//g//+P/+A//8B//w="
+  private const val LEMA = "Tu negocio, inteligente y bajo control."
+  // GS v 0 m=0, 8 bytes por fila x 64 filas; ESC J n avanza n puntos (aire arriba y abajo). Chars 0..255 (latin1).
+  private val ISOTIPO: String by lazy {
+    val sb = StringBuilder(ESC + "J" + 8.toChar() + GS + "v0" + 0.toChar() + 8.toChar() + 0.toChar() + 64.toChar() + 0.toChar())
+    for (by in java.util.Base64.getDecoder().decode(ISOTIPO_B64)) sb.append((by.toInt() and 0xff).toChar())
+    sb.append(ESC + "J" + 6.toChar()).toString()
+  }
+  // Con imagen o sin ella (se fija en render() para el hilo que imprime).
+  private val conImagen = ThreadLocal.withInitial { true }
+  private const val SEP = " - "
   fun pieTexto(app: String, ancho: Int = 48): String {
     val a = app.trim().uppercase()
-    if (a != "KOMO" && a != "KIPU" && a != "KUTI") return "LevoDev" + SEP + "levodev.app" + NL
-    return "Sistema " + a + SEP + "LevoDev" + NL + "Tu negocio tambien:" + (if (ancho >= 36) " " else NL) +
-      a.lowercase() + ".levodev.app" + NL
+    val quien = if (a == "KOMO" || a == "KIPU" || a == "KUTI") "Hecho con " + a + SEP + "levodev.app" else "LevoDev" + SEP + "levodev.app"
+    val lema = if (ancho >= 40) LEMA + NL else "Tu negocio, inteligente" + NL + "y bajo control." + NL
+    return quien + NL + lema
   }
-  private fun pie(app: String, ancho: Int) = FONT0 + pieTexto(app, ancho) + CORTE
+  fun pieConImagen(app: String, ancho: Int, imagen: Boolean): String = (if (imagen) ISOTIPO else "") + pieTexto(app, ancho)
+  private fun pie(app: String, ancho: Int) = FONT0 + pieConImagen(app, ancho, conImagen.get() == true) + CORTE
 
   // ---- RPC (mismo contrato que el agente .exe) ----
   fun rpc(c: Cfg, fn: String, p: JSONObject): JSONObject {
@@ -146,11 +153,18 @@ object Agent {
     return b.toString()
   }
 
+  // [MM3-01 · 4-nov] Comanda de cocina: jerarquia para leerla de pie y de lejos, y SIN marca. Titulo chico,
+  // la MESA enorme (GS ! 0x22), mozo y hora en negrita, cada item en doble alto y negrita (el nombre largo
+  // baja con sangria) y su nota en negrita debajo. Mismo papel que komo-print, el .exe de LevoPrint y el de KOMO.
+  private val ALTO = GS + "!" + 1.toChar()
   private fun renderComanda(pl: JSONObject, ancho: Int, app: String): String {
-    val titulo = if (pl.optBoolean("correccion")) "*** CORRECCION ***" else "COMANDA"
-    val b = StringBuilder(INIT + CENTRO + GRANDE + titulo + NL + NORMAL)
-    b.append(GRANDE + "MESA " + pl.optString("mesa") + NL + NORMAL + IZQ + linea(ancho, "="))
-    b.append(fila("Mozo: " + pl.optString("mozo", "-"), pl.optString("hora", ""), ancho))
+    val b = StringBuilder(INIT + CENTRO)
+    if (pl.optBoolean("correccion")) b.append(NEG_ON + GRANDE + "*** CORRECCION ***" + NL + NORMAL + NEG_OFF)
+    else b.append(NEG_ON + "COMANDA" + NL + NEG_OFF)
+    val mesa = "MESA " + pl.optString("mesa").ifBlank { "-" }
+    b.append(NEG_ON + (if (mesa.length * 3 <= ancho) ENORME else if (mesa.length * 2 <= ancho) GRANDE else "") + mesa + NL + NORMAL + NEG_OFF)
+    b.append(IZQ + linea(ancho, "="))
+    b.append(NEG_ON + fila("Mozo: " + pl.optString("mozo").ifBlank { "-" }, pl.optString("hora", ""), ancho) + NEG_OFF)
     if (pl.optInt("ronda") > 0) b.append(fila("Ronda " + pl.optInt("ronda"), "", ancho))
     b.append(linea(ancho, "="))
     if (pl.optString("mensaje").isNotBlank())
@@ -158,12 +172,15 @@ object Agent {
     val its = items(pl)
     for (i in 0 until its.length()) {
       val it = its.getJSONObject(i)
-      b.append(NEG_ON + cant(it.optDouble("cantidad", 1.0)) + " x " + it.optString("nombre") + NL + NEG_OFF)
+      val cab = cant(it.optDouble("cantidad", 1.0)) + " x "
+      envolver(it.optString("nombre"), maxOf(8, ancho - cab.length)).forEachIndexed { j, l ->
+        b.append(NEG_ON + ALTO + (if (j == 0) cab else " ".repeat(cab.length)) + l + NL + NORMAL + NEG_OFF)
+      }
       val nota = it.optString("nota")
-      if (nota.isNotBlank()) b.append("   >> " + nota + NL)
+      if (nota.isNotBlank()) for (l in envolver(nota, ancho - 6)) b.append(NEG_ON + "   >> " + l + NEG_OFF + NL)
     }
     val nota = pl.optString("nota")
-    if (nota.isNotBlank()) b.append(linea(ancho) + "NOTA: " + nota + NL)
+    if (nota.isNotBlank()) { b.append(linea(ancho)); for (l in envolver("NOTA: " + nota, ancho)) b.append(NEG_ON + l + NEG_OFF + NL) }
     // [MM4-09 · P6 · 3-nov] La comanda no lleva pie: al cliente nunca le llega y eran lineas de
     // rollo por ronda que se botan. Solo el corte (el parametro app queda por simetria con los demas).
     b.append(linea(ancho, "=") + CORTE)
@@ -173,7 +190,8 @@ object Agent {
   // [MM4-06 · 3-nov] Papel corto al vincular: el cajero ve en papel que funciona en su primer
   // turno. "nombre" es el del canje ("<estacion> · <negocio>"): cada parte va en su linea (sin el
   // punto medio, que depende de la pagina de codigos). Solo local: no pasa por la cola del servidor.
-  fun renderVinculado(nombre: String, hora: String, ancho: Int, app: String): String {
+  fun renderVinculado(nombre: String, hora: String, ancho: Int, app: String, imagen: Boolean = true): String {
+    conImagen.set(imagen)
     val b = StringBuilder(INIT + CENTRO + "LevoPrint" + NL + NEG_ON + GRANDE + "VINCULADO" + NL + NORMAL + NEG_OFF)
     b.append(linea(ancho, "="))
     for (parte in nombre.split(" · ").map { it.trim() }.filter { it.isNotBlank() }) b.append(parte.take(ancho) + NL)
@@ -409,12 +427,14 @@ object Agent {
 
   // [MM3-01] appCfg = prefijo de la configuracion del local (komo/kipu/kuti). Si viene vacio
   // (pruebas, equipos viejos) se usa el "app" del payload; si tampoco hay, el pie generico.
-  fun render(job: JSONObject, ancho: Int, appCfg: String = ""): String {
+  fun render(job: JSONObject, ancho: Int, appCfg: String = "", imagen: Boolean = true): String {
     val tipo = job.optString("tipo")
     val pl = job.optJSONObject("payload") ?: JSONObject()
+    // [MM3-01 · MM3-P1] sin imagen si la impresora no la soporta (interruptor del equipo) o el payload lo pide
+    conImagen.set(imagen && !pl.optBoolean("sinImagen"))
     val app = appCfg.ifBlank { pl.optString("app") }
     val t = when (tipo) {
-      "PRUEBA" -> INIT + CENTRO + "PRUEBA LEVOPRINT OK" + NL + pie(app, ancho)
+      "PRUEBA" -> INIT + CENTRO + "PRUEBA LEVOPRINT OK" + NL + pie(app, ancho) // la prueba lleva el pie: se ve si la impresora imprime el logo
       "COMANDA" -> renderComanda(pl, ancho, app)
       "PRECUENTA" -> renderPrecuenta(pl, ancho, app)
       "TICKET" -> renderTicket(pl, ancho, app)

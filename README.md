@@ -29,3 +29,8 @@ Se compila solo en **GitHub Actions** (pestaña *Actions* → último run → *A
 - **APK (Android)** — carpeta `app/`. CI: workflow *build-apk* → artifact `LevoPrint-debug-apk`.
 - **.exe (Windows/PC)** — carpeta `agente/` (Node SEA). CI: workflow *build-exe* → artifact `LevoPrint-exe`.
 Ambos son **genéricos**: el mismo binario sirve para cualquier app de LevoDev cambiando el *prefijo* (`komo`, etc.).
+
+## Pie de marca y comanda (MM3-01 · MM3-P1)
+- El pie de los tickets lleva el isotipo de LevoDev en 1 bit (`GS v 0`, 64x64) + «Hecho con KOMO|KIPU|KUTI - levodev.app» + el lema «Tu negocio, inteligente y bajo control.». El ticket sigue siendo del negocio del cliente; la comanda no lleva marca (MESA enorme, ítems en doble alto).
+- Impresora sin soporte de imagen: **APK 1.5.0** → Opciones avanzadas › «Pie con logo» (apagado = solo texto); **.exe 1.11** → botón «Pie con logo» de la ventana o `LEVO_IMAGEN=0` en `levoprint.txt`. El papel de prueba lleva el pie para verlo.
+- El mapa de bits es el mismo en los 6 render (`levodev-modules/tools/marca/isotipo_termico.mjs --check`).
