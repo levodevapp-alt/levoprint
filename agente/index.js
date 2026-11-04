@@ -1,13 +1,18 @@
 // ============================================================
-// LevoPrint · Agente de impresión v1.11 (ventana visual + vinculación por código + render servidor + pie con isotipo) · LevoDev
-// Corre en la PC del local. Poll cada 2s a komo_print_tomar,
-// renderiza ESC/POS y lo manda a la IP:puerto de cada estación.
-// Se empaqueta a LevoPrint.exe (Node SEA). El dueño solo edita
-// "levoprint.txt" (junto al .exe) con 3 datos:
-//   LEVO_URL=https://<ref>.supabase.co
-//   LEVO_ANON=<anon key>
-//   LEVO_DEVICE=<token uuid del dispositivo AGENTE>
-//   LEVO_MODO=consola   (opcional: imprime a consola, sin impresora)
+// LevoPrint · Agente de impresión v1.12 (vincular SOLO con el código + varias apps + arranque con Windows) · LevoDev
+// Corre en la PC del local. Poll cada 2-6 s a <prefijo>_print_tomar de CADA app
+// vinculada (KOMO, KIPU, KUTI...), renderiza ESC/POS y lo manda a la IP:puerto
+// de cada estación. Se empaqueta a LevoPrint.exe (Node SEA).
+// [LP-U1] Instalación en 3 pasos: descargar desde la app → abrir → escribir el
+// código (o nada, si el nombre del .exe ya lo trae). URL y anon del proyecto
+// compartido vienen DENTRO del programa; "levoprint.txt" (junto al .exe) es
+// opcional y sirve de override / memoria:
+//   LEVO_VINCULOS=komo:<device>,kuti:<device>   (lo escribe el propio agente)
+//   LEVO_URL / LEVO_ANON   (opcional: otro proyecto Supabase)
+//   LEVO_MODO=consola      (opcional: imprime a consola, sin impresora)
+//   LEVO_INICIO=0          (lo escribe el botón «Quitar» del arranque con Windows)
+// Compatibilidad: LEVO_DEVICE + LEVO_PREFIJO (config vieja de un solo vínculo)
+// se migran a LEVO_VINCULOS al arrancar.
 // Sin dependencias: Node >= 18 (fetch + net nativos).
 // ============================================================
 'use strict';
@@ -15,7 +20,7 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
-const { exec } = require('child_process');
+const { exec, execFile } = require('child_process');
 
 // --- ¿corro como .exe (SEA) o como `node index.js`? ---
 // Empaquetado como Single Executable App, `__dirname` no apunta a una
@@ -26,11 +31,29 @@ try { esExe = require('node:sea').isSea(); } catch { esExe = false; }
 const BASE_DIR = esExe ? path.dirname(process.execPath)
                        : (typeof __dirname === 'string' ? __dirname : process.cwd());
 
+// [LP-U1] Carpeta de levoprint.txt / levoprint.log: junto al .exe (lo de
+// siempre). Si ahí no se puede escribir (p. ej. Archivos de programa o un USB
+// de solo lectura) y aún no hay .txt, se usa %LOCALAPPDATA%\LevoPrint: sin
+// esto el vínculo se perdería al cerrar el programa. Se decide UNA vez.
+const DIR_RESPALDO = process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'LevoPrint') : null;
+function puedeEscribir(dir) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const p = path.join(dir, '.levoprint-prueba');
+    fs.writeFileSync(p, '');
+    fs.unlinkSync(p);
+    return true;
+  } catch { return false; }
+}
+const DIR_TXT = (fs.existsSync(path.join(BASE_DIR, 'levoprint.txt')) || !DIR_RESPALDO || puedeEscribir(BASE_DIR))
+  ? BASE_DIR : DIR_RESPALDO;
+const RUTA_TXT = path.join(DIR_TXT, 'levoprint.txt');
+
 // --- log a archivo (para soporte remoto) ---
 // Todo lo que sale por pantalla se guarda tambien en levoprint.log,
 // junto al programa, para que si la ventana se cierra igual quede el
 // rastro y el dueño pueda mandarnos el archivo. Se recorta si crece.
-const LOG_FILE = path.join(BASE_DIR, 'levoprint.log');
+const LOG_FILE = path.join(DIR_TXT, 'levoprint.log');
 try { if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > 1000000) fs.writeFileSync(LOG_FILE, ''); } catch { /* nada */ }
 function alArchivo(nivel, args) {
   try { fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${nivel} ${args.map(String).join(' ')}\n`); } catch { /* disco lleno / solo lectura */ }
@@ -42,10 +65,12 @@ console.error = (...a) => { _err(...a); alArchivo('ERR ', a); };
 // --- config: se lee de un archivo de texto junto al programa + entorno ---
 // El dueño solo edita "levoprint.txt" con el Bloc de notas. Se aceptan
 // tambien .env (compatibilidad) y variables de entorno.
+// [LP-U1] Un valor de la plantilla vieja sin completar («TU-PROYECTO»,
+// «PEGA-AQUI...») se IGNORA: así manda el valor que trae el programa.
 (function cargarConfig() {
   const candidatos = ['levoprint.txt', 'levoprint.config.txt', '.env'];
-  for (const nombre of candidatos) {
-    const f = path.join(BASE_DIR, nombre);
+  const dirs = DIR_TXT === BASE_DIR ? [BASE_DIR] : [DIR_TXT, BASE_DIR];
+  for (const f of dirs.flatMap((d) => candidatos.map((n) => path.join(d, n)))) {
     if (!fs.existsSync(f)) continue;
     // [canje-v3] El .txt viene del Bloc de notas: CRLF y a veces BOM UTF-8
     // al inicio (que pegaria al primer nombre de clave). Se limpian ambos.
@@ -53,17 +78,53 @@ console.error = (...a) => { _err(...a); alArchivo('ERR ', a); };
     for (const linea of crudo.split(/\r\n|\r|\n/)) {
       if (/^\s*(#|$)/.test(linea)) continue;              // comentarios y vacias
       const m = linea.match(/^\s*([A-Z0-9_]+)\s*=\s*(.+?)\s*$/);
-      if (m && !(m[1] in process.env)) process.env[m[1]] = m[2];
+      if (m && !/TU-PROYECTO|PEGA-AQUI/.test(m[2]) && !(m[1] in process.env)) process.env[m[1]] = m[2];
     }
   }
 })();
 
-const URL_BASE = process.env.LEVO_URL || process.env.KOMO_URL;
-const ANON = process.env.LEVO_ANON || process.env.KOMO_ANON;
-let DEVICE = process.env.LEVO_DEVICE || process.env.KOMO_DEVICE;   // let: el canje del codigo lo completa
-// let: el canje lo fija segun la letra del codigo (K=komo, P=kipu) y lo
-// guarda en levoprint.txt junto con el device.
-let PREFIJO = (process.env.LEVO_PREFIJO || 'komo').trim();
+// [LP-U1] Proyecto Supabase COMPARTIDO por KOMO, KIPU y KUTI (el mismo de
+// levoprint.sql "lp_supabase_url"/"lp_anon_key" y de Proyectos.kt del APK).
+// La anon es PÚBLICA (va en el front de las 3 apps): NUNCA poner aquí la
+// service role. Con esto el dueño vincula solo con el código, sin .txt.
+const URL_DEFECTO = 'https://krfljsososdakbatevci.supabase.co';
+const ANON_DEFECTO = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtyZmxqc29zb3NkYWtiYXRldmNpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgxOTU4MjQsImV4cCI6MjEwMzc3MTgyNH0.nYjVS4UW3jcOC_ho8UKt6H8j1ix_WgoMDyywdfBNlMs';
+const URL_BASE = process.env.LEVO_URL || process.env.KOMO_URL || URL_DEFECTO;
+const ANON = process.env.LEVO_ANON || process.env.KOMO_ANON || ANON_DEFECTO;
+
+// [LP-U1] Varias apps en un mismo LevoPrint: lista de vínculos. Cada uno es
+// { prefijo, device, nombre } + su estado en vivo (estaciones, desactivado...).
+// Se guarda en levoprint.txt como LEVO_VINCULOS=komo:<device>:<nombre>,...
+// (nombre con encodeURIComponent: puede traer «:» o «,»). La config vieja de
+// un solo vínculo (LEVO_DEVICE + LEVO_PREFIJO, o KOMO_DEVICE) se lee SOLO si
+// no hay LEVO_VINCULOS, y se migra al arrancar (migrarConfigVieja).
+let vinculos = [];
+// Prefijo «en curso» para el render local (firma/pie de marca, mensajes de la
+// consola). El ciclo y la prueba lo fijan al de cada vínculo justo antes de
+// renderizar (render es síncrono: no se cruza con otra vuelta).
+let PREFIJO = 'komo';
+function nuevoVinculo(prefijo, device, nombre) {
+  return {
+    prefijo: String(prefijo || 'komo').trim().toLowerCase(), device: String(device || '').trim(), nombre: String(nombre || ''),
+    estaciones: new Map(), cicloConfig: 0, ultimaSync: null, desactivado: null, proximoIntento: 0,
+  };
+}
+const esDeviceValido = (d) => /^[0-9a-f-]{20,}$/i.test(String(d || '')) && !/PEGA-AQUI/.test(String(d));
+(function leerVinculos() {
+  const crudo = String(process.env.LEVO_VINCULOS || '').trim();
+  if (crudo) {
+    for (const parte of crudo.split(',')) {
+      const [pfx, dev, nom] = parte.split(':');
+      let nombre = '';
+      try { nombre = decodeURIComponent(nom || ''); } catch { nombre = ''; }
+      if (pfx && esDeviceValido(dev) && !vinculos.some((v) => v.prefijo === pfx.trim().toLowerCase())) vinculos.push(nuevoVinculo(pfx, dev, nombre));
+    }
+  } else {
+    const dev = process.env.LEVO_DEVICE || process.env.KOMO_DEVICE;
+    if (esDeviceValido(dev)) vinculos.push(nuevoVinculo(process.env.LEVO_PREFIJO || 'komo', dev, ''));
+  }
+  if (vinculos.length) PREFIJO = vinculos[0].prefijo;
+})();
 // [canje-v4] Codigo de estacion rev 4: <letra de la app> + 8 del alfabeto sin
 // ambiguos. La letra dice a que proyecto llamar (no se prueba a ciegas: cada
 // CODIGO_INVALIDO suma al freno por IP). T = KUTI.
@@ -77,84 +138,52 @@ const NOMBRE_APP = { K: 'KOMO', P: 'KIPU', T: 'KUTI' };
 // let: se consume (vacia) tras el primer canje para no reintentarlo luego.
 // Normalizado como el servidor: sin espacios ni \r\n, en mayusculas.
 let CODIGO = normalizarCodigo(process.env.LEVO_CODIGO);
+// [LP-U1] Código en el NOMBRE del .exe: la app puede entregar el programa como
+// «LevoPrint-K7ABCD234.exe» o «LevoPrint (K-7ABC-D234).exe» (el navegador
+// agrega « (1)» si se baja dos veces). Al abrirlo se vincula solo, sin
+// escribir nada. El acceso directo de Inicio apunta a ESE MISMO .exe: el
+// código ya canjeado se recuerda en LEVO_CODIGOS_ARCHIVO (lista: varios .exe
+// pueden compartir carpeta y .txt, p. ej. Descargas) para no volver a
+// intentarlo en cada arranque. Solo se acepta el formato real (letra de app +
+// 8 del alfabeto sin ambiguos): «LevoPrint-Windows.exe» no dispara nada.
+function codigoDelNombre(nombreArchivo) {
+  const base = String(nombreArchivo || '')
+    .replace(/\.exe$/i, '')
+    .replace(/(\s*\(\d+\))+\s*$/, '')            // « (1)», « (2)» del navegador
+    .replace(/^\s*levo[\s_.-]*print/i, '');      // el nombre del programa no es parte del código
+  for (const c of [base, ...base.split(/[\s_()[\]{}]+/)]) {
+    const k = normalizarCodigo(c);
+    if (CODIGO_FORMATO.test(k)) return k;
+  }
+  return '';
+}
+// En desarrollo (node index.js) se puede simular el nombre con LEVO_NOMBRE_EXE.
+const CODIGO_ARCHIVO = codigoDelNombre(esExe ? path.basename(process.execPath) : (process.env.LEVO_NOMBRE_EXE || ''));
 const MODO_CONSOLA = ((process.env.LEVO_MODO || process.env.KOMO_MODO) || '') === 'consola';
 const INTERVALO_MS = 2000;      // con trabajo reciente: la comanda sale al toque
 const INTERVALO_MAX_MS = 6000;  // sin trabajo: se espacia de a poco hasta 6 s
 const CONFIG_CADA_MS = 60000;   // estaciones/impresoras: cada minuto
-// [O-23 · QA MEDIO-2] Versión de este agente: va en <prefijo>_agente_config (p.version = 'exe/1.11'). KUTI
+// [O-23 · QA MEDIO-2] Versión de este agente: va en <prefijo>_agente_config (p.version = 'exe/1.12'). KUTI
 // (kuti_turno_print) solo manda el papel TURNO a un local cuyos agentes vivos lo saben dibujar; KOMO/KIPU la ignoran.
-const VERSION_AGENTE = '1.11';
+const VERSION_AGENTE = '1.12';
 let ANCHO = Math.min(100, Math.max(20, parseInt(process.env.LEVO_ANCHO || '48', 10) || 48)); // [Re-QA] 20–100 como la ventana // columnas típicas de térmica 58mm (48) u 80mm (64/72)
 // [ventana] LEVO_SINVENTANA=1 (o corriendo como servicio de Windows): no abrir
 // navegador, pero la mini-GUI web se sigue sirviendo igual (soporte remoto).
 // [MM3-01 · MM3-P1 · 4-nov] LEVO_IMAGEN=0 (o no/false/texto): impresora vieja sin soporte de imagen (GS v 0) → el pie
 // de marca sale solo en texto. Se cambia también desde la ventana («Pie con logo») y se guarda en levoprint.txt.
 let CON_IMAGEN = !/^(0|no|false|texto)$/i.test(String(process.env.LEVO_IMAGEN || '1').trim());
-const SIN_VENTANA = /^(1|true|si|s[ií])$/i.test(String(process.env.LEVO_SINVENTANA || ''));
+// [LP-U1] «--inicio» lo pone el acceso directo de la carpeta Inicio de Windows: al encender la PC el
+// agente arranca minimizado y SIN abrir el navegador (la ventana sigue servida en 127.0.0.1:9110).
+const DESDE_INICIO = process.argv.slice(2).includes('--inicio');
+const SIN_VENTANA = DESDE_INICIO || /^(1|true|si|s[ií])$/i.test(String(process.env.LEVO_SINVENTANA || ''));
 const PUERTO_GUI_BASE = parseInt(process.env.LEVO_PUERTO_GUI || '9110', 10) || 9110;
 
-// Plantilla que se crea sola la primera vez, para que el dueño solo
-// tenga que pegar sus 3 datos y volver a abrir el programa.
-const PLANTILLA = [
-  '# ====== LevoPrint · Agente de impresion ======',
-  '# Pega aqui los 3 datos que te dio LevoDev y guarda (Ctrl+S).',
-  '# Luego cierra y vuelve a abrir LevoPrint.exe.',
-  '',
-  'LEVO_URL=https://TU-PROYECTO.supabase.co',
-  'LEVO_ANON=PEGA-AQUI-LA-CLAVE-ANON',
-  'LEVO_DEVICE=PEGA-AQUI-EL-TOKEN-DEL-AGENTE',
-  'LEVO_PREFIJO=komo',
-  '',
-  '# Opcional: para probar sin impresora, quita el # de la linea de abajo.',
-  '# LEVO_MODO=consola',
-  '',
-  '# Impresora vieja que no imprime imagenes: quita el # y el pie sale solo en texto.',
-  '# LEVO_IMAGEN=0',
-  ''
-].join('\r\n');
-
-function pausarYSalir(codigo) {
-  // En el .exe (doble clic) la ventana se cerraria de golpe y el dueño
-  // no alcanzaria a leer. Dejamos el mensaje en pantalla.
-  if (esExe) {
-    try {
-      process.stdout.write('\nPresiona ENTER para cerrar...');
-      fs.readSync(0, Buffer.alloc(1), 0, 1, null);
-    } catch { /* sin consola interactiva: igual salimos */ }
-  }
-  process.exit(codigo);
-}
-
-function faltaConfig() {
-  return !URL_BASE || !ANON || !DEVICE || /TU-PROYECTO|PEGA-AQUI/.test(String(URL_BASE) + ANON + DEVICE);
-}
-// Solo URL/ANON (sin exigir DEVICE): si estos dos estan bien, la mini-GUI
-// puede quedarse sirviendo la pagina para que el dueño vincule por codigo
-// SIN reiniciar el programa ni tocar el .txt a mano.
-function faltaUrlAnon() {
-  return !URL_BASE || !ANON || /TU-PROYECTO|PEGA-AQUI/.test(String(URL_BASE) + ANON);
-}
-function abortarSinConfig() {
-  const ruta = path.join(BASE_DIR, 'levoprint.txt');
-  let creada = false;
-  try {
-    if (!fs.existsSync(ruta)) { fs.writeFileSync(ruta, PLANTILLA, 'utf8'); creada = true; }
-  } catch { /* carpeta de solo lectura: se explica igual */ }
-  console.error('\n=============================================');
-  console.error(' LevoPrint · Agente de impresion — FALTA CONFIGURAR');
-  console.error('=============================================');
-  if (creada) {
-    console.error('Se acaba de crear el archivo:');
-    console.error('   ' + ruta);
-    console.error('Abrelo con el Bloc de notas, pega tus 3 datos');
-    console.error('(KOMO_URL, KOMO_ANON, KOMO_DEVICE), guarda y vuelve a abrir el programa.');
-  } else {
-    console.error('Edita el archivo "levoprint.txt" que esta junto a este programa');
-    console.error('y completa KOMO_URL, KOMO_ANON y KOMO_DEVICE (te los da LevoDev).');
-  }
-  console.error('=============================================\n');
-  pausarYSalir(1);
-}
+// [LP-U1] Ya no hace falta la plantilla con URL/ANON/DEVICE para pegar: el
+// programa trae el proyecto compartido y se vincula con el código desde la
+// ventana. faltaUrlAnon() queda solo por si alguien deja LEVO_URL/LEVO_ANON
+// vacíos a propósito en el entorno (no ocurre con el .txt: vacío se ignora).
+function faltaConfig() { return !vinculos.length; }
+function faltaUrlAnon() { return !URL_BASE || !ANON; }
 
 // [MM4-08] Tambien sin guiones ni puntos, por si la consola lo muestra en grupos (\u00ABK-ABCD-2345\u00BB):
 // solo quedan letras y numeros (mismo criterio que el APK; CODIGO_FORMATO rechaza el resto).
@@ -438,21 +467,23 @@ function horaLocal(){
 }
 // Imprime el papel de vinculado en la estación del código (por nombre) o, si no, en la primera
 // con IP. Devuelve { ok, mensaje } para la ventana; nunca lanza (el vínculo ya quedó hecho).
-async function imprimirVinculado(nombre){
+// [LP-U1] v = el vínculo recién hecho (cada app tiene sus propias estaciones).
+async function imprimirVinculado(v, nombre){
   try {
-    try { await refrescarConfig(DEVICE, PREFIJO); cicloConfig = Date.now(); } catch (_) { /* sin estaciones: se avisa abajo */ }
+    try { await refrescarConfig(v); } catch (_) { /* sin estaciones: se avisa abajo */ }
+    const estaciones = v.estaciones;
     const deCodigo = String(nombre || '').split(' · ')[0].trim().toLowerCase();
     // [QA MEDIO-1] Sin adivinar: la estación del código si tiene IP; si no, la ÚNICA con IP si hay
     // exactamente una; con varias o ninguna, se avisa (el .exe no imprime por Bluetooth).
     const conIp = [...estaciones.values()].filter((e) => e && e.ip);
     const est = conIp.find((e) => String(e.nombre || '').trim().toLowerCase() === deCodigo) || (conIp.length === 1 ? conIp[0] : null);
-    const texto = renderVinculado(nombre, horaLocal());
+    const texto = conPrefijo(v.prefijo, () => renderVinculado(nombre, horaLocal()));
     if (MODO_CONSOLA || !est) {
       console.log('[vinculado] ' + paraConsola(texto, ' '));
       if (MODO_CONSOLA) return { ok: true, mensaje: 'Modo consola: el papel de prueba se mostró en la consola.' };
       return { ok: false, mensaje: conIp.length
-        ? 'No salió el papel de prueba: hay varias impresoras y no se sabe cuál es la de esta estación. Revisa el nombre de la estación en ' + consolaDe(PREFIJO) + '.'
-        : 'No salió el papel de prueba: falta la IP de la impresora en ' + consolaDe(PREFIJO) + '.' };
+        ? 'No salió el papel de prueba: hay varias impresoras y no se sabe cuál es la de esta estación. Revisa el nombre de la estación en ' + consolaDe(v.prefijo) + '.'
+        : 'No salió el papel de prueba: falta la IP de la impresora en ' + consolaDe(v.prefijo) + '.' };
     }
     await imprimirRaw(est.ip, est.puerto || 9100, texto);
     console.log('[vinculado] papel de prueba -> ' + est.nombre + ' (' + est.ip + ')');
@@ -593,9 +624,10 @@ async function renderRemoto(job, pfx) {
   return Buffer.from(j.esc, 'base64').toString('binary');
 }
 
-// --- ciclo principal ---
-let estaciones = new Map(); // id -> {nombre, ip, puerto}
-let cicloConfig = 0;            // ms de la última lectura de config
+/// --- ciclo principal ---
+// [LP-U1] UN solo bucle atiende TODOS los vínculos (una app tras otra en cada
+// vuelta). Cada vínculo lleva su token, sus estaciones, su relectura de config
+// y su estado de desactivado; si una app falla, las demás siguen imprimiendo.
 let espera = INTERVALO_MS;
 // [qa4] Control del ciclo: un solo bucle vivo. cicloEnCurso = hay una vuelta
 // ejecutandose; cicloTimer = la proxima vuelta programada. despertarCiclo()
@@ -609,6 +641,8 @@ let cicloTimer = null;
 // [qa5] Backoff para el "equipo olvidado": 45 s la primera hora, luego cada
 // 5 min y, pasadas 24 h, cada 15 min. Abrir la ventana o vincular un codigo
 // despierta el ciclo al instante.
+// [LP-U1] El backoff es POR vínculo (v.proximoIntento): una app desactivada no
+// frena a las otras.
 const HORA_MS = 3600000;
 function esperaDesactivado(desdeTs) {
   const t = Date.now() - desdeTs;
@@ -628,95 +662,126 @@ let ultimoDespertarGui = 0;
 
 // [gui] Estado en vivo que consume la mini-GUI web (GET /estado). Nada de
 // esto altera el ciclo de impresion: solo se lee/escribe para informar.
+// (El desactivado y la última sincronización ahora van en cada vínculo.)
 const guiEstado = {
   imprimiendo: false,       // true mientras se procesa un job ahora mismo
   ultimoError: null,        // { mensaje, ts } del ultimo job o ciclo fallido
   ultimoOk: null,           // ts del ultimo job impreso ok
-  ultimaSync: null,         // ts de la ultima vez que refrescarConfig() respondio
-  desactivado: null,        // [qa4] { mensaje, ts } mientras el servidor responda AGENTE_INVALIDO
 };
 
-async function refrescarConfig(dev, pfx) {
-  const cfg = await rpc(`${pfx}_agente_config`, { device: dev, version: 'exe/' + VERSION_AGENTE });
-  estaciones = new Map((cfg.estaciones || []).map((e) => [e.id, e]));
-  guiEstado.ultimaSync = Date.now();
-  console.log(`[cfg] ${estaciones.size} estaciones:`,
-    [...estaciones.values()].map((e) => `${e.nombre}@${e.ip || 'SIN-IP'}:${e.puerto}`).join(' · '));
+// Render local con el prefijo del vínculo (pie de marca de SU app).
+function conPrefijo(pfx, fn) {
+  const antes = PREFIJO;
+  PREFIJO = pfx || antes;
+  try { return fn(); } finally { PREFIJO = antes; }
 }
 
-async function ciclo() {
-  cicloTimer = null;
-  cicloEnCurso = true;
-  // Token de ESTA vuelta: si a media vuelta se canjea un codigo nuevo, los
-  // trabajos ya tomados se marcan con el token que los tomo, y un
-  // AGENTE_INVALIDO del token viejo no pisa el estado del nuevo.
-  const dev = DEVICE;
-  const pfx = PREFIJO;
+async function refrescarConfig(v) {
+  const dev = v.device;
+  const cfg = await rpc(`${v.prefijo}_agente_config`, { device: dev, version: 'exe/' + VERSION_AGENTE });
+  v.estaciones = new Map((cfg.estaciones || []).map((e) => [e.id, e]));
+  v.ultimaSync = Date.now();
+  v.cicloConfig = Date.now();
+  console.log(`[cfg ${v.prefijo}] ${v.estaciones.size} estaciones:`,
+    [...v.estaciones.values()].map((e) => `${e.nombre}@${e.ip || 'SIN-IP'}:${e.puerto}`).join(' · '));
+}
+
+// Una vuelta de UN vínculo. Devuelve cuántos trabajos atendió.
+// Token y prefijo son los del objeto v: si a media vuelta se canjea un código
+// nuevo de la misma app, el vínculo NUEVO es otro objeto, los trabajos ya
+// tomados se marcan con el token que los tomó y un AGENTE_INVALIDO del token
+// viejo no pisa el estado del nuevo.
+async function cicloVinculo(v) {
+  const dev = v.device, pfx = v.prefijo;
+  const vigente = () => vinculos.includes(v);
   try {
-    if (Date.now() - cicloConfig >= CONFIG_CADA_MS) { await refrescarConfig(dev, pfx); cicloConfig = Date.now(); }
+    if (Date.now() - v.cicloConfig >= CONFIG_CADA_MS) await refrescarConfig(v);
     const r = await rpc(`${pfx}_print_tomar`, { device: dev, limite: 10 });
-    if (guiEstado.desactivado && dev === DEVICE) {
-      console.log('[agente] el servidor volvio a aceptar este equipo: retomo la impresion.');
-      guiEstado.desactivado = null;
+    if (v.desactivado && vigente()) {
+      console.log(`[agente ${pfx}] el servidor volvio a aceptar este equipo: retomo la impresion.`);
+      v.desactivado = null;
+      v.proximoIntento = 0;
     }
-    // Espera progresiva: con trabajos vuelve a 2 s; vacío, suma 1 s hasta 6 s.
-    // (Antes 2 s fijos, las 24 h: 43 mil consultas al día por local.)
-    espera = (r.jobs && r.jobs.length) ? INTERVALO_MS : Math.min(INTERVALO_MAX_MS, espera + 1000);
-    for (const job of r.jobs || []) {
-      const est = estaciones.get(job.estacion);
+    const jobs = r.jobs || [];
+    for (const job of jobs) {
+      const est = v.estaciones.get(job.estacion);
       guiEstado.imprimiendo = true;
       try {
         // Render en el SERVIDOR (formato siempre al día); respaldo local si cae.
         let texto;
         try { texto = await renderRemoto(job, pfx); }
-        catch (_) { texto = render(job); }
+        catch (_) { texto = conPrefijo(pfx, () => render(job)); }
         if (MODO_CONSOLA || !est || !est.ip) {
-          console.log(`\n--- JOB ${job.id} (${job.tipo}) -> ${est ? est.nombre : 'SIN ESTACION'} ---`);
+          console.log(`\n--- JOB ${pfx} ${job.id} (${job.tipo}) -> ${est ? est.nombre : 'SIN ESTACION'} ---`);
           console.log(paraConsola(texto));
           if (!MODO_CONSOLA && (!est || !est.ip)) throw new Error('estacion sin IP');
         } else {
           await imprimirRaw(est.ip, est.puerto || 9100, texto);
-          console.log(`[ok] job ${job.id} ${job.tipo} -> ${est.nombre} (${est.ip})`);
+          console.log(`[ok] ${pfx} job ${job.id} ${job.tipo} -> ${est.nombre} (${est.ip})`);
         }
         await rpc(`${pfx}_print_marcar`, { device: dev, id: job.id, ok: true });
         guiEstado.ultimoOk = Date.now();
       } catch (e) {
-        console.error(`[err] job ${job.id}: ${e.message}`);
+        console.error(`[err] ${pfx} job ${job.id}: ${e.message}`);
         guiEstado.ultimoError = { mensaje: e.message, ts: Date.now() };
-        await rpc(`${pfx}_print_marcar`, { device: dev, id: job.id, ok: false, error: e.message });
+        try { await rpc(`${pfx}_print_marcar`, { device: dev, id: job.id, ok: false, error: e.message }); }
+        catch (_) { /* sin red: el trabajo vuelve a la cola por el servidor */ }
       } finally {
         guiEstado.imprimiendo = false;
       }
     }
+    return jobs.length;
   } catch (e) {
     if (esAgenteInvalido(e)) {
       // [qa4] Desactivado o reemplazado en la consola. NO se olvida el token
-      // (el dueno puede reactivarlo): se pausa y se reintenta cada 45 s. La
+      // (el dueno puede reactivarlo): se pausa ESTE vínculo con backoff. La
       // mini-GUI muestra el aviso y acepta un codigo nuevo.
-      if (dev === DEVICE) {
-        if (!guiEstado.desactivado) {
-          console.error('[agente] ' + msgDesactivado(pfx));
-          guiEstado.desactivado = { prefijo: pfx, desde: Date.now(), ts: Date.now() };
+      if (vigente()) {
+        if (!v.desactivado) {
+          console.error(`[agente ${pfx}] ` + msgDesactivado(pfx));
+          v.desactivado = { prefijo: pfx, desde: Date.now(), ts: Date.now() };
         }
-        guiEstado.desactivado.ts = Date.now(); // ultimo intento
-        espera = esperaDesactivado(guiEstado.desactivado.desde);
-        cicloConfig = 0; // al volver, lo primero es releer estaciones
+        v.desactivado.ts = Date.now(); // ultimo intento
+        v.proximoIntento = Date.now() + esperaDesactivado(v.desactivado.desde);
+        v.cicloConfig = 0; // al volver, lo primero es releer estaciones
       }
     } else {
-      console.error('[ciclo]', e.message);
+      console.error(`[ciclo ${pfx}]`, e.message);
       guiEstado.ultimoError = { mensaje: e.message, ts: Date.now() };
     }
-  } finally {
-    cicloEnCurso = false;
-    if (DEVICE) cicloTimer = setTimeout(ciclo, espera);
+    return 0;
   }
 }
 
-// Adelanta la proxima vuelta (tras un canje). Si hay una vuelta en curso, su
-// finally ya programa la siguiente con la espera corta.
-function despertarCiclo() {
-  cicloConfig = 0;
+async function ciclo() {
+  cicloTimer = null;
+  cicloEnCurso = true;
+  let hubo = 0;
+  try {
+    for (const v of vinculos.slice()) {
+      if (v.desactivado && Date.now() < v.proximoIntento) continue;
+      hubo += await cicloVinculo(v);
+    }
+  } finally {
+    // Espera progresiva: con trabajos vuelve a 2 s; vacío, suma 1 s hasta 6 s.
+    // (Antes 2 s fijos, las 24 h: 43 mil consultas al día por local.)
+    espera = hubo ? INTERVALO_MS : Math.min(INTERVALO_MAX_MS, espera + 1000);
+    // Si TODOS están desactivados, se duerme hasta el próximo reintento.
+    let prox = espera;
+    if (vinculos.length && vinculos.every((v) => v.desactivado)) {
+      prox = Math.max(INTERVALO_MS, Math.min(...vinculos.map((v) => v.proximoIntento)) - Date.now());
+    }
+    cicloEnCurso = false;
+    if (vinculos.length) cicloTimer = setTimeout(ciclo, prox);
+  }
+}
+
+// Adelanta la proxima vuelta (tras un canje o al abrir la ventana). Con
+// reintentar=true también corta la pausa de los vínculos desactivados. Si hay
+// una vuelta en curso, su finally ya programa la siguiente con la espera corta.
+function despertarCiclo(reintentar) {
   espera = INTERVALO_MS;
+  if (reintentar) for (const v of vinculos) v.proximoIntento = 0;
   if (cicloEnCurso) return;
   if (cicloTimer) { clearTimeout(cicloTimer); cicloTimer = null; }
   ciclo();
@@ -727,7 +792,7 @@ function despertarCiclo() {
 // regex ^LEVO_DEVICE no la veia (y se agregaba un segundo LEVO_DEVICE que al
 // releer perdia contra el primero). Se quita el BOM, se edita y se repone.
 function editarTxt(fn) {
-  const ruta = path.join(BASE_DIR, 'levoprint.txt');
+  const ruta = RUTA_TXT; // [LP-U1] junto al .exe o, si ahí no se puede escribir, en %LOCALAPPDATA%\LevoPrint
   const crudo = fs.existsSync(ruta) ? fs.readFileSync(ruta, 'utf8') : '';
   const bom = crudo.charCodeAt(0) === 0xFEFF ? '\uFEFF' : '';
   const txt = bom ? crudo.slice(1) : crudo;
@@ -739,6 +804,34 @@ function ponerClave(txt, clave, valor) {
   const re = new RegExp('^[ \\t]*' + clave + '[ \\t]*=.*$', 'im');
   if (re.test(txt)) return txt.replace(re, clave + '=' + valor);
   return txt + (txt.endsWith('\n') || txt === '' ? '' : '\r\n') + clave + '=' + valor + '\r\n';
+}
+
+// [LP-U1] Guarda la lista de vínculos (LEVO_VINCULOS). El PRIMERO también
+// queda como LEVO_DEVICE/LEVO_PREFIJO: si alguien vuelve a abrir un .exe
+// anterior (1.11 o menos), sigue imprimiendo al menos esa app.
+// usado = true tras un canje: comenta LEVO_CODIGO (el canje es de un uso).
+function textoVinculos() {
+  return vinculos.map((v) => v.prefijo + ':' + v.device + (v.nombre ? ':' + encodeURIComponent(v.nombre) : '')).join(',');
+}
+function persistirVinculos(usado, extra) {
+  try {
+    editarTxt((txt) => {
+      if (usado) txt = txt.replace(/^[ \t]*LEVO_CODIGO[ \t]*=.*$/gim, '# LEVO_CODIGO usado');
+      txt = ponerClave(txt, 'LEVO_VINCULOS', textoVinculos());
+      if (vinculos[0]) {
+        txt = ponerClave(txt, 'LEVO_DEVICE', vinculos[0].device);
+        txt = ponerClave(txt, 'LEVO_PREFIJO', vinculos[0].prefijo);
+      }
+      return extra ? extra(txt) : txt;
+    });
+    return true;
+  } catch (_) { return false; /* carpeta de solo lectura: queda en memoria esta sesion */ }
+}
+// Config vieja de un solo vínculo (LEVO_DEVICE + LEVO_PREFIJO): se pasa a
+// LEVO_VINCULOS una vez, al arrancar. No borra las claves viejas.
+function migrarConfigVieja() {
+  if (String(process.env.LEVO_VINCULOS || '').trim() || !vinculos.length) return;
+  if (persistirVinculos(false)) console.log('[cfg] config de un solo vinculo migrada a LEVO_VINCULOS.');
 }
 
 // [qa4] Nombre de la pantalla de la consola segun la app. Rev 5: toda
@@ -794,9 +887,9 @@ function mensajeCanje(err, segundos, app, prefijo, seccion) {
 async function canjearCodigo(codigoIn) {
   const cod = normalizarCodigo(codigoIn || CODIGO);
   if (!cod) return { ok: false, error: 'SIN_CODIGO', mensaje: mensajeCanje('SIN_CODIGO') };
-  // Con token vigente no se canjea; si esta DESACTIVADO, si (el token viejo
-  // se reemplaza solo si este canje sale bien).
-  if (DEVICE && !guiEstado.desactivado) return { ok: false, error: 'YA_VINCULADO', mensaje: 'Este agente ya está vinculado.' };
+  // [LP-U1] Ya no se rechaza «ya vinculado»: un código de OTRA app agrega un
+  // vínculo; uno de la MISMA app reemplaza al de esa app (re-vincular, o
+  // equipo desactivado). El token viejo se cambia recién si el canje sale bien.
   if (!URL_BASE || !ANON) return { ok: false, error: 'FALTA_URL_ANON', mensaje: 'Falta LEVO_URL/LEVO_ANON en levoprint.txt.' };
   if (!codigoIn) CODIGO = ''; // el del .txt se intenta UNA vez por sesion (el canje es de un uso)
   // Formato y letra se revisan aqui: un codigo mal escrito no gasta un
@@ -833,21 +926,15 @@ async function canjearCodigo(codigoIn) {
     console.error(msg);
     return { ok: false, error: 'RESPUESTA_INCOMPLETA', mensaje: msg };
   }
-  DEVICE = d.device;
-  process.env.LEVO_DEVICE = d.device;
   // El prefijo del bundle manda; si no viene, el de la letra. Se guarda en el
-  // .txt para que al reabrir el ciclo llame al proyecto correcto.
-  PREFIJO = String(d.prefijo || prefijoCod).trim();
-  process.env.LEVO_PREFIJO = PREFIJO;
-  if (d.seccion) seccionVista[PREFIJO.toLowerCase()] = String(d.seccion).trim();
-  try {
-    editarTxt((txt) => {
-      txt = txt.replace(/^[ \t]*LEVO_CODIGO[ \t]*=.*$/gim, '# LEVO_CODIGO usado');
-      txt = ponerClave(txt, 'LEVO_DEVICE', d.device);
-      return ponerClave(txt, 'LEVO_PREFIJO', PREFIJO);
-    });
-  } catch (_) { /* carpeta de solo lectura: queda en memoria esta sesion */ }
-  guiEstado.desactivado = null;
+  // .txt (LEVO_VINCULOS) para que al reabrir el ciclo llame al proyecto correcto.
+  // [LP-U1] Vínculo NUEVO (otro objeto): la vuelta en curso termina con el viejo.
+  const v = nuevoVinculo(String(d.prefijo || prefijoCod).trim(), d.device, d.nombre || '');
+  const i = vinculos.findIndex((x) => x.prefijo === v.prefijo);
+  if (i >= 0) vinculos[i] = v; else vinculos.push(v);
+  if (vinculos.length === 1) PREFIJO = v.prefijo;
+  if (d.seccion) seccionVista[v.prefijo] = String(d.seccion).trim();
+  persistirVinculos(true);
   guiEstado.ultimoError = null;
   // modo/reemplazara (rev 4): el servidor apaga a los anteriores recien con
   // el PRIMER trabajo IMPRESO de este agente; hasta entonces los dos imprimen.
@@ -857,7 +944,11 @@ async function canjearCodigo(codigoIn) {
     : (d.modo === 'reemplazar' && n > 1) ? `Cuando imprimas tu primera comanda, se apagarán los ${n} equipos anteriores.`
     : d.modo === 'adicional' ? 'Quedó como equipo adicional.' : '';
   console.log('Vinculado como: ' + (d.nombre || 'estacion') + '. Listo.' + (aviso ? ' ' + aviso : '') + (d.reintento ? ' (reintento)' : ''));
-  return { ok: true, nombre: d.nombre, modo: d.modo || null, reemplazara: n, reintento: !!d.reintento, aviso };
+  // vinculo: no enumerable (lleva un Map): no sale en el JSON de /vincular.
+  const res = { ok: true, nombre: d.nombre, prefijo: v.prefijo, app: APP_POR_PREFIJO[v.prefijo] || v.prefijo.toUpperCase(),
+    modo: d.modo || null, reemplazara: n, reintento: !!d.reintento, aviso };
+  Object.defineProperty(res, 'vinculo', { value: v, enumerable: false });
+  return res;
 }
 
 // Persiste LEVO_ANCHO en levoprint.txt (mismo patron que LEVO_DEVICE arriba).
@@ -867,10 +958,90 @@ function persistirImagen(valor) {
 }
 function persistirAncho(valor) {
   try {
-    const ruta = path.join(BASE_DIR, 'levoprint.txt');
     editarTxt((txt) => ponerClave(txt, 'LEVO_ANCHO', valor));
     return true;
   } catch (_) { return false; /* carpeta de solo lectura: queda en memoria esta sesion */ }
+}
+
+// ============================================================
+// [LP-U1] Arranque automático con Windows (sin permisos de administrador y
+// sin .bat aparte; reemplaza instalar-inicio.bat / quitar-inicio.bat del
+// agente de KOMO). Al vincular con éxito se crea «LevoPrint.lnk» en la
+// carpeta Inicio DEL USUARIO (%APPDATA%\Microsoft\Windows\Start Menu\
+// Programs\Startup) apuntando a ESTE .exe con «--inicio»: al encender la PC
+// arranca minimizado y sin abrir el navegador. El botón «Quitar» de la
+// ventana borra el acceso y deja LEVO_INICIO=0 para no volver a crearlo solo.
+// LEVO_INICIO_EXE recuerda a qué .exe apunta: si el programa se movió de
+// carpeta, al abrirlo a mano se corrige el acceso.
+// ============================================================
+const NOMBRE_LNK = 'LevoPrint.lnk';
+function carpetaInicio() {
+  if (process.platform !== 'win32' || !process.env.APPDATA) return null;
+  return path.join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
+}
+function rutaLnk() { const c = carpetaInicio(); return c ? path.join(c, NOMBRE_LNK) : null; }
+function inicioActivo() { const r = rutaLnk(); try { return !!r && fs.existsSync(r); } catch { return false; } }
+// Solo el .exe empaquetado: en desarrollo (node index.js) el acceso apuntaría a node.exe.
+const inicioDisponible = () => esExe && !!carpetaInicio();
+
+function crearAccesoInicio() {
+  return new Promise((resolve) => {
+    if (!inicioDisponible()) return resolve({ ok: false, mensaje: 'El arranque automático solo existe en LevoPrint.exe para Windows.' });
+    try { fs.mkdirSync(carpetaInicio(), { recursive: true }); } catch { /* ya existe */ }
+    // Las rutas viajan por variables de entorno, NO dentro del comando: una
+    // carpeta con comillas, «$» o tildes no rompe nada. Sin -ExecutionPolicy
+    // Bypass (no hace falta con -Command y los antivirus lo miran feo).
+    const ps = '$w = New-Object -ComObject WScript.Shell; $s = $w.CreateShortcut($env:LP_LNK); '
+      + '$s.TargetPath = $env:LP_EXE; $s.Arguments = \'--inicio\'; $s.WorkingDirectory = $env:LP_DIR; '
+      + '$s.WindowStyle = 7; $s.Description = \'LevoPrint - impresion de KOMO, KIPU y KUTI\'; $s.Save()';
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], {
+      windowsHide: true, timeout: 20000,
+      env: { ...process.env, LP_LNK: rutaLnk(), LP_EXE: process.execPath, LP_DIR: path.dirname(process.execPath) },
+    }, (err) => {
+      if (err || !inicioActivo()) {
+        console.error('[inicio] no se pudo crear el acceso directo de inicio: ' + (err ? err.message : 'no aparecio el archivo'));
+        return resolve({ ok: false, mensaje: 'No se pudo activar el arranque automático. Puedes abrir LevoPrint a mano al encender la PC.' });
+      }
+      try { editarTxt((txt) => ponerClave(ponerClave(txt, 'LEVO_INICIO', '1'), 'LEVO_INICIO_EXE', process.execPath)); } catch (_) { /* solo lectura */ }
+      process.env.LEVO_INICIO = '1';
+      process.env.LEVO_INICIO_EXE = process.execPath;
+      console.log('[inicio] LevoPrint arrancara solo al encender la PC (' + rutaLnk() + ').');
+      resolve({ ok: true, mensaje: 'LevoPrint se abrirá solo al encender la PC.' });
+    });
+  });
+}
+
+function quitarAccesoInicio() {
+  try {
+    const r = rutaLnk();
+    if (r && fs.existsSync(r)) fs.unlinkSync(r);
+  } catch (e) {
+    console.error('[inicio] no se pudo quitar el acceso directo: ' + e.message);
+    return { ok: false, mensaje: 'No se pudo quitar el arranque automático.' };
+  }
+  try { editarTxt((txt) => ponerClave(txt, 'LEVO_INICIO', '0')); } catch (_) { /* solo lectura */ }
+  process.env.LEVO_INICIO = '0';
+  console.log('[inicio] arranque automatico quitado.');
+  return { ok: true, mensaje: 'Listo: LevoPrint ya no se abrirá solo. Puedes abrirlo a mano cuando quieras.' };
+}
+
+// Al abrir el programa a mano con vínculos: si falta el acceso (versión
+// anterior, o se movió el .exe) y el dueño no lo quitó, se crea/corrige.
+async function revisarInicioAlArrancar() {
+  if (!inicioDisponible() || !vinculos.length || DESDE_INICIO) return;
+  if (String(process.env.LEVO_INICIO || '').trim() === '0') return;
+  if (inicioActivo() && process.env.LEVO_INICIO_EXE === process.execPath) return;
+  await crearAccesoInicio();
+}
+
+// Después de un canje exitoso (ventana, .txt o nombre del .exe): ciclo al
+// instante, papel de prueba y arranque con Windows.
+async function trasVincular(r) {
+  despertarCiclo(true);
+  // [MM4-06] Papel de prueba. [QA BAJO-4] Recanje idempotente (reintento): ya salió la primera vez.
+  if (!r.reintento) r.papel = await imprimirVinculado(r.vinculo, r.nombre);
+  if (inicioDisponible()) r.inicio = await crearAccesoInicio();
+  return r;
 }
 
 // ============================================================
@@ -897,18 +1068,25 @@ function responderJson(res, code, obj) {
 function estadoActual() {
   const vinculado = !faltaConfig();
   const sinUrlAnon = faltaUrlAnon();
-  const listaEst = [...estaciones.values()].map((e) => ({
-    id: e.id, nombre: e.nombre, ip: e.ip || null, puerto: e.puerto || 9100,
+  const lista = vinculos.map((v) => ({
+    prefijo: v.prefijo,
+    app: APP_POR_PREFIJO[v.prefijo] || v.prefijo.toUpperCase(),
+    nombre: v.nombre || '',
+    seccion: seccionVista[v.prefijo] || SECCION_POR_PREFIJO[v.prefijo] || '',
+    desactivado: textoDesactivado(v.desactivado),
+    ultimaSync: v.ultimaSync,
+    estaciones: [...v.estaciones.values()].map((e) => ({ id: e.id, nombre: e.nombre, ip: e.ip || null, puerto: e.puerto || 9100 })),
   }));
   let semaforo = 'sin_vincular';
   if (sinUrlAnon) semaforo = 'sin_configurar';
   else if (!vinculado) semaforo = 'sin_vincular';
-  else if (guiEstado.desactivado) semaforo = 'desactivado';
+  else if (vinculos.every((v) => v.desactivado)) semaforo = 'desactivado';
   else if (guiEstado.imprimiendo) semaforo = 'imprimiendo';
   else if (guiEstado.ultimoError && (!guiEstado.ultimoOk || guiEstado.ultimoError.ts > guiEstado.ultimoOk)) semaforo = 'sin_impresora';
   else semaforo = 'conectado';
   return {
     ok: true,
+    levoprint: true,          // [LP-U1] la otra copia de LevoPrint se reconoce por esto (buscarOtraInstancia)
     version: VERSION_AGENTE,
     modoConsola: MODO_CONSOLA,
     ancho: ANCHO,
@@ -917,27 +1095,36 @@ function estadoActual() {
     sinUrlAnon,
     vinculado,
     semaforo,
-    estaciones: listaEst,
+    vinculos: lista,
+    // compatibilidad con la ventana anterior: todas las estaciones juntas
+    estaciones: lista.flatMap((v) => v.estaciones),
     ultimoError: guiEstado.ultimoError,
     ultimoOk: guiEstado.ultimoOk,
-    ultimaSync: guiEstado.ultimaSync,
-    desactivado: textoDesactivado(guiEstado.desactivado),
+    ultimaSync: Math.max(0, ...vinculos.map((v) => v.ultimaSync || 0)) || null,
+    desactivado: vinculos.length && vinculos.every((v) => v.desactivado) ? textoDesactivado(vinculos[0].desactivado) : null,
+    inicio: { disponible: inicioDisponible(), activo: inicioActivo() },
+    aviso: guiEstado.aviso || null,   // resultado del vínculo automático (nombre del .exe / .txt)
   };
 }
 
+// [LP-U1] Ventana guiada para alguien que no es técnico: «1. Escribe el código
+// que ves en tu app · 2. Listo». Las apps vinculadas se listan con sus
+// impresoras y un «Probar» por impresora; los ajustes (papel, logo, arranque
+// con Windows) van abajo, en chico. Todo texto del servidor se escapa.
 function paginaHtml() {
   return `<!doctype html>
 <html lang="es">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LevoPrint · Agente</title>
+<title>LevoPrint</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
   body { margin:0; font-family: system-ui, Segoe UI, Arial, sans-serif; background:#0f1115; color:#e8e8ea; padding:24px; }
   .card { max-width:560px; margin:0 auto; background:#171a21; border:1px solid #262b36; border-radius:14px; padding:22px; }
-  h1 { font-size:18px; margin:0 0 4px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  h2 { font-size:15px; margin:18px 0 8px; }
   .sub { color:#8a8f9c; font-size:13px; margin-bottom:18px; }
   .semaforo { display:flex; align-items:center; gap:10px; padding:12px 14px; border-radius:10px; margin-bottom:16px; font-weight:600; }
   .dot { width:12px; height:12px; border-radius:50%; flex:0 0 auto; }
@@ -945,53 +1132,63 @@ function paginaHtml() {
   .warn { background:#3a2f10; color:#f2c14e; } .warn .dot { background:#f2c14e; }
   .bad { background:#3a1414; color:#ff8080; } .bad .dot { background:#ff8080; }
   .info { background:#12242f; color:#67c1ff; } .info .dot { background:#67c1ff; }
-  .fila { display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-top:1px solid #262b36; font-size:14px; }
-  .fila:first-of-type { border-top:none; }
+  .paso { display:flex; gap:10px; align-items:flex-start; margin:10px 0; font-size:14px; }
+  .num { flex:0 0 auto; width:24px; height:24px; border-radius:50%; background:#3a6df0; color:#fff; font-weight:700; display:flex; align-items:center; justify-content:center; font-size:13px; }
+  .fila { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:10px 0; border-top:1px solid #262b36; font-size:14px; }
+  .app { border:1px solid #262b36; border-radius:10px; padding:10px 12px; margin-bottom:10px; }
+  .app .fila:first-of-type { border-top:none; }
   .muted { color:#8a8f9c; }
   button, input { font: inherit; }
-  input[type=text] { width:100%; padding:10px 12px; border-radius:8px; border:1px solid #333a48; background:#0f1115; color:#e8e8ea; margin-bottom:10px; letter-spacing:2px; text-transform:uppercase; }
+  input[type=text] { width:100%; padding:12px; border-radius:8px; border:1px solid #333a48; background:#0f1115; color:#e8e8ea; margin-bottom:10px; letter-spacing:3px; text-transform:uppercase; font-size:18px; text-align:center; }
   button { padding:10px 16px; border-radius:8px; border:0; background:#3a6df0; color:#fff; cursor:pointer; font-weight:600; }
   button:hover { background:#2f5bd0; }
   button.secundario { background:#262b36; }
+  button.chico { padding:6px 10px; font-size:13px; }
+  button.ancho { width:100%; padding:12px; }
   button:disabled { opacity:.5; cursor:default; }
   .msg { font-size:13px; margin-top:10px; min-height:16px; }
   .msg.err { color:#ff8080; } .msg.ok { color:#5fe08a; } .msg.warn { color:#f2c14e; }
+  details { margin-top:16px; border-top:1px solid #262b36; padding-top:8px; }
+  summary { cursor:pointer; color:#8a8f9c; font-size:14px; padding:6px 0; }
   footer { text-align:center; color:#4c5261; font-size:12px; margin-top:18px; }
 </style>
 </head>
 <body>
   <div class="card">
-    <h1>LevoPrint · Agente de impresion</h1>
-    <div class="sub">Ventana de estado local — no necesita internet para verse.</div>
+    <h1>LevoPrint</h1>
+    <div class="sub">Imprime los pedidos y tickets de KOMO, KIPU y KUTI en esta PC.</div>
 
     <div id="semaforo" class="semaforo info"><span class="dot"></span><span id="semaforoTexto">Cargando...</span></div>
 
-    <div id="vinculoBox" style="display:none">
-      <div class="fila"><b>Vincular este agente</b></div>
-      <input id="codigo" type="text" maxlength="13" placeholder="CÓDIGO DE VINCULACIÓN (9 LETRAS Y NÚMEROS)">
-      <div class="sub" style="margin:-4px 0 10px">Lo ves en KOMO › Estaciones, KIPU › Impresoras o KUTI › Impresoras. Dura 15 min.</div>
-      <button id="btnVincular">Vincular</button>
+    <div id="vinculoBox">
+      <h2 id="vinculoTitulo">Vincula esta PC en 2 pasos</h2>
+      <div class="paso"><span class="num">1</span><span>Escribe el código que ves en tu app<br><span class="muted">KOMO › Estaciones, KIPU › Impresoras o KUTI › Impresoras. Son 9 letras y números, y dura 15 minutos.</span></span></div>
+      <input id="codigo" type="text" maxlength="16" autocomplete="off" spellcheck="false" placeholder="K1234ABCD">
+      <button id="btnVincular" class="ancho">Vincular</button>
       <div id="msgVinculo" class="msg"></div>
+      <div class="paso" id="paso2"><span class="num">2</span><span>Listo. Sale un papel de prueba y LevoPrint queda imprimiendo solo. Puedes cerrar esta página; no cierres la ventana negra de LevoPrint (puedes minimizarla).</span></div>
     </div>
 
-    <div id="estacionesBox"></div>
+    <div id="appsBox"></div>
 
-    <div class="fila">
-      <span>Ancho de papel</span>
-      <span id="anchoTexto" class="muted">-</span>
-    </div>
-
-    <div class="fila">
-      <span>Pie con logo (imagen)</span>
-      <span><span id="imagenTexto" class="muted">-</span> <button id="btnImagen" class="secundario" style="margin-left:8px">Cambiar</button></span>
-    </div>
-
-    <div style="margin-top:14px; display:flex; gap:10px;">
-      <button id="btnPrueba">Imprimir prueba</button>
-      <button id="btn58" class="secundario">58mm</button>
-      <button id="btn80" class="secundario">80mm</button>
-    </div>
+    <button id="btnPrueba" class="ancho" style="margin-top:6px">Imprimir prueba</button>
     <div id="msgPrueba" class="msg"></div>
+
+    <details>
+      <summary>Ajustes</summary>
+      <div class="fila">
+        <span>Ancho de papel <span id="anchoTexto" class="muted">-</span></span>
+        <span><button id="btn58" class="secundario chico">58 mm</button> <button id="btn80" class="secundario chico">80 mm</button></span>
+      </div>
+      <div class="fila">
+        <span>Pie con logo <span id="imagenTexto" class="muted">-</span></span>
+        <button id="btnImagen" class="secundario chico">Cambiar</button>
+      </div>
+      <div class="fila" id="filaInicio">
+        <span>Abrir solo al encender la PC <span id="inicioTexto" class="muted">-</span></span>
+        <button id="btnInicio" class="secundario chico">-</button>
+      </div>
+    </details>
 
     <footer>LevoPrint · LevoDev · levodev.app</footer>
   </div>
@@ -1001,53 +1198,83 @@ async function j(url, opts) {
   const r = await fetch(url, opts);
   return r.json().catch(() => ({}));
 }
-function fmtTs(ts) { if (!ts) return 'nunca'; const d = new Date(ts); return d.toLocaleTimeString(); }
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]; }); }
+let ultimo = null;
+let avisoVisto = false;
 
 async function refrescar() {
   let e;
   try { e = await j('/estado'); } catch { e = null; }
   if (!e || !e.ok) return;
+  ultimo = e;
 
   const sem = document.getElementById('semaforo');
   const semTxt = document.getElementById('semaforoTexto');
   sem.className = 'semaforo';
   const mapa = {
-    sin_configurar: ['bad', 'Falta configurar LEVO_URL/LEVO_ANON en levoprint.txt'],
-    sin_vincular: ['warn', 'Sin vincular — ingresa tu codigo abajo'],
+    sin_configurar: ['bad', 'Falta la dirección del servidor (LEVO_URL / LEVO_ANON en levoprint.txt).'],
+    sin_vincular: ['warn', 'Falta vincular: escribe el código de tu app.'],
     imprimiendo: ['ok', 'Imprimiendo...'],
-    sin_impresora: ['bad', 'Sin impresora / error en el ultimo trabajo'],
-    conectado: ['ok', 'Conectado — listo para imprimir'],
+    sin_impresora: ['bad', 'No se pudo imprimir el último trabajo: revisa que la impresora esté encendida y en la misma red.'],
+    conectado: ['ok', 'Listo: imprimiendo para ' + (e.vinculos || []).map(function (v) { return v.app; }).join(', ') + '.'],
   };
   let [clase, texto] = mapa[e.semaforo] || ['info', 'Estado desconocido'];
   if (e.semaforo === 'desactivado') { clase = 'bad'; texto = e.desactivado || 'Equipo desactivado desde la consola'; }
   sem.classList.add(clase);
   semTxt.textContent = texto;
 
-  // Desactivado: se puede vincular con un codigo nuevo sin perder el actual.
-  document.getElementById('vinculoBox').style.display = (e.sinUrlAnon || (e.vinculado && !e.desactivado)) ? 'none' : 'block';
-
-  const box = document.getElementById('estacionesBox');
-  if (!e.estaciones || !e.estaciones.length) {
-    box.innerHTML = e.vinculado ? '<div class="fila muted">Sin estaciones asignadas todavia.</div>' : '';
-  } else {
-    box.innerHTML = e.estaciones.map(function (est) {
-      const ip = est.ip ? (est.ip + ':' + est.puerto) : 'SIN IP — configura la IP en tu consola web';
-      return '<div class="fila"><span>' + est.nombre + '</span><span class="muted">' + ip + '</span></div>';
-    }).join('');
+  // Aviso del vínculo automático (código en el nombre del programa o en levoprint.txt): se muestra una vez.
+  if (e.aviso && !avisoVisto) {
+    avisoVisto = true;
+    const m = document.getElementById('msgVinculo');
+    m.textContent = e.aviso.texto; m.className = 'msg ' + (e.aviso.clase || '');
   }
 
-  document.getElementById('anchoTexto').textContent = e.ancho + ' columnas (' + (e.ancho > 56 ? '80mm' : '58mm') + ')';
-  document.getElementById('imagenTexto').textContent = e.imagen ? 'con logo' : 'solo texto';
-  window.__imagen = e.imagen;
+  // Sin vínculos: los 2 pasos grandes. Con vínculos: la misma caja sirve para agregar OTRA app.
+  document.getElementById('vinculoBox').style.display = e.sinUrlAnon ? 'none' : 'block';
+  document.getElementById('vinculoTitulo').textContent = e.vinculado ? '¿Otra app en esta PC? Escribe su código' : 'Vincula esta PC en 2 pasos';
+  document.getElementById('paso2').style.display = e.vinculado ? 'none' : 'flex';
+
+  const box = document.getElementById('appsBox');
+  box.innerHTML = (e.vinculos || []).map(function (v) {
+    let h = '<div class="app"><div class="fila"><b>' + esc(v.app) + '</b><span class="muted">' + esc(v.nombre) + '</span></div>';
+    if (v.desactivado) h += '<div class="fila" style="color:#ff8080">' + esc(v.desactivado) + '</div>';
+    if (!v.estaciones.length) {
+      h += '<div class="fila muted">' + (v.ultimaSync ? 'Sin impresoras todavía: agrégalas en ' + esc(v.app) + (v.seccion ? ' › ' + esc(v.seccion) : '') + '.' : 'Leyendo impresoras...') + '</div>';
+    } else {
+      h += v.estaciones.map(function (est) {
+        const ip = est.ip ? (esc(est.ip) + ':' + esc(est.puerto)) : 'Falta la IP: escríbela en ' + esc(v.app) + (v.seccion ? ' › ' + esc(v.seccion) : '');
+        return '<div class="fila"><span>' + esc(est.nombre) + '<br><span class="muted">' + ip + '</span></span>'
+          + (est.ip ? '<button class="secundario chico" data-probar="' + esc(est.id) + '" data-prefijo="' + esc(v.prefijo) + '">Probar</button>' : '') + '</div>';
+      }).join('');
+    }
+    return h + '</div>';
+  }).join('');
+
+  document.getElementById('anchoTexto').textContent = '(' + e.ancho + ' columnas, ' + (e.ancho > 56 ? '80 mm' : '58 mm') + ')';
+  document.getElementById('imagenTexto').textContent = e.imagen ? '(con logo)' : '(solo texto)';
+  const ini = e.inicio || {};
+  document.getElementById('filaInicio').style.display = ini.disponible ? 'flex' : 'none';
+  document.getElementById('inicioTexto').textContent = ini.activo ? '(sí)' : '(no)';
+  document.getElementById('btnInicio').textContent = ini.activo ? 'Quitar' : 'Activar';
   document.getElementById('btnPrueba').disabled = !e.vinculado;
+}
+
+async function probar(cuerpo) {
+  const msg = document.getElementById('msgPrueba');
+  msg.textContent = 'Imprimiendo...'; msg.className = 'msg';
+  let r = null;
+  try { r = await j('/prueba', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cuerpo || {}) }); } catch (_) { r = null; }
+  if (r && r.ok) { msg.textContent = r.aviso || 'Prueba enviada.'; msg.className = 'msg ' + (r.parcial ? 'warn' : 'ok'); }
+  else { msg.textContent = (r && r.mensaje) || 'No se pudo imprimir.'; msg.className = 'msg err'; }
+  refrescar();
 }
 
 document.getElementById('btnVincular').addEventListener('click', async function () {
   const codigo = document.getElementById('codigo').value.trim();
   const msg = document.getElementById('msgVinculo');
-  if (!codigo) { msg.textContent = 'Escribe el codigo.'; msg.className = 'msg err'; return; }
-  // [MM4-06] «Vinculando…» con el boton deshabilitado; exito en verde y error en rojo. Al quedar
-  // vinculado la caja del codigo se oculta: el resultado (y el del papel de prueba) va en msgPrueba.
+  if (!codigo) { msg.textContent = 'Escribe el código que ves en tu app.'; msg.className = 'msg err'; return; }
+  // [MM4-06] «Vinculando…» con el boton deshabilitado; exito en verde y error en rojo.
   const btn = document.getElementById('btnVincular');
   btn.disabled = true;
   msg.textContent = 'Vinculando…'; msg.className = 'msg';
@@ -1055,22 +1282,20 @@ document.getElementById('btnVincular').addEventListener('click', async function 
   try { r = await j('/vincular', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ codigo: codigo }) }); } catch (_) { r = null; }
   btn.disabled = false;
   if (r && r.ok) {
-    const txt = 'Vinculado como ' + (r.nombre || 'estación') + '.' + (r.aviso ? ' ' + r.aviso : '') + (r.papel && r.papel.mensaje ? ' ' + r.papel.mensaje : '');
-    const clase = 'msg ' + (r.papel && r.papel.ok === false ? 'warn' : 'ok');
-    msg.textContent = txt; msg.className = clase;
-    const mp = document.getElementById('msgPrueba'); mp.textContent = txt; mp.className = clase;
+    const txt = 'Listo: ' + (r.app ? r.app + ' quedó vinculado' : 'vinculado') + (r.nombre ? ' como ' + r.nombre : '') + '.'
+      + (r.aviso ? ' ' + r.aviso : '') + (r.papel && r.papel.mensaje ? ' ' + r.papel.mensaje : '');
+    msg.textContent = txt; msg.className = 'msg ' + (r.papel && r.papel.ok === false ? 'warn' : 'ok');
+    document.getElementById('codigo').value = '';
   }
   else { msg.textContent = (r && r.mensaje) || 'No se pudo vincular. Revisa tu internet e intenta de nuevo.'; msg.className = 'msg err'; }
   refrescar();
 });
+document.getElementById('codigo').addEventListener('keydown', function (ev) { if (ev.key === 'Enter') document.getElementById('btnVincular').click(); });
 
-document.getElementById('btnPrueba').addEventListener('click', async function () {
-  const msg = document.getElementById('msgPrueba');
-  msg.textContent = 'Imprimiendo...'; msg.className = 'msg';
-  const r = await j('/prueba', { method: 'POST' });
-  if (r && r.ok) { msg.textContent = r.aviso || 'Prueba enviada.'; msg.className = 'msg ok'; }
-  else { msg.textContent = (r && r.mensaje) || (r && r.error) || 'No se pudo imprimir.'; msg.className = 'msg err'; }
-  refrescar();
+document.getElementById('btnPrueba').addEventListener('click', function () { probar({}); });
+document.getElementById('appsBox').addEventListener('click', function (ev) {
+  const b = ev.target.closest('button[data-probar]');
+  if (b) probar({ estacion: b.getAttribute('data-probar'), prefijo: b.getAttribute('data-prefijo') });
 });
 
 function cambiarAncho(v) {
@@ -1080,8 +1305,19 @@ function cambiarAncho(v) {
 }
 document.getElementById('btnImagen').addEventListener('click', function () {
   const msg = document.getElementById('msgPrueba');
-  j('/imagen', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ imagen: !window.__imagen }) })
+  j('/imagen', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ imagen: !(ultimo && ultimo.imagen) }) })
     .then(function (r) { msg.textContent = (r && r.ok) ? (r.imagen ? 'El pie sale con el logo.' : 'El pie sale solo en texto.') : 'No se pudo cambiar.'; msg.className = 'msg ' + ((r && r.ok) ? 'ok' : 'err'); refrescar(); });
+});
+document.getElementById('btnInicio').addEventListener('click', async function () {
+  const msg = document.getElementById('msgPrueba');
+  const btn = this;
+  btn.disabled = true;
+  const activo = !!(ultimo && ultimo.inicio && ultimo.inicio.activo);
+  let r = null;
+  try { r = await j('/inicio', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ activo: !activo }) }); } catch (_) { r = null; }
+  btn.disabled = false;
+  msg.textContent = (r && r.mensaje) || 'No se pudo cambiar.'; msg.className = 'msg ' + ((r && r.ok) ? 'ok' : 'err');
+  refrescar();
 });
 document.getElementById('btn58').addEventListener('click', function () { cambiarAncho(48); });
 document.getElementById('btn80').addEventListener('click', function () { cambiarAncho(64); });
@@ -1093,41 +1329,65 @@ setInterval(refrescar, 2500);
 </html>`;
 }
 
+// [LP-U1] «Imprimir prueba»: una hoja por IMPRESORA (ip:puerto) de todas las
+// apps vinculadas, cada una con el pie de SU app; o solo la estación del botón
+// «Probar» ({ estacion, prefijo }). Así el dueño ve en papel cuál funciona.
 async function manejarPrueba(req, res) {
-  if (faltaConfig()) return responderJson(res, 400, { ok: false, error: 'SIN_VINCULAR', mensaje: 'Primero vincula el agente.' });
+  if (faltaConfig()) return responderJson(res, 400, { ok: false, error: 'SIN_VINCULAR', mensaje: 'Primero vincula esta PC con el código de tu app.' });
   const body = await leerBodyJson(req);
-  const est = body.estacion ? estaciones.get(body.estacion) : [...estaciones.values()][0];
-  const texto = render({ tipo: 'PRUEBA', payload: {} });
-  try {
-    if (MODO_CONSOLA || !est || !est.ip) {
-      console.log('[prueba] ' + paraConsola(texto));
-      return responderJson(res, 200, {
-        ok: true,
-        aviso: !est ? 'Sin estaciones asignadas: se mostro en consola.'
-              : !est.ip ? 'Sin IP configurada: se mostro en consola. Configura la IP en tu consola web.'
-              : 'Modo consola: se mostro en consola.',
-      });
-    }
-    await imprimirRaw(est.ip, est.puerto || 9100, texto);
-    guiEstado.ultimoOk = Date.now();
-    return responderJson(res, 200, { ok: true, aviso: 'Prueba enviada a ' + est.nombre + ' (' + est.ip + ').' });
-  } catch (e) {
-    guiEstado.ultimoError = { mensaje: e.message, ts: Date.now() };
-    return responderJson(res, 500, { ok: false, error: 'IMPRESION', mensaje: e.message });
+  let destinos = [];
+  for (const v of vinculos) for (const est of v.estaciones.values()) destinos.push({ v, est });
+  if (body.estacion) destinos = destinos.filter((d) => String(d.est.id) === String(body.estacion) && (!body.prefijo || d.v.prefijo === body.prefijo));
+  const vistos = new Set();
+  const unicos = destinos.filter((d) => {
+    if (!d.est.ip) return false;
+    const k = d.est.ip + ':' + (d.est.puerto || 9100);
+    if (vistos.has(k)) return false;
+    vistos.add(k);
+    return true;
+  });
+  if (MODO_CONSOLA || !unicos.length) {
+    const texto = conPrefijo((destinos[0] || { v: vinculos[0] }).v.prefijo, () => render({ tipo: 'PRUEBA', payload: {} }));
+    console.log('[prueba] ' + paraConsola(texto));
+    if (MODO_CONSOLA) return responderJson(res, 200, { ok: true, aviso: 'Modo consola: la prueba se mostró en la consola.' });
+    return responderJson(res, 400, {
+      ok: false, error: 'SIN_IMPRESORA',
+      mensaje: !destinos.length
+        ? 'Todavía no hay impresoras: agrégalas en tu app (Estaciones o Impresoras) y vuelve a probar en un minuto.'
+        : 'Falta la IP de la impresora: escríbela en tu app y vuelve a probar en un minuto.',
+    });
   }
+  const bien = [], mal = [];
+  for (const d of unicos) {
+    try {
+      await imprimirRaw(d.est.ip, d.est.puerto || 9100, conPrefijo(d.v.prefijo, () => render({ tipo: 'PRUEBA', payload: {} })));
+      bien.push(d.est.nombre + ' (' + d.est.ip + ')');
+    } catch (e) {
+      mal.push(d.est.nombre + ' (' + d.est.ip + ')');
+      console.error('[prueba] ' + d.est.nombre + ': ' + e.message);
+    }
+  }
+  if (bien.length) guiEstado.ultimoOk = Date.now();
+  if (!bien.length) {
+    guiEstado.ultimoError = { mensaje: 'prueba sin respuesta', ts: Date.now() };
+    return responderJson(res, 500, { ok: false, error: 'IMPRESION', mensaje: 'No respondió: ' + mal.join(', ') + '. Revisa que la impresora esté encendida y en la misma red que esta PC.' });
+  }
+  return responderJson(res, 200, {
+    ok: true, parcial: mal.length > 0,
+    aviso: 'Prueba enviada a ' + bien.join(', ') + '.' + (mal.length ? ' No respondió: ' + mal.join(', ') + '; revisa que esté encendida y en la misma red.' : ''),
+  });
 }
 
 async function manejarVincular(req, res) {
   const body = await leerBodyJson(req);
   const r = await canjearCodigo(body.codigo);
   if (r.ok) {
-    console.log('[gui] vinculado desde la ventana web. Arrancando ciclo de impresion...');
-    // Token nuevo: vuelta inmediata con config fresca (arranca el bucle si
-    // arrancar() no lo inicio, o corta la pausa de 45 s si estaba desactivado).
-    despertarCiclo();
-    // [MM4-06] Papel de prueba: la ventana muestra si salió (verde) o no (ámbar).
-    // [QA BAJO-4] Recanje idempotente (reintento): el papel ya salió la primera vez.
-    if (!r.reintento) r.papel = await imprimirVinculado(r.nombre);
+    console.log('[gui] vinculado desde la ventana (' + r.prefijo + '). Arrancando ciclo de impresion...');
+    guiEstado.aviso = null;
+    // Token nuevo: vuelta inmediata con config fresca (arranca el bucle si no
+    // había vínculos, o corta la pausa si estaba desactivado), papel de prueba
+    // [MM4-06] y arranque con Windows [LP-U1].
+    await trasVincular(r);
   }
   return responderJson(res, r.ok ? 200 : 400, r);
 }
@@ -1150,6 +1410,14 @@ async function manejarImagen(req, res) {
   return responderJson(res, 200, { ok: true, imagen: CON_IMAGEN, persistido: persistirImagen(CON_IMAGEN ? '1' : '0') });
 }
 
+// [LP-U1] Botón «Activar / Quitar» del arranque con Windows.
+async function manejarInicio(req, res) {
+  const body = await leerBodyJson(req);
+  if (typeof body.activo !== 'boolean') return responderJson(res, 400, { ok: false, error: 'INICIO_INVALIDO' });
+  const r = body.activo ? await crearAccesoInicio() : quitarAccesoInicio();
+  return responderJson(res, r.ok ? 200 : 500, { ...r, activo: inicioActivo() });
+}
+
 function abrirNavegador(url) {
   try {
     const cmd = process.platform === 'win32' ? `start "" "${url}"`
@@ -1165,11 +1433,11 @@ function iniciarGui() {
   const servidor = http.createServer((req, res) => {
     const url = (req.url || '/').split('?')[0];
     if (req.method === 'GET' && url === '/') {
-      // [qa5] Abrir la ventana con el equipo desactivado = reintento ya (con
-      // tope de uno cada 10 s; /estado, que se sondea, NO despierta).
-      if (guiEstado.desactivado && Date.now() - ultimoDespertarGui > 10000) {
+      // [qa5] Abrir la ventana con algún vínculo desactivado = reintento ya
+      // (con tope de uno cada 10 s; /estado, que se sondea, NO despierta).
+      if (vinculos.some((v) => v.desactivado) && Date.now() - ultimoDespertarGui > 10000) {
         ultimoDespertarGui = Date.now();
-        despertarCiclo();
+        despertarCiclo(true);
       }
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       return res.end(paginaHtml());
@@ -1179,6 +1447,7 @@ function iniciarGui() {
     if (req.method === 'POST' && url === '/vincular') return void manejarVincular(req, res);
     if (req.method === 'POST' && url === '/ancho') return void manejarAncho(req, res);
     if (req.method === 'POST' && url === '/imagen') return void manejarImagen(req, res);
+    if (req.method === 'POST' && url === '/inicio') return void manejarInicio(req, res);
     responderJson(res, 404, { ok: false, error: 'NO_ENCONTRADO' });
   });
   function intentarPuertos(intento) {
@@ -1198,15 +1467,99 @@ function iniciarGui() {
   intentarPuertos(0);
 }
 
+// [LP-U1] ¿Ya hay un LevoPrint abierto en esta PC (p. ej. el de KOMO, y ahora
+// se abre el .exe que bajó KUTI)? Se busca en 9110-9114 una ventana que diga
+// levoprint:true con la MISMA versión. Si la hay, este proceso le pasa el
+// código (si trae uno), abre su ventana y se cierra: un solo LevoPrint
+// atiende todas las apps. Con otra versión se sigue como antes (cada uno lo suyo).
+async function buscarOtraInstancia() {
+  for (let i = 0; i < 5; i++) {
+    const puerto = PUERTO_GUI_BASE + i;
+    try {
+      const r = await fetch(`http://127.0.0.1:${puerto}/estado`, { signal: AbortSignal.timeout(1500) });
+      const e = await r.json();
+      if (e && e.levoprint === true && e.version === VERSION_AGENTE) return { puerto, estado: e };
+    } catch (_) { /* nadie en ese puerto */ }
+  }
+  return null;
+}
+
+// Errores tras los que el código del nombre del .exe NO se vuelve a intentar
+// (todos menos los pasajeros: red, freno por intentos, IP).
+const ERRORES_PASAJEROS = ['RED', 'DEMASIADOS_INTENTOS', 'IP_DESCONOCIDA', 'FALTA_URL_ANON'];
+function codigosArchivoUsados() {
+  return String(process.env.LEVO_CODIGOS_ARCHIVO || '').split(',').map(normalizarCodigo).filter(Boolean);
+}
+function recordarCodigoArchivo(cod, r) {
+  if (!cod || (r && !r.ok && ERRORES_PASAJEROS.includes(r.error))) return;
+  // Se guardan los últimos 20 (de sobra: cada código es de un uso y dura 15 min).
+  const lista = codigosArchivoUsados().filter((c) => c !== cod).concat(cod).slice(-20).join(',');
+  try { editarTxt((txt) => ponerClave(txt, 'LEVO_CODIGOS_ARCHIVO', lista)); } catch (_) { /* solo lectura: se reintentaría al reabrir */ }
+  process.env.LEVO_CODIGOS_ARCHIVO = lista;
+}
+
 async function arrancar() {
-  const canje = await canjearCodigo();
-  if (faltaUrlAnon()) { abortarSinConfig(); return; }
-  console.log('LevoPrint agente de impresion v1.11 (ventana visual + vinculacion por codigo) - LevoDev');
-  // [MM4-06] Codigo del .txt canjeado recien: papel de prueba (sin bloquear el arranque).
-  if (canje && canje.ok && !canje.reintento) imprimirVinculado(canje.nombre);
+  // Código pendiente: el de levoprint.txt (LEVO_CODIGO) o, si no hay, el del
+  // nombre del .exe si aún no se usó.
+  let codigoInicial = CODIGO, delArchivo = false;
+  if (!codigoInicial && CODIGO_ARCHIVO && !codigosArchivoUsados().includes(CODIGO_ARCHIVO)) {
+    codigoInicial = CODIGO_ARCHIVO;
+    delArchivo = true;
+  }
+
+  const otra = await buscarOtraInstancia();
+  if (otra) {
+    const url = `http://127.0.0.1:${otra.puerto}`;
+    console.log('LevoPrint ya esta abierto en esta PC (' + url + '): se usa ese.');
+    if (codigoInicial) {
+      let r = null;
+      try {
+        const resp = await fetch(url + '/vincular', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ codigo: codigoInicial }), signal: AbortSignal.timeout(60000),
+        });
+        r = await resp.json();
+      } catch (e) { r = { ok: false, error: 'RED', mensaje: e.message }; }
+      console.log(r && r.ok ? 'Vinculado en el LevoPrint abierto: ' + (r.app || '') + ' ' + (r.nombre || '') : 'No se pudo vincular: ' + ((r && r.mensaje) || 'error'));
+      if (delArchivo) recordarCodigoArchivo(codigoInicial, r);
+    }
+    if (!DESDE_INICIO) abrirNavegador(url);
+    setTimeout(() => process.exit(0), 1500);
+    return;
+  }
+
+  if (faltaUrlAnon()) {
+    console.error('Falta LEVO_URL/LEVO_ANON: revisa levoprint.txt (o borra esas lineas para usar las de LevoPrint).');
+  }
+  console.log('LevoPrint agente de impresion v' + VERSION_AGENTE + ' (vincular con el codigo + varias apps) - LevoDev');
   console.log(MODO_CONSOLA ? 'MODO CONSOLA (sin impresoras reales)' : 'Modo impresión real');
+  migrarConfigVieja();
   iniciarGui();
-  if (!faltaConfig()) ciclo();
-  else console.log('Falta vincular: abre la ventana de LevoPrint (o entra tu codigo por /vincular) para terminar la configuracion.');
+  if (!faltaConfig()) {
+    console.log('Apps vinculadas: ' + vinculos.map((v) => v.prefijo).join(', '));
+    ciclo();
+  } else if (!codigoInicial) {
+    console.log('Falta vincular: en la ventana de LevoPrint escribe el codigo que ves en tu app.');
+  }
+
+  if (codigoInicial) {
+    guiEstado.aviso = { clase: '', texto: 'Vinculando con el código ' + codigoInicial + '...' };
+    const r = await canjearCodigo(codigoInicial);
+    if (!delArchivo) CODIGO = ''; // el del .txt se intenta UNA vez por sesion (el canje es de un uso)
+    if (delArchivo) recordarCodigoArchivo(codigoInicial, r);
+    if (r.ok) {
+      await trasVincular(r);
+      guiEstado.aviso = {
+        clase: r.papel && r.papel.ok === false ? 'warn' : 'ok',
+        texto: 'Listo: ' + r.app + ' quedó vinculado' + (r.nombre ? ' como ' + r.nombre : '') + '.' + (r.aviso ? ' ' + r.aviso : '')
+          + (r.papel && r.papel.mensaje ? ' ' + r.papel.mensaje : ''),
+      };
+    } else {
+      // Ya vinculado con ese código (se abrió de nuevo el mismo .exe): no es un error para el dueño.
+      guiEstado.aviso = (r.error === 'CODIGO_USADO' && vinculos.some((v) => v.prefijo === PREFIJO_POR_LETRA[codigoInicial.charAt(0)]))
+        ? null : { clase: 'err', texto: r.mensaje };
+    }
+  }
+  await revisarInicioAlArrancar();
 }
 arrancar();

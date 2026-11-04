@@ -28,9 +28,9 @@ class RpcError(val fn: String, val http: Int, val pgMensaje: String, cuerpo: Str
 
 object Agent {
   // [O-23 · QA MEDIO-2] Versión de este APK (= versionName de app/build.gradle.kts; AgentRenderTest lo comprueba).
-  // Va en <prefijo>_agente_config (p.version = "apk/1.5.0"): KUTI (kuti_turno_print) solo manda el papel TURNO a un
+  // Va en <prefijo>_agente_config (p.version = "apk/1.6.0"): KUTI (kuti_turno_print) solo manda el papel TURNO a un
   // local cuyos agentes vivos lo saben dibujar. KOMO/KIPU la ignoran.
-  const val VERSION = "1.5.0"
+  const val VERSION = "1.6.0"
   // ESC/POS con codigos de caracter (sin bytes de control crudos en el
   // fuente). Se construye TODO como String de chars 0..255 y se envia en
   // latin1 (ISO-8859-1), igual que el agente .exe (Buffer 'binary').

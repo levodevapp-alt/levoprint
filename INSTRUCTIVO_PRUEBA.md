@@ -19,7 +19,7 @@
 ## A. Prueba en PC (Windows, el .exe)
 
 1. **Generar el código.** En *Estaciones*, elige la estación (p. ej. "Caja") y pulsa
-   **Vincular LevoPrint → Generar código**. Aparece un **código de 8 letras** y un **QR**.
+   **Vincular LevoPrint → Generar código**. Aparece un **código de 9 caracteres** (empieza con K en KOMO, P en KIPU o T en KUTI) y un **QR**.
    El código dura **15 minutos**.
 2. **Descargar el programa.** En la misma pantalla, botón **"Descargar (PC)"** →
    baja `LevoPrint-Windows.zip`. Descomprímelo (clic derecho → *Extraer todo*).
@@ -27,7 +27,7 @@
    - Si Windows muestra *"Windows protegió tu PC"* (SmartScreen): **Más información →
      Ejecutar de todas formas**. Es normal en programas nuevos sin firma comercial.
    - Se abre **una ventanita en el navegador** (localhost) con un **semáforo** y campos.
-4. **Vincular.** Escribe el **código de 8 letras** en el campo y pulsa **Vincular**.
+4. **Vincular.** Escribe el **código de 9 caracteres** (empieza con K en KOMO, P en KIPU o T en KUTI) en el campo y pulsa **Vincular**.
    → Debe decir *"Vinculado como: Caja · <tu negocio>. Listo."* y el semáforo pasa a **verde**.
    *(A partir de aquí se configura solo: no se toca ningún .txt.)*
 5. **Poner la IP de la impresora.** En la ventanita, campo **IP** → escribe la IP

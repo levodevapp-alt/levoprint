@@ -9,8 +9,8 @@ android {
     applicationId = "dev.levo.levoprint"
     minSdk = 26
     targetSdk = 34
-    versionCode = 10
-    versionName = "1.5.0"
+    versionCode = 11
+    versionName = "1.6.0"
   }
   // Firma RELEASE de la casa (keystore PKCS12 de LevoDev). En CI llega por
   // secrets (KEYSTORE_B64/KEYSTORE_PASSWORD/KEY_ALIAS/KEY_PASSWORD); sin

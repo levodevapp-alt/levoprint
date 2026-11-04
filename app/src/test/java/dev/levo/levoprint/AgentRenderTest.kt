@@ -198,7 +198,7 @@ class AgentRenderTest {
     val f = listOf(java.io.File("build.gradle.kts"), java.io.File("app/build.gradle.kts")).first { it.exists() }
     val m = Regex("versionName\\s*=\\s*\"([^\"]+)\"").find(f.readText())
     assertEquals(m?.groupValues?.get(1), Agent.VERSION)
-    assertEquals("1.5.0", Agent.VERSION)
+    assertEquals("1.6.0", Agent.VERSION)
   }
 
   @Test fun envolverPorPalabra() {

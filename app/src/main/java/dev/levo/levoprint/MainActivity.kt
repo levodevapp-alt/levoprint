@@ -77,6 +77,7 @@ class MainActivity : AppCompatActivity() {
     val btnEmparejar = findViewById<Button>(R.id.btnEmparejar)
     val btnEscanear = findViewById<Button>(R.id.btnEscanear)
     val txtEmparejar = findViewById<TextView>(R.id.txtEmparejar)
+    val txtVinculos = findViewById<TextView>(R.id.txtVinculos)
 
     // [MM4-08] Opciones avanzadas plegadas (cerradas al abrir): URL, clave, device, prefijo y ancho.
     val btnAvanzadas = findViewById<TextView>(R.id.btnAvanzadas)
@@ -140,7 +141,7 @@ class MainActivity : AppCompatActivity() {
       // conserva el token y reintenta solo (backoff 60 s / 5 min / 15 min).
       // Se avisa claro y el dueno puede escanear/escribir un codigo nuevo.
       val desact = on && PrintService.desactivado
-      val msg = if (desact) Emparejamiento.textoDesactivado(Prefs.leer(this)?.prefijo ?: "", PrintService.desactivadoDesde) else ""
+      val msg = if (desact) Emparejamiento.textoDesactivado(PrintService.desactivadoPrefijo.ifBlank { Prefs.leer(this)?.prefijo ?: "" }, PrintService.desactivadoDesde) else ""
       if (desact && (txtEmparejar.text.isBlank() || txtEmparejar.text.startsWith("Vinculado") || txtEmparejar.text.startsWith("Este equipo está desactivado"))) {
         txtEmparejar.text = msg
         txtEmparejar.setTextColor(COLOR_ERROR)
@@ -149,6 +150,15 @@ class MainActivity : AppCompatActivity() {
         desact -> msg
         on -> "Activo · escuchando impresion"
         else -> "Detenido"
+      }
+      // [LP-U1] Apps vinculadas en este equipo (una linea por app).
+      val vs = Prefs.leerVinculosConNombre(this)
+      txtVinculos.visibility = if (vs.isEmpty()) View.GONE else View.VISIBLE
+      txtVinculos.text = "Imprime para:" + vs.joinToString("", prefix = "") { (c, nombre) ->
+        "\n· " +
+        Emparejamiento.nombreApp(Proyectos.conocidos.firstOrNull { it.prefijo.equals(c.prefijo, true) }?.letra ?: c.prefijo) +
+          (if (nombre.isNotBlank()) " (" + nombre + ")" else "") +
+          (if (PrintService.desactivadoPrefijo.equals(c.prefijo, true)) " · desactivado" else "")
       }
     }
 
@@ -171,7 +181,9 @@ class MainActivity : AppCompatActivity() {
           btnEscanear.isEnabled = true
           when (r) {
             is CanjeResultado.Ok -> {
-              Prefs.guardar(this, r.cfg)
+              // [LP-U1] Agrega el vinculo de esta app SIN borrar los de las otras (mismo camino
+              // para lo tecleado, el QR y el deep link levoprint://emparejar?c=...&p=...).
+              Prefs.guardar(this, r.cfg, r.nombre)
               inUrl.setText(r.cfg.url); inAnon.setText(r.cfg.anon); inDevice.setText(r.cfg.device)
               inPrefijo.setText(r.cfg.prefijo); inAncho.setText(r.cfg.ancho.toString())
               // El servidor apaga a los anteriores recien con el PRIMER trabajo impreso de este equipo.
@@ -239,11 +251,14 @@ class MainActivity : AppCompatActivity() {
       } else {
         val ancho = Agent.anchoValido(inAncho.text.toString().toIntOrNull() ?: 48) // [Re-QA BAJO-1] 20-100
         inAncho.setText(ancho.toString())
-        Prefs.guardar(this, Cfg(
+        val manual = Cfg(
           inUrl.text.toString().trim(), inAnon.text.toString().trim(),
           inDevice.text.toString().trim(),
-          inPrefijo.text.toString().trim().ifBlank { "komo" }, ancho
-        ))
+          inPrefijo.text.toString().trim().lowercase().ifBlank { "komo" }, ancho
+        )
+        // [LP-U1] Con datos a medias no se guarda (antes se pisaba la config): si ya hay
+        // vinculos, solo se arranca con ellos.
+        if (manual.url.isNotBlank() && manual.anon.isNotBlank() && manual.device.isNotBlank()) Prefs.guardar(this, manual)
         if (Prefs.leer(this) == null) { estado.text = "Faltan datos: URL, clave y device"; return@setOnClickListener }
         val i = Intent(this, PrintService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(i) else startService(i)

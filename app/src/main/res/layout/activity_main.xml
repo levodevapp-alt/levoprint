@@ -22,7 +22,7 @@
         android:inputType="textCapCharacters|textNoSuggestions" />
     <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
         android:layout_marginTop="4dp" android:textColor="#8FB6D9" android:textSize="12sp"
-        android:text="Lo ves en KOMO › Estaciones, KIPU › Impresoras o KUTI › Impresoras. Dura 15 min." />
+        android:text="Lo ves en KOMO › Estaciones, KIPU › Impresoras o KUTI › Impresoras. Dura 15 min. ¿Usas varias apps? Vincula el código de cada una: este equipo imprime para todas." />
 
     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
         android:orientation="horizontal" android:layout_marginTop="8dp">
@@ -42,6 +42,12 @@
     <TextView android:id="@+id/txtEmparejar" android:layout_width="match_parent"
         android:layout_height="wrap_content" android:layout_marginTop="8dp"
         android:textColor="#8FB6D9" android:textSize="13sp" android:textStyle="bold" />
+
+    <!-- [LP-U1] Apps vinculadas en este equipo: un mismo LevoPrint imprime para KOMO, KIPU
+         y KUTI. Para sumar otra app basta con escribir (o escanear) el código de esa app. -->
+    <TextView android:id="@+id/txtVinculos" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:layout_marginTop="8dp"
+        android:visibility="gone" android:textColor="#EAF4FF" android:textSize="13sp" />
 
     <!-- [MM4-07] Ahorro de batería: se muestra con el equipo vinculado mientras Android
          pueda dormir a LevoPrint; al volver de Ajustes con el permiso, queda en verde. -->

@@ -44,16 +44,32 @@ import androidx.core.content.ContextCompat
 //
 // Backoff "equipo olvidado": 60 s la primera hora, 5 min hasta las 24 h y
 // luego cada 15 min.
+//
+// [LP-U1] Con varias apps vinculadas (KOMO, KIPU, KUTI), todo lo anterior vale POR
+// vinculo; el modo ahorro entra solo si TODOS estan desactivados (ver bucle()).
 class PrintService : Service() {
   @Volatile private var corriendo = false
   private var hilo: Thread? = null
   private var wake: PowerManager.WakeLock? = null
   private var wakeCorto: PowerManager.WakeLock? = null
-  @Volatile private var cfgActual: Cfg? = null
-  @Volatile private var forzarConfig = true
+  // [LP-U1] Varias apps en un mismo LevoPrint: un Cfg por vinculo (Prefs.leerVinculos).
+  // El bucle atiende a todos en cada vuelta; cada uno lleva sus estaciones y su estado
+  // de desactivado (EstadoV). El modo ahorro (sin wake lock, reintentos por alarma) se
+  // usa solo cuando TODOS los vinculos estan desactivados: si una app sigue viva, el
+  // servicio sigue al ritmo normal y la desactivada se reintenta con su propio backoff.
+  @Volatile private var cfgs: List<Cfg> = emptyList()
+  @Volatile private var forzarReintento = false
   private val dormidero = Object()
   private var receptorRegistrado = false
   private var ultimoDespertarApp = 0L // [qa6] tope del reintento al abrir la app
+
+  private class EstadoV(val cfg: Cfg) {
+    var estaciones: Map<String, Estacion> = emptyMap()
+    var forzarConfig = true
+    var ciclo = 0
+    var desactivadoDesde = 0L // System.currentTimeMillis() del primer AGENTE_INVALIDO (0 = activo)
+    var proximo = 0L          // proximo reintento mientras este desactivado
+  }
 
   companion object {
     const val CANAL = "levoprint"
@@ -63,8 +79,9 @@ class PrintService : Service() {
     private const val ESPERA_MS = 2000L
     private const val HORA_MS = 3600000L
     @Volatile var activo = false
-    @Volatile var desactivado = false
-    @Volatile var desactivadoDesde = 0L // System.currentTimeMillis() del primer AGENTE_INVALIDO
+    @Volatile var desactivado = false        // TODOS los vinculos desactivados
+    @Volatile var desactivadoDesde = 0L      // System.currentTimeMillis() del primer AGENTE_INVALIDO
+    @Volatile var desactivadoPrefijo = ""    // [LP-U1] app del aviso (el primer vinculo desactivado)
     @Volatile var ultimoLog = "Detenido"
 
     fun esperaDesactivado(desde: Long): Long {
@@ -99,27 +116,27 @@ class PrintService : Service() {
     if (corriendo) {
       // Ya corre (startForegroundService exige volver a llamar startForeground).
       try { arrancarForeground(if (desactivado) TXT_DESACTIVADO else TXT_ACTIVO) } catch (_: Exception) {}
-      val nueva = Prefs.leer(this)
-      if (nueva != null && nueva != cfgActual) {
-        // Codigo nuevo canjeado: se usa el token nuevo desde la proxima vuelta
-        // (siempre al instante, sin tope).
-        cfgActual = nueva
-        forzarConfig = true
+      val nuevas = Prefs.leerVinculos(this)
+      if (nuevas.isNotEmpty() && nuevas != cfgs) {
+        // Codigo nuevo canjeado (otra app o la misma con token nuevo): se usa desde la
+        // proxima vuelta, siempre al instante y sin tope.
+        cfgs = nuevas
         if (desactivado) salirDeDesactivado()
         despertar()
       } else if (desactivado && SystemClock.elapsedRealtime() - ultimoDespertarApp > 10000L) {
         // [qa6] App abierta con el equipo desactivado: reintento ya, con CPU
         // despierto, pero a lo sumo uno cada 10 s (mismo tope que el exe).
         ultimoDespertarApp = SystemClock.elapsedRealtime()
+        forzarReintento = true
         tomarWakeCorto()
         despertar()
       }
       return START_STICKY
     }
-    val cfg = Prefs.leer(this) ?: run { stopSelf(); return START_NOT_STICKY }
+    val lista = Prefs.leerVinculos(this)
+    if (lista.isEmpty()) { stopSelf(); return START_NOT_STICKY }
     try { arrancarForeground(TXT_ACTIVO) } catch (e: Exception) { ultimoLog = "foreground: " + e.message }
-    cfgActual = cfg
-    forzarConfig = true
+    cfgs = lista
     desactivado = false
     corriendo = true
     activo = true
@@ -128,80 +145,103 @@ class PrintService : Service() {
     return START_STICKY
   }
 
+  private fun clave(c: Cfg) = c.prefijo + "|" + c.device
+
   private fun bucle() {
-    var estaciones: Map<String, Estacion> = emptyMap()
-    var ciclo = 0
+    val estados = HashMap<String, EstadoV>()
     while (corriendo) {
-      // Config de ESTA vuelta: los trabajos tomados se marcan con el mismo token.
-      val cfg = cfgActual ?: break
-      var espera = ESPERA_MS
-      try {
-        // [qa5] El contador avanza SIEMPRE (antes "forzar || ciclo++" lo
-        // saltaba por cortocircuito cuando forzarConfig era true).
-        val tocaConfig = ciclo++ % 30 == 0
-        if (forzarConfig || tocaConfig) {
-          estaciones = Agent.estaciones(cfg)
-          forzarConfig = false
-          ultimoLog = "Config: " + estaciones.size + " estaciones"
-        }
-        val jobs = Agent.tomar(cfg)
-        if (desactivado && cfg == cfgActual) {
-          // Lo reactivaron en la consola: vuelve al ritmo normal.
-          salirDeDesactivado()
-          ultimoLog = "Reactivado: imprimiendo de nuevo"
-        }
-        for (i in 0 until jobs.length()) {
-          val job = jobs.getJSONObject(i)
-          val id = job.optString("id")
-          try {
-            val est = estaciones[job.optString("estacion")]
-            val texto = Agent.render(job, cfg.ancho, cfg.prefijo, Prefs.getImagen(this))
-            val btMac = Prefs.getBtMac(this)
-            when {
-              est?.ip != null -> { Agent.imprimirTcp(est.ip, est.puerto, texto); ultimoLog = "OK " + job.optString("tipo") + " -> " + est.nombre }
-              Prefs.getBluetooth(this) && btMac.isNotBlank() -> { Bt.imprimir(btMac, texto); ultimoLog = "OK " + job.optString("tipo") + " -> Bluetooth" }
-              else -> throw RuntimeException("estacion sin IP y sin Bluetooth")
-            }
-            Agent.marcar(cfg, id, true)
-          } catch (e: Exception) {
-            try { Agent.marcar(cfg, id, false, e.message) } catch (_: Exception) {}
-            ultimoLog = "ERR " + id + ": " + e.message
-          }
-        }
-      } catch (e: RpcError) {
-        if (e.agenteInvalido) {
-          // [qa4] Desactivado/reemplazado: se conserva el token y se reintenta
-          // con baja frecuencia. Si entretanto llego un token nuevo, se ignora.
-          if (cfg == cfgActual) {
-            if (!desactivado) {
-              desactivado = true
-              desactivadoDesde = System.currentTimeMillis()
-              soltarWake()
-              notificar(TXT_DESACTIVADO)
-            }
-            ultimoLog = Emparejamiento.textoDesactivado(cfg.prefijo, desactivadoDesde)
-            forzarConfig = true // al volver, lo primero es releer estaciones
-            espera = esperaDesactivado(desactivadoDesde)
-          }
-        } else {
-          ultimoLog = "ciclo: " + e.message
-        }
-      } catch (e: Exception) {
-        ultimoLog = "ciclo: " + e.message
+      val lista = cfgs
+      if (lista.isEmpty()) break
+      // Vinculos quitados o reemplazados (token nuevo) dejan su estado: el nuevo arranca limpio.
+      val claves = lista.map { clave(it) }.toSet()
+      estados.keys.retainAll(claves)
+      for (c in lista) { val e = estados[clave(c)]; if (e == null || e.cfg != c) estados[clave(c)] = EstadoV(c) }
+      val reintentar = forzarReintento
+      forzarReintento = false
+      for (c in lista) {
+        val st = estados[clave(c)] ?: continue
+        if (!corriendo) break
+        if (st.desactivadoDesde > 0 && !reintentar && System.currentTimeMillis() < st.proximo) continue
+        vuelta(st)
       }
-      if (desactivado) {
+      val desact = lista.mapNotNull { estados[clave(it)] }.filter { it.desactivadoDesde > 0 }
+      desactivadoPrefijo = desact.firstOrNull()?.cfg?.prefijo ?: ""
+      if (desact.size == lista.size) {
+        // TODOS desactivados: modo ahorro.
+        if (!desactivado) {
+          desactivado = true
+          desactivadoDesde = desact.minOf { it.desactivadoDesde }
+          soltarWake()
+          notificar(TXT_DESACTIVADO)
+        }
         // [qa5] La alarma despierta el CPU para el proximo intento; el wake
         // lock corto de este intento se suelta y el CPU puede dormir. Se usa
         // el backoff aunque el fallo de esta vuelta haya sido de red.
-        val ms = esperaDesactivado(desactivadoDesde)
+        val ms = maxOf(ESPERA_MS, desact.minOf { it.proximo } - System.currentTimeMillis())
         programarReintento(ms)
         soltarWakeCorto()
         // Respaldo: si el CPU sigue despierto, el wait vence solo (la alarma
         // ya avisara; un despertar de mas solo adelanta un intento).
         if (!dormir(ms + 5000)) break
       } else {
-        if (!dormir(espera)) break
+        // Lo reactivaron en la consola (o hay al menos una app viva): ritmo normal.
+        if (desactivado) salirDeDesactivado()
+        if (!dormir(ESPERA_MS)) break
       }
+    }
+  }
+
+  // Una vuelta de UN vinculo: config cada 30 vueltas (~60 s), tomar, imprimir y marcar.
+  // Los trabajos tomados se marcan con el MISMO token (st.cfg) que los tomo.
+  private fun vuelta(st: EstadoV) {
+    val cfg = st.cfg
+    try {
+      // [qa5] El contador avanza SIEMPRE (antes "forzar || ciclo++" lo
+      // saltaba por cortocircuito cuando forzarConfig era true).
+      val tocaConfig = st.ciclo++ % 30 == 0
+      if (st.forzarConfig || tocaConfig) {
+        st.estaciones = Agent.estaciones(cfg)
+        st.forzarConfig = false
+        ultimoLog = "Config " + cfg.prefijo.uppercase() + ": " + st.estaciones.size + " estaciones"
+      }
+      val jobs = Agent.tomar(cfg)
+      if (st.desactivadoDesde > 0) {
+        st.desactivadoDesde = 0L
+        st.proximo = 0L
+        ultimoLog = "Reactivado " + cfg.prefijo.uppercase() + ": imprimiendo de nuevo"
+      }
+      for (i in 0 until jobs.length()) {
+        val job = jobs.getJSONObject(i)
+        val id = job.optString("id")
+        try {
+          val est = st.estaciones[job.optString("estacion")]
+          val texto = Agent.render(job, cfg.ancho, cfg.prefijo, Prefs.getImagen(this))
+          val btMac = Prefs.getBtMac(this)
+          when {
+            est?.ip != null -> { Agent.imprimirTcp(est.ip, est.puerto, texto); ultimoLog = "OK " + cfg.prefijo.uppercase() + " " + job.optString("tipo") + " -> " + est.nombre }
+            Prefs.getBluetooth(this) && btMac.isNotBlank() -> { Bt.imprimir(btMac, texto); ultimoLog = "OK " + cfg.prefijo.uppercase() + " " + job.optString("tipo") + " -> Bluetooth" }
+            else -> throw RuntimeException("estacion sin IP y sin Bluetooth")
+          }
+          Agent.marcar(cfg, id, true)
+        } catch (e: Exception) {
+          try { Agent.marcar(cfg, id, false, e.message) } catch (_: Exception) {}
+          ultimoLog = "ERR " + cfg.prefijo.uppercase() + " " + id + ": " + e.message
+        }
+      }
+    } catch (e: RpcError) {
+      if (e.agenteInvalido) {
+        // [qa4] Desactivado/reemplazado: se conserva el token y se reintenta
+        // con baja frecuencia (solo ESTE vinculo).
+        val ahora = System.currentTimeMillis()
+        if (st.desactivadoDesde == 0L) st.desactivadoDesde = ahora
+        st.proximo = ahora + esperaDesactivado(st.desactivadoDesde)
+        st.forzarConfig = true // al volver, lo primero es releer estaciones
+        ultimoLog = Emparejamiento.textoDesactivado(cfg.prefijo, st.desactivadoDesde)
+      } else {
+        ultimoLog = "ciclo " + cfg.prefijo.uppercase() + ": " + e.message
+      }
+    } catch (e: Exception) {
+      ultimoLog = "ciclo " + cfg.prefijo.uppercase() + ": " + e.message
     }
   }
 
@@ -291,6 +331,7 @@ class PrintService : Service() {
     activo = false
     desactivado = false
     desactivadoDesde = 0L
+    desactivadoPrefijo = ""
     ultimoLog = "Detenido"
     hilo?.interrupt()
     cancelarReintento()
