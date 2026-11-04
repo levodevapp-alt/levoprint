@@ -150,7 +150,15 @@ class PrintService : Service() {
   private fun bucle() {
     val estados = HashMap<String, EstadoV>()
     var ultimaBusqueda = 0L
+    var ultimaVersion = 0L
     while (corriendo) {
+      // [Re-QA LP-F3 · MEDIO 1] Cada 12 h: ¿hay una version nueva en el bucket? Aviso por notificacion
+      // (una vez por version). En otro hilo y sin consecuencias si falla: nunca frena la impresion.
+      if (System.currentTimeMillis() - ultimaVersion >= 12 * HORA_MS) {
+        ultimaVersion = System.currentTimeMillis()
+        val ctx = applicationContext
+        Thread { try { avisarVersionNueva(ctx) } catch (_: Exception) {} }.start()
+      }
       val lista = cfgs
       if (lista.isEmpty()) break
       // [LP-F3] Busqueda de impresoras al arrancar y cada 15 min, en otro hilo (no frena la impresion).
@@ -262,6 +270,22 @@ class PrintService : Service() {
     } catch (e: Exception) {
       ultimoLog = "ciclo " + cfg.prefijo.uppercase() + ": " + e.message
     }
+  }
+
+  private fun avisarVersionNueva(ctx: Context) {
+    val info = Actualizacion.consultar() ?: return
+    if (!Actualizacion.hayNueva(info) || Prefs.getAvisoVersion(ctx) >= info.versionCode) return
+    val abrir = PendingIntent.getActivity(ctx, 14, Intent(Intent.ACTION_VIEW, android.net.Uri.parse(info.url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+    val n = NotificationCompat.Builder(ctx, CANAL)
+      .setContentTitle("Hay una versión nueva de LevoPrint (" + info.versionName + ")")
+      .setContentText("Toca para actualizar. No se pierde la vinculación.")
+      .setSmallIcon(R.drawable.ic_launcher_foreground)
+      .setContentIntent(abrir)
+      .setAutoCancel(true)
+      .build()
+    getSystemService(NotificationManager::class.java)?.notify(4, n)
+    Prefs.setAvisoVersion(ctx, info.versionCode)
   }
 
   private fun salirDeDesactivado() {

@@ -80,6 +80,11 @@
   falta el secret `SUPABASE_SERVICE_KEY` en el repo. Mientras no esté, se publica a mano
   (descargar artifact del CI → subir al bucket). Con el secret puesto, se publica con *Run workflow*
   desde `main` y la casilla **publicar** (un push o merge ya no publica solo; ver README › Publicar).
+- **Antes de publicar, siempre:** lanza el run a mano **sin** marcar publicar y verifica que salga en **verde**
+  (pruebas, APK/.exe y `LevoPrint.json` válido). Solo entonces vuelve a lanzarlo desde `main` con **publicar** ✔.
+- **Aviso de actualización (APK 1.7.0+):** tras publicar, abre LevoPrint en un equipo con una versión anterior
+  (desde la 1.7.0): debe salir la tarjeta «Hay una versión nueva de LevoPrint (X) → Actualizar» y, en menos de
+  12 h, la notificación. Sin internet no debe salir nada ni dejar de imprimir.
 - **Portar a KOMO:** el backend del código de estación está aplicado en KIPU; en KOMO queda
   generado, falta `node apply.mjs komo levoprint` + un smoke test.
 

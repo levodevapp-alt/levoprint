@@ -341,7 +341,28 @@ class MainActivity : AppCompatActivity() {
   override fun onDestroy() { tick?.let { h.removeCallbacks(it) }; super.onDestroy() }
 
   // [MM4-07] Al volver de Ajustes (o reabrir la app) la tarjeta se actualiza: verde si ya quedo.
-  override fun onResume() { super.onResume(); refrescarBateria() }
+  override fun onResume() { super.onResume(); refrescarBateria(); revisarActualizacion() }
+
+  // ---- [Re-QA LP-F3 · MEDIO 1] Aviso de actualizacion (LevoPrint.json del bucket) ----
+  // Al abrir la pantalla (como mucho una consulta cada 5 min). Sin red o JSON invalido: no se muestra nada.
+  private fun revisarActualizacion() {
+    Actualizacion.ultima?.let { mostrarActualizacion(it) }
+    Thread {
+      val info = Actualizacion.consultar(5 * 60000L)
+      h.post { if (!isFinishing && info != null) mostrarActualizacion(info) }
+    }.start()
+  }
+
+  private fun mostrarActualizacion(info: Actualizacion.Info) {
+    val card = findViewById<View>(R.id.cardActualizar) ?: return
+    if (!Actualizacion.hayNueva(info)) { card.visibility = View.GONE; return }
+    card.visibility = View.VISIBLE
+    findViewById<TextView>(R.id.txtActualizar).text = Actualizacion.texto(info) +
+      " Al tocar «Actualizar» se descarga; ábrela e instálala encima (no se pierde la vinculación)."
+    findViewById<Button>(R.id.btnActualizar).setOnClickListener {
+      try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(info.url))) } catch (_: Exception) {}
+    }
+  }
 
   // ---- [MM4-07] Ahorro de bateria ----
   // Xiaomi, Samsung, Huawei y Motorola matan el servicio en primer plano a los minutos de apagar

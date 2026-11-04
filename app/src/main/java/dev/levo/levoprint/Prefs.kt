@@ -121,6 +121,14 @@ object Prefs {
   fun getBateriaPedida(ctx: Context): Boolean =
     ctx.getSharedPreferences(F, Context.MODE_PRIVATE).getBoolean("bateriaPedida", false)
 
+  // [Re-QA LP-F3] versionCode ya avisado por notificacion (el servicio no repite el aviso de la misma version).
+  fun setAvisoVersion(ctx: Context, vc: Int) {
+    ctx.getSharedPreferences(F, Context.MODE_PRIVATE).edit().putInt("avisoVersion", vc).apply()
+  }
+
+  fun getAvisoVersion(ctx: Context): Int =
+    ctx.getSharedPreferences(F, Context.MODE_PRIVATE).getInt("avisoVersion", 0)
+
   fun getBtNombre(ctx: Context): String =
     ctx.getSharedPreferences(F, Context.MODE_PRIVATE).getString("btNombre", "") ?: ""
 }

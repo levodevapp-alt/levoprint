@@ -199,6 +199,8 @@ class AgentRenderTest {
     val m = Regex("versionName\\s*=\\s*\"([^\"]+)\"").find(f.readText())
     assertEquals(m?.groupValues?.get(1), Agent.VERSION)
     assertEquals("1.7.0", Agent.VERSION)
+    val vc = Regex("versionCode\\s*=\\s*(\\d+)").find(f.readText())
+    assertEquals(vc?.groupValues?.get(1)?.toInt(), Agent.VERSION_CODE)
   }
 
   @Test fun envolverPorPalabra() {
