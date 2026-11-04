@@ -11,6 +11,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      # [O-23] El render local del agente (TURNO, pie ASCII, COPIA…) se prueba ANTES de compilar:
+      # si falla, no sale un .exe nuevo.
+      - name: Probar el render del agente
+        run: node agente/prueba_render.cjs
       - name: Instalar postject
         working-directory: agente
         run: npm install --no-save postject@1.0.0-alpha.6
