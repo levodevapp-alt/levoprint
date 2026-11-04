@@ -7,37 +7,70 @@
       android:orientation="vertical" android:padding="20dp">
 
     <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-        android:text="⚡ LevoPrint" android:textColor="@color/oro"
+        android:text="LevoPrint" android:textColor="@color/oro"
         android:textSize="26sp" android:textStyle="bold" />
+    <!-- [MM4-08] Sin el rayo: la marca fase 3 dejó a los productos sin él. -->
     <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
         android:text="Gestor de impresoras · LevoDev" android:textColor="#8FB6D9"
         android:textSize="13sp" android:layout_marginBottom="18dp" />
 
-    <TextView style="@style/Etiqueta" android:text="Código de la consola (9 caracteres)" />
+    <!-- [MM4-08] Pantalla para el cajero: código, «Vincular» y «Escanear QR» al mismo peso
+         y el estado. Acepta el código con guiones o puntos (K-ABCD-2345): maxLength con holgura. -->
+    <TextView style="@style/Etiqueta" android:text="Código de vinculación (9 letras y números)" />
     <EditText android:id="@+id/inCodigo" style="@style/Campo"
-        android:hint="KABCD2345" android:maxLength="9"
+        android:hint="KABCD2345" android:maxLength="13"
         android:inputType="textCapCharacters|textNoSuggestions" />
+    <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_marginTop="4dp" android:textColor="#8FB6D9" android:textSize="12sp"
+        android:text="Lo ves en KOMO › Estaciones, KIPU › Impresoras o KUTI › Impresoras. Dura 15 min." />
 
     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
         android:orientation="horizontal" android:layout_marginTop="8dp">
       <Button android:id="@+id/btnEmparejar" android:layout_width="0dp"
           android:layout_height="wrap_content" android:layout_weight="1"
-          android:layout_marginEnd="6dp" android:text="Emparejar" android:textStyle="bold"
+          android:minHeight="48dp"
+          android:layout_marginEnd="6dp" android:text="Vincular" android:textStyle="bold"
           android:backgroundTint="@color/cian" android:textColor="@color/navy" />
       <Button android:id="@+id/btnEscanear" android:layout_width="0dp"
           android:layout_height="wrap_content" android:layout_weight="1"
+          android:minHeight="48dp"
           android:layout_marginStart="6dp" android:text="Escanear QR" android:textStyle="bold"
           android:backgroundTint="@color/oro" android:textColor="@color/navy" />
     </LinearLayout>
 
+    <!-- [MM4-06] El color lo pone MainActivity: verde si salió bien, rojo si falló. -->
     <TextView android:id="@+id/txtEmparejar" android:layout_width="match_parent"
         android:layout_height="wrap_content" android:layout_marginTop="8dp"
         android:textColor="#8FB6D9" android:textSize="13sp" android:textStyle="bold" />
 
+    <!-- [MM4-07] Ahorro de batería: se muestra con el equipo vinculado mientras Android
+         pueda dormir a LevoPrint; al volver de Ajustes con el permiso, queda en verde. -->
+    <LinearLayout android:id="@+id/cardBateria" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:layout_marginTop="12dp"
+        android:orientation="vertical" android:padding="14dp" android:background="#14406C"
+        android:visibility="gone">
+      <TextView android:id="@+id/txtBateria" android:layout_width="match_parent"
+          android:layout_height="wrap_content" android:textColor="#EAF4FF" android:textSize="14sp"
+          android:text="Para que las comandas salgan siempre, deja a LevoPrint sin ahorro de batería. Si no, el celular lo duerme a los minutos de apagar la pantalla." />
+      <Button android:id="@+id/btnBateria" android:layout_width="match_parent"
+          android:layout_height="wrap_content" android:layout_marginTop="8dp"
+          android:minHeight="48dp" android:text="Permitir" android:textStyle="bold"
+          android:backgroundTint="@color/oro" android:textColor="@color/navy" />
+    </LinearLayout>
+
     <View android:layout_width="match_parent" android:layout_height="1dp"
         android:background="#14406C" android:layout_marginTop="18dp" android:layout_marginBottom="6dp" />
-    <TextView style="@style/Etiqueta" android:text="Configuración manual (avanzado)" />
+    <!-- [MM4-08] La configuración manual va plegada (cerrada por defecto): si alguien toca
+         algo ahí rompe la vinculación, y para el cajero solo asusta. -->
+    <TextView android:id="@+id/btnAvanzadas" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:minHeight="48dp" android:gravity="center_vertical"
+        android:text="▸ Opciones avanzadas" android:textColor="#8FB6D9" android:textSize="14sp"
+        android:textStyle="bold" android:clickable="true" android:focusable="true"
+        android:background="?android:attr/selectableItemBackground" />
 
+    <LinearLayout android:id="@+id/boxAvanzadas" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:orientation="vertical"
+        android:visibility="gone">
     <TextView style="@style/Etiqueta" android:text="URL del backend" />
     <EditText android:id="@+id/inUrl" style="@style/Campo"
         android:hint="https://xxxx.supabase.co" android:inputType="textUri" />
@@ -57,6 +90,7 @@
     <TextView style="@style/Etiqueta" android:text="Ancho del papel (columnas: 48=80mm, 32=58mm)" />
     <EditText android:id="@+id/inAncho" style="@style/Campo"
         android:hint="48" android:text="48" android:inputType="number" />
+    </LinearLayout>
 
     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
         android:orientation="horizontal" android:gravity="center_vertical"

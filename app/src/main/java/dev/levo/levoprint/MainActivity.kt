@@ -1,6 +1,7 @@
 package dev.levo.levoprint
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -8,6 +9,12 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+import android.provider.Settings
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
@@ -67,6 +74,18 @@ class MainActivity : AppCompatActivity() {
     val btnEscanear = findViewById<Button>(R.id.btnEscanear)
     val txtEmparejar = findViewById<TextView>(R.id.txtEmparejar)
 
+    // [MM4-08] Opciones avanzadas plegadas (cerradas al abrir): URL, clave, device, prefijo y ancho.
+    val btnAvanzadas = findViewById<TextView>(R.id.btnAvanzadas)
+    val boxAvanzadas = findViewById<View>(R.id.boxAvanzadas)
+    btnAvanzadas.setOnClickListener {
+      val abrir = boxAvanzadas.visibility != View.VISIBLE
+      boxAvanzadas.visibility = if (abrir) View.VISIBLE else View.GONE
+      btnAvanzadas.text = if (abrir) "▾ Opciones avanzadas" else "▸ Opciones avanzadas"
+    }
+
+    // [MM4-07] Tarjeta del ahorro de bateria (ver refrescarBateria).
+    findViewById<Button>(R.id.btnBateria).setOnClickListener { pedirSinAhorroBateria() }
+
     // leerSinDevice: muestra lo guardado aunque la config este a medias.
     Prefs.leerSinDevice(this).let {
       inUrl.setText(it.url); inAnon.setText(it.anon); inDevice.setText(it.device)
@@ -118,8 +137,10 @@ class MainActivity : AppCompatActivity() {
       // Se avisa claro y el dueno puede escanear/escribir un codigo nuevo.
       val desact = on && PrintService.desactivado
       val msg = if (desact) Emparejamiento.textoDesactivado(Prefs.leer(this)?.prefijo ?: "", PrintService.desactivadoDesde) else ""
-      if (desact && (txtEmparejar.text.isBlank() || txtEmparejar.text.startsWith("Emparejado") || txtEmparejar.text.startsWith("Este equipo está desactivado")))
+      if (desact && (txtEmparejar.text.isBlank() || txtEmparejar.text.startsWith("Vinculado") || txtEmparejar.text.startsWith("Este equipo está desactivado"))) {
         txtEmparejar.text = msg
+        txtEmparejar.setTextColor(COLOR_ERROR)
+      }
       estado.text = when {
         desact -> msg
         on -> "Activo · escuchando impresion"
@@ -129,9 +150,14 @@ class MainActivity : AppCompatActivity() {
 
     // ---- Emparejamiento por codigo (tecleado o via QR) ----
     fun intentarEmparejar(codigo: String, prefijo: String?, url: String?, anon: String?) {
-      if (codigo.isBlank()) { txtEmparejar.text = Emparejamiento.mensajeError("SIN_CODIGO"); return }
+      if (codigo.isBlank()) {
+        txtEmparejar.text = Emparejamiento.mensajeError("SIN_CODIGO")
+        txtEmparejar.setTextColor(COLOR_ERROR); vibrar(doble = true)
+        return
+      }
       inCodigo.setText(codigo)
-      txtEmparejar.text = "Emparejando..."
+      txtEmparejar.text = "Vinculando…"
+      txtEmparejar.setTextColor(COLOR_NEUTRO)
       btnEmparejar.isEnabled = false
       btnEscanear.isEnabled = false
       Thread {
@@ -145,12 +171,34 @@ class MainActivity : AppCompatActivity() {
               inUrl.setText(r.cfg.url); inAnon.setText(r.cfg.anon); inDevice.setText(r.cfg.device)
               inPrefijo.setText(r.cfg.prefijo); inAncho.setText(r.cfg.ancho.toString())
               // El servidor apaga a los anteriores recien con el PRIMER trabajo impreso de este equipo.
-              txtEmparejar.text = Emparejamiento.textoExito(r)
+              // [MM4-06] Exito en verde con vibracion corta.
+              val exito = Emparejamiento.textoExito(r)
+              txtEmparejar.text = exito + " Imprimiendo un papel de prueba…"
+              txtEmparejar.setTextColor(COLOR_OK)
+              vibrar(doble = false)
               val i = Intent(this, PrintService::class.java)
               if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(i) else startService(i)
               h.postDelayed({ refrescar() }, 500)
+              // [MM4-06] Papel de prueba local en un hilo (red/Bluetooth). Si no sale, el
+              // vinculo igual quedo hecho: se avisa en ambar, sin vibrar otra vez.
+              val cfg = r.cfg
+              val nombre = r.nombre
+              Thread {
+                val papel = imprimirPapelVinculado(cfg, nombre)
+                h.post {
+                  if (papel == null) txtEmparejar.text = exito + " Salió un papel de prueba: la impresora ya funciona."
+                  else { txtEmparejar.text = exito + " " + papel; txtEmparejar.setTextColor(COLOR_AVISO) }
+                }
+              }.start()
+              // [MM4-07] Recien vinculado: pedir quedar fuera del ahorro de bateria.
+              refrescarBateria()
             }
-            is CanjeResultado.Error -> txtEmparejar.text = r.mensaje
+            is CanjeResultado.Error -> {
+              // [MM4-06] Error en rojo con vibracion doble.
+              txtEmparejar.text = r.mensaje
+              txtEmparejar.setTextColor(COLOR_ERROR)
+              vibrar(doble = true)
+            }
           }
         }
       }.start()
@@ -207,6 +255,97 @@ class MainActivity : AppCompatActivity() {
 
   private var tick: Runnable? = null
   override fun onDestroy() { tick?.let { h.removeCallbacks(it) }; super.onDestroy() }
+
+  // [MM4-07] Al volver de Ajustes (o reabrir la app) la tarjeta se actualiza: verde si ya quedo.
+  override fun onResume() { super.onResume(); refrescarBateria() }
+
+  // ---- [MM4-07] Ahorro de bateria ----
+  // Xiaomi, Samsung, Huawei y Motorola matan el servicio en primer plano a los minutos de apagar
+  // la pantalla ("la cocina no recibio el pedido"). Con el equipo vinculado y Android pudiendo
+  // dormirlo, se muestra la tarjeta con "Permitir"; si ya esta permitido y la tarjeta se mostro en
+  // esta sesion, queda en verde; si nunca hizo falta, no aparece.
+  private var bateriaPedida = false
+  private fun sinAhorroBateria(): Boolean = try {
+    (getSystemService(Context.POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(packageName)
+  } catch (_: Exception) { true }
+
+  private fun refrescarBateria() {
+    val card = findViewById<View>(R.id.cardBateria) ?: return
+    val txt = findViewById<TextView>(R.id.txtBateria)
+    val btn = findViewById<Button>(R.id.btnBateria)
+    if (Prefs.leer(this) == null) { card.visibility = View.GONE; return }
+    if (sinAhorroBateria()) {
+      if (!bateriaPedida) { card.visibility = View.GONE; return }
+      card.visibility = View.VISIBLE
+      txt.text = "Listo: el ahorro de batería ya no detiene a LevoPrint."
+      txt.setTextColor(COLOR_OK)
+      btn.visibility = View.GONE
+    } else {
+      bateriaPedida = true
+      card.visibility = View.VISIBLE
+      txt.text = "Para que las comandas salgan siempre, deja a LevoPrint sin ahorro de batería. " +
+        "Si no, el celular lo duerme a los minutos de apagar la pantalla."
+      txt.setTextColor(COLOR_TEXTO)
+      btn.visibility = View.VISIBLE
+    }
+  }
+
+  private fun pedirSinAhorroBateria() {
+    try {
+      startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+    } catch (_: Exception) {
+      // Algunas capas (MIUI, EMUI) no traen el dialogo directo: la lista general de Ajustes.
+      try { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) } catch (_: Exception) {}
+    }
+  }
+
+  // ---- [MM4-06] Papel de prueba al vincular ----
+  // Corre en un hilo (red/Bluetooth). Elige la estacion del codigo (el canje responde
+  // "<estacion> · <negocio>"), si no la primera con IP por nombre y, sin IP, la impresora
+  // Bluetooth. Devuelve null si salio, o el aviso para el cajero si no.
+  // OJO: es local, no pasa por la cola: el servidor sigue apagando a los equipos anteriores
+  // recien con el primer trabajo de la cola que imprima este equipo.
+  private fun imprimirPapelVinculado(cfg: Cfg, nombre: String): String? {
+    val hora = java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.US).format(java.util.Date())
+    val texto = Agent.renderVinculado(nombre, hora, cfg.ancho, cfg.prefijo)
+    return try {
+      val ests = try { Agent.estaciones(cfg).values.toList() } catch (_: Exception) { emptyList() }
+      val deCodigo = nombre.substringBefore(" · ").trim()
+      val est = ests.firstOrNull { it.ip != null && it.nombre.trim().equals(deCodigo, ignoreCase = true) }
+        ?: ests.filter { it.ip != null }.minByOrNull { it.nombre.lowercase() }
+      val btMac = Prefs.getBtMac(this)
+      when {
+        est?.ip != null -> { Agent.imprimirTcp(est.ip, est.puerto, texto); null }
+        Prefs.getBluetooth(this) && btMac.isNotBlank() -> { Bt.imprimir(btMac, texto); null }
+        else -> "No salió el papel de prueba: falta la IP de la impresora en " + Emparejamiento.consolaDe(cfg.prefijo) + "."
+      }
+    } catch (e: Exception) {
+      "No salió el papel de prueba: revisa que la impresora esté encendida y en la misma red."
+    }
+  }
+
+  // ---- [MM4-06] Vibracion: corta = exito, doble = error ----
+  private fun vibrar(doble: Boolean) {
+    try {
+      val v: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+        getSystemService(VibratorManager::class.java)?.defaultVibrator
+      else getSystemService(Vibrator::class.java)
+      if (v == null || !v.hasVibrator()) return
+      v.vibrate(
+        if (doble) VibrationEffect.createWaveform(longArrayOf(0, 90, 110, 90), -1)
+        else VibrationEffect.createOneShot(60, VibrationEffect.DEFAULT_AMPLITUDE)
+      )
+    } catch (_: Exception) {}
+  }
+
+  companion object {
+    // [MM4-06] Colores del estado (antes siempre el mismo celeste): mismos tonos que la ventana del .exe.
+    private val COLOR_OK = android.graphics.Color.parseColor("#5FE08A")
+    private val COLOR_ERROR = android.graphics.Color.parseColor("#FF8080")
+    private val COLOR_AVISO = android.graphics.Color.parseColor("#F2C14E")
+    private val COLOR_NEUTRO = android.graphics.Color.parseColor("#8FB6D9")
+    private val COLOR_TEXTO = android.graphics.Color.parseColor("#EAF4FF")
+  }
 
   private fun pedir(p: String) {
     if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED)

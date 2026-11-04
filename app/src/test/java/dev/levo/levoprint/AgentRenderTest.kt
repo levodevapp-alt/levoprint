@@ -85,14 +85,35 @@ class AgentRenderTest {
   // [MM3-01] Pie de marca: el nombre sale de la configuracion del local (prefijo), si no del payload.
   @Test fun pieDeMarcaPorApp() {
     // [QA MM3 M1] ASCII puro: ningun byte > 0x7F en el pie
-    assertEquals("Sistema KUTI - LevoDev - levodev.app\nkuti.levodev.app\n", Agent.pieTexto("kuti"))
-    assertEquals("Sistema KIPU - LevoDev - levodev.app\nkipu.levodev.app\n", Agent.pieTexto("KIPU"))
+    // [MM4-10 · P4] Una sola direccion con gancho; bajo 36 columnas la direccion baja a su linea.
+    assertEquals("Sistema KUTI - LevoDev\nTu negocio tambien: kuti.levodev.app\n", Agent.pieTexto("kuti"))
+    assertEquals("Sistema KIPU - LevoDev\nTu negocio tambien: kipu.levodev.app\n", Agent.pieTexto("KIPU"))
     assertEquals("LevoDev - levodev.app\n", Agent.pieTexto("otra"))
-    assertEquals("Sistema KOMO - LevoDev\nkomo.levodev.app\n", Agent.pieTexto("komo", 32))
+    assertEquals("Sistema KOMO - LevoDev\nTu negocio tambien:\nkomo.levodev.app\n", Agent.pieTexto("komo", 32))
+    for (an in listOf(32, 42, 48, 64)) for (l in Agent.pieTexto("kipu", an).split("\n")) assertTrue(l, l.length <= an)
     for (ap in listOf("komo", "kipu", "kuti", "x")) for (an in listOf(32, 48)) assertTrue(Agent.pieTexto(ap, an).all { it.code < 128 })
     val t = Agent.render(job("PRUEBA", o("""{"x":1}""")), 32, "kipu")
     assertTrue(t, t.contains("Sistema KIPU") && t.contains("kipu.levodev.app") && !t.contains("Paracas"))
     val p = Agent.render(job("PRUEBA", o("""{"app":"KUTI"}""")), 32)
     assertTrue(p, p.contains("Sistema KUTI"))
+  }
+
+  // [MM4-09 · P6] La comanda sale sin pie de marca: termina en la linea "=" y el corte.
+  @Test fun comandaSinPie() {
+    for (ancho in listOf(32, 48)) {
+      val t = Agent.render(job("COMANDA", o("""{"mesa":"3","mozo":"Ana","items":$items,"lema":"POS"}""")), ancho, "komo")
+      assertFalse(t, t.contains("Sistema ") || t.contains("levodev.app"))
+      assertTrue(t, t.endsWith("=".repeat(ancho) + "\n\n\n\n" + 29.toChar() + "V" + 0.toChar()))
+    }
+  }
+
+  // [MM4-06] Papel al vincular: titulo, estacion y negocio en lineas aparte (sin el punto medio), hora y pie.
+  @Test fun papelVinculado() {
+    for (ancho in listOf(32, 48)) {
+      val t = texto(Agent.renderVinculado("Cocina · Pollería Doña Ana", "03/11/2026 21:05", ancho, "komo"))
+      assertTrue(t, t.contains("LevoPrint\nVINCULADO\n") && t.contains("Cocina\nPollería Doña Ana\n") && t.contains("03/11/2026 21:05"))
+      assertTrue(t, !t.contains("·") && t.contains("Tu negocio tambien:") && t.contains("komo.levodev.app"))
+      assertTrue(t, t.split("\n").all { it.length <= ancho })
+    }
   }
 }

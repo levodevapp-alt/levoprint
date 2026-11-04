@@ -51,12 +51,17 @@ object Agent {
   // generico "LevoDev - levodev.app".
   // La primera linea mide 36 columnas: en 58 mm (32) se partiria a media palabra, asi que bajo 36
   // columnas va "Sistema <APP> . LevoDev" y la direccion de la app abajo (ya dice levodev.app).
+  // [MM4-10 · P4 · 3-nov] Una sola direccion y un motivo para entrar: "Sistema <APP> - LevoDev" +
+  // "Tu negocio tambien: <app>.levodev.app" (sin tilde: ASCII puro). Antes salian dos direcciones
+  // seguidas; el ticket lo leen otros duenos. Bajo 36 columnas el gancho se partiria a media
+  // palabra: "Tu negocio tambien:" y la direccion en su propia linea. Misma regla que el .exe y que
+  // komo-print / kipu-print / kuti-print.
   private val SEP = " - "
   fun pieTexto(app: String, ancho: Int = 48): String {
     val a = app.trim().uppercase()
     if (a != "KOMO" && a != "KIPU" && a != "KUTI") return "LevoDev" + SEP + "levodev.app" + NL
-    val l1 = "Sistema " + a + SEP + "LevoDev" + (if (ancho >= 36) SEP + "levodev.app" else "")
-    return l1 + NL + a.lowercase() + ".levodev.app" + NL
+    return "Sistema " + a + SEP + "LevoDev" + NL + "Tu negocio tambien:" + (if (ancho >= 36) " " else NL) +
+      a.lowercase() + ".levodev.app" + NL
   }
   private fun pie(app: String, ancho: Int) = FONT0 + pieTexto(app, ancho) + CORTE
 
@@ -153,7 +158,21 @@ object Agent {
     }
     val nota = pl.optString("nota")
     if (nota.isNotBlank()) b.append(linea(ancho) + "NOTA: " + nota + NL)
-    b.append(linea(ancho, "=") + CENTRO + pie(app, ancho))
+    // [MM4-09 · P6 · 3-nov] La comanda no lleva pie: al cliente nunca le llega y eran lineas de
+    // rollo por ronda que se botan. Solo el corte (el parametro app queda por simetria con los demas).
+    b.append(linea(ancho, "=") + CORTE)
+    return b.toString()
+  }
+
+  // [MM4-06 · 3-nov] Papel corto al vincular: el cajero ve en papel que funciona en su primer
+  // turno. "nombre" es el del canje ("<estacion> · <negocio>"): cada parte va en su linea (sin el
+  // punto medio, que depende de la pagina de codigos). Solo local: no pasa por la cola del servidor.
+  fun renderVinculado(nombre: String, hora: String, ancho: Int, app: String): String {
+    val b = StringBuilder(INIT + CENTRO + "LevoPrint" + NL + NEG_ON + GRANDE + "VINCULADO" + NL + NORMAL + NEG_OFF)
+    b.append(linea(ancho, "="))
+    for (parte in nombre.split(" · ").map { it.trim() }.filter { it.isNotBlank() }) b.append(parte.take(ancho) + NL)
+    if (hora.isNotBlank()) b.append(hora + NL)
+    b.append(linea(ancho, "=") + "Si lees esto, la impresora" + NL + "ya funciona." + NL + pie(app, ancho))
     return b.toString()
   }
 

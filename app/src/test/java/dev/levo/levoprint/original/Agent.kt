@@ -45,7 +45,8 @@ object Agent {
   private val FONT0 = ESC + "!" + 0.toChar()
   private val CORTE = NL + NL + NL + GS + "V" + 0.toChar()
   // [MM3-01] Unico cambio a la copia congelada: el pie de marca (el de KOMO; la prueba llama al render nuevo con "KOMO").
-  private val PIE = FONT0 + "Sistema KOMO - LevoDev - levodev.app" + NL + "komo.levodev.app" + NL + CORTE
+  // [MM4-10] Pie con gancho "Tu negocio tambien:" (forma de 48 columnas; la prueba lo cambia bajo 36).
+  private val PIE = FONT0 + "Sistema KOMO - LevoDev" + NL + "Tu negocio tambien: komo.levodev.app" + NL + CORTE
 
   // ---- RPC (mismo contrato que el agente .exe) ----
   fun rpc(c: Cfg, fn: String, p: JSONObject): JSONObject {
@@ -140,7 +141,8 @@ object Agent {
     }
     val nota = pl.optString("nota")
     if (nota.isNotBlank()) b.append(linea(ancho) + "NOTA: " + nota + NL)
-    b.append(linea(ancho, "=") + CENTRO + PIE)
+    // [MM4-09] La comanda sale sin pie: solo el corte.
+    b.append(linea(ancho, "=") + CORTE)
     return b.toString()
   }
 

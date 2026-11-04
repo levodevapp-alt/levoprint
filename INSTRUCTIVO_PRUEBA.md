@@ -56,7 +56,7 @@
 4. **Emparejar — dos caminos, cualquiera vale:**
    - **Escanear QR:** botón **"Escanear QR"** → permite la **cámara** → apunta al QR de la
      consola. Se empareja solo.
-   - **O código:** escribe las **8 letras** y pulsa **Emparejar**.
+   - **O código:** escribe las **9 letras y números** (con o sin guiones) y pulsa **Vincular**. Sale un papel de prueba y el aviso en verde; si falla, en rojo con doble vibración. Si aparece la tarjeta del ahorro de batería, toca **Permitir**.
    → Debe confirmar el emparejamiento y quedar listo.
 5. **Poner la IP** de la impresora (o elegir la impresora **Bluetooth**) y **guardar**.
 6. **Imprimir prueba** y luego una **venta real** desde KIPU.

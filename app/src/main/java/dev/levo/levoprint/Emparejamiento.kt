@@ -65,7 +65,7 @@ object Emparejamiento {
     "SIN_CODIGO" -> "Escribe el código de 9 caracteres."
     "RED" -> "No se pudo conectar. Revisa tu internet e intenta de nuevo."
     "RESPUESTA_INCOMPLETA" -> "El servidor respondió sin los datos necesarios. Intenta de nuevo."
-    else -> "No se pudo emparejar ($err)."
+    else -> "No se pudo vincular ($err)."
   }
 
   // [qa4] La pantalla se llama "Estaciones" en KOMO e "Impresoras" en KIPU.
@@ -107,7 +107,8 @@ object Emparejamiento {
 
   // Texto del exito segun modo/reemplazara (el reemplazo se aplica en el
   // PRIMER trabajo impreso del equipo nuevo, no al vincular).
-  fun textoExito(r: CanjeResultado.Ok): String = "Emparejado como " + r.nombre + when {
+  // [MM4-08] "Vincular": el mismo verbo del ERP y de la consola.
+  fun textoExito(r: CanjeResultado.Ok): String = "Vinculado como " + r.nombre + when {
     r.modo == "reemplazar" && r.reemplazara == 1 -> ". Cuando imprimas tu primera comanda, se apagará el equipo anterior."
     r.modo == "reemplazar" && r.reemplazara > 1 -> ". Cuando imprimas tu primera comanda, se apagarán los " + r.reemplazara + " equipos anteriores."
     r.modo == "adicional" -> ". Quedó como equipo adicional."
@@ -116,7 +117,9 @@ object Emparejamiento {
 
   // Codigo normalizado igual que el servidor: mayusculas y sin espacios
   // (incluye saltos de linea CR/LF de un copiar/pegar).
-  fun normalizar(codigo: String): String = codigo.uppercase().filter { !it.isWhitespace() }
+  // [MM4-08] Tambien sin guiones ni puntos, por si la consola lo muestra en grupos
+  // ("K-ABCD-2345"): solo quedan letras y numeros (el FORMATO rechaza el resto).
+  fun normalizar(codigo: String): String = codigo.uppercase().filter { it.isLetterOrDigit() }
 
   // "levoprint://emparejar?c=KXXXXXXXX&p=komo" (o el equivalente https, por
   // si la consola cambia el esquema del QR) -> DatosLink. null si no trae codigo.

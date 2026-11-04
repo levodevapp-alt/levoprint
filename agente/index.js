@@ -147,8 +147,10 @@ function abortarSinConfig() {
   pausarYSalir(1);
 }
 
+// [MM4-08] Tambien sin guiones ni puntos, por si la consola lo muestra en grupos (\u00ABK-ABCD-2345\u00BB):
+// solo quedan letras y numeros (mismo criterio que el APK; CODIGO_FORMATO rechaza el resto).
 function normalizarCodigo(c) {
-  return String(c || '').replace(/[\s\uFEFF]+/g, '').toUpperCase();
+  return String(c || '').replace(/[^0-9A-Za-z]+/g, '').toUpperCase();
 }
 
 // [canje-v3] Error HTTP con el "message" de Postgres en e.pg. Las RPC del
@@ -203,7 +205,9 @@ function renderComanda(pl) {
     if (it.nota) t += `   >> ${it.nota}\n`;
   }
   if (pl.nota) t += linea() + `NOTA: ${pl.nota}\n`;
-  t += linea('=') + CMD.centro + firma(pl) + CMD.corte;
+  // [MM4-09 · P6 · 3-nov] La comanda no lleva pie: al cliente nunca le llega y eran líneas de rollo
+  // por ronda que se botan. Solo el corte (el pie sigue en precuenta, ticket, CPE y carta QR).
+  t += linea('=') + CMD.corte;
   return t;
 }
 
@@ -356,10 +360,54 @@ function renderCartaQr(pl) {
 // (guion en vez del punto medio 0xB7, que depende de la página de códigos de la impresora).
 // Misma regla que komo-print / kipu-print / kuti-print (render servidor) y que el APK (Agent.kt).
 const APPS_PIE = { komo: 'KOMO', kipu: 'KIPU', kuti: 'KUTI' };
+// [MM4-10 · P4 · 3-nov] Una sola dirección y un motivo para entrar: «Sistema <APP> - LevoDev» +
+// «Tu negocio tambien: <app>.levodev.app» (sin tilde: ASCII puro). Antes salían dos direcciones
+// seguidas; el ticket lo leen otros dueños. Bajo 36 columnas el gancho se partiría a media palabra:
+// «Tu negocio tambien:» y la dirección en su propia línea.
 function pieMarca(app, ancho){
   const a=String(app||'').trim().toUpperCase();
   if(!APPS_PIE[a.toLowerCase()]) return 'LevoDev - levodev.app\n';
-  return 'Sistema '+a+' - LevoDev'+(ancho>=36?' - levodev.app':'')+'\n'+a.toLowerCase()+'.levodev.app\n';
+  return 'Sistema '+a+' - LevoDev\n'+'Tu negocio tambien:'+(ancho>=36?' ':'\n')+a.toLowerCase()+'.levodev.app\n';
+}
+
+// [MM4-06 · 3-nov] Papel corto al vincular: el cajero ve en papel que funciona. «nombre» es el del
+// canje («<estación> · <negocio>»): cada parte en su línea, sin el punto medio (depende de la página
+// de códigos). Solo local: no pasa por la cola, así que NO dispara el apagado de los equipos
+// anteriores (eso sigue ocurriendo con el primer trabajo de la cola que imprima este equipo).
+function renderVinculado(nombre, hora){
+  let t = CMD.init + CMD.centro + 'LevoPrint\n' + CMD.negritaOn + CMD.grande + 'VINCULADO\n' + CMD.normal + CMD.negritaOff;
+  t += linea('=');
+  for (const parte of String(nombre || '').split(' · ').map((x) => x.trim()).filter(Boolean)) t += parte.slice(0, ANCHO) + '\n';
+  if (hora) t += hora + '\n';
+  t += linea('=') + 'Si lees esto, la impresora\nya funciona.\n';
+  t += '\x1b\x21\x00' + pieMarca(APPS_PIE[String(PREFIJO || '').toLowerCase()] || '', ANCHO) + CMD.corte;
+  return t;
+}
+function horaLocal(){
+  const d = new Date(), p = (n) => String(n).padStart(2, '0');
+  return p(d.getDate()) + '/' + p(d.getMonth() + 1) + '/' + d.getFullYear() + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+// Imprime el papel de vinculado en la estación del código (por nombre) o, si no, en la primera
+// con IP. Devuelve { ok, mensaje } para la ventana; nunca lanza (el vínculo ya quedó hecho).
+async function imprimirVinculado(nombre){
+  try {
+    try { await refrescarConfig(DEVICE, PREFIJO); cicloConfig = Date.now(); } catch (_) { /* sin estaciones: se avisa abajo */ }
+    const deCodigo = String(nombre || '').split(' · ')[0].trim().toLowerCase();
+    const conIp = [...estaciones.values()].filter((e) => e && e.ip);
+    const est = conIp.find((e) => String(e.nombre || '').trim().toLowerCase() === deCodigo) || conIp[0];
+    const texto = renderVinculado(nombre, horaLocal());
+    if (MODO_CONSOLA || !est) {
+      console.log('[vinculado] ' + texto.replace(/[\x00-\x1f]/g, ' ').trim());
+      return MODO_CONSOLA ? { ok: true, mensaje: 'Modo consola: el papel de prueba se mostró en la consola.' }
+        : { ok: false, mensaje: 'No salió el papel de prueba: falta la IP de la impresora en ' + consolaDe(PREFIJO) + '.' };
+    }
+    await imprimirRaw(est.ip, est.puerto || 9100, texto);
+    console.log('[vinculado] papel de prueba -> ' + est.nombre + ' (' + est.ip + ')');
+    return { ok: true, mensaje: 'Salió un papel de prueba en ' + est.nombre + ': la impresora ya funciona.' };
+  } catch (e) {
+    console.error('[vinculado] no salio el papel de prueba: ' + e.message);
+    return { ok: false, mensaje: 'No salió el papel de prueba: revisa que la impresora esté encendida y en la misma red.' };
+  }
 }
 
 function firma(pl){
@@ -748,7 +796,7 @@ function estadoActual() {
   else semaforo = 'conectado';
   return {
     ok: true,
-    version: '1.8',
+    version: '1.9',
     modoConsola: MODO_CONSOLA,
     ancho: ANCHO,
     prefijo: PREFIJO,
@@ -793,7 +841,7 @@ function paginaHtml() {
   button.secundario { background:#262b36; }
   button:disabled { opacity:.5; cursor:default; }
   .msg { font-size:13px; margin-top:10px; min-height:16px; }
-  .msg.err { color:#ff8080; } .msg.ok { color:#5fe08a; }
+  .msg.err { color:#ff8080; } .msg.ok { color:#5fe08a; } .msg.warn { color:#f2c14e; }
   footer { text-align:center; color:#4c5261; font-size:12px; margin-top:18px; }
 </style>
 </head>
@@ -806,7 +854,8 @@ function paginaHtml() {
 
     <div id="vinculoBox" style="display:none">
       <div class="fila"><b>Vincular este agente</b></div>
-      <input id="codigo" type="text" maxlength="9" placeholder="CÓDIGO DE 9 CARACTERES">
+      <input id="codigo" type="text" maxlength="13" placeholder="CÓDIGO DE VINCULACIÓN (9 LETRAS Y NÚMEROS)">
+      <div class="sub" style="margin:-4px 0 10px">Lo ves en KOMO › Estaciones, KIPU › Impresoras o KUTI › Impresoras. Dura 15 min.</div>
       <button id="btnVincular">Vincular</button>
       <div id="msgVinculo" class="msg"></div>
     </div>
@@ -876,10 +925,21 @@ document.getElementById('btnVincular').addEventListener('click', async function 
   const codigo = document.getElementById('codigo').value.trim();
   const msg = document.getElementById('msgVinculo');
   if (!codigo) { msg.textContent = 'Escribe el codigo.'; msg.className = 'msg err'; return; }
-  msg.textContent = 'Vinculando...'; msg.className = 'msg';
-  const r = await j('/vincular', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ codigo: codigo }) });
-  if (r && r.ok) { msg.textContent = 'Vinculado como ' + (r.nombre || 'estación') + '.' + (r.aviso ? ' ' + r.aviso : ''); msg.className = 'msg ok'; }
-  else { msg.textContent = (r && r.mensaje) || 'No se pudo vincular.'; msg.className = 'msg err'; }
+  // [MM4-06] «Vinculando…» con el boton deshabilitado; exito en verde y error en rojo. Al quedar
+  // vinculado la caja del codigo se oculta: el resultado (y el del papel de prueba) va en msgPrueba.
+  const btn = document.getElementById('btnVincular');
+  btn.disabled = true;
+  msg.textContent = 'Vinculando…'; msg.className = 'msg';
+  let r = null;
+  try { r = await j('/vincular', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ codigo: codigo }) }); } catch (_) { r = null; }
+  btn.disabled = false;
+  if (r && r.ok) {
+    const txt = 'Vinculado como ' + (r.nombre || 'estación') + '.' + (r.aviso ? ' ' + r.aviso : '') + (r.papel && r.papel.mensaje ? ' ' + r.papel.mensaje : '');
+    const clase = 'msg ' + (r.papel && r.papel.ok === false ? 'warn' : 'ok');
+    msg.textContent = txt; msg.className = clase;
+    const mp = document.getElementById('msgPrueba'); mp.textContent = txt; mp.className = clase;
+  }
+  else { msg.textContent = (r && r.mensaje) || 'No se pudo vincular. Revisa tu internet e intenta de nuevo.'; msg.className = 'msg err'; }
   refrescar();
 });
 
@@ -939,6 +999,8 @@ async function manejarVincular(req, res) {
     // Token nuevo: vuelta inmediata con config fresca (arranca el bucle si
     // arrancar() no lo inicio, o corta la pausa de 45 s si estaba desactivado).
     despertarCiclo();
+    // [MM4-06] Papel de prueba: la ventana muestra si salió (verde) o no (ámbar).
+    r.papel = await imprimirVinculado(r.nombre);
   }
   return responderJson(res, r.ok ? 200 : 400, r);
 }
@@ -1001,9 +1063,11 @@ function iniciarGui() {
 }
 
 async function arrancar() {
-  await canjearCodigo();
+  const canje = await canjearCodigo();
   if (faltaUrlAnon()) { abortarSinConfig(); return; }
-  console.log('LevoPrint agente de impresion v1.7 (ventana visual + emparejamiento por codigo) - LevoDev');
+  console.log('LevoPrint agente de impresion v1.9 (ventana visual + vinculacion por codigo) - LevoDev');
+  // [MM4-06] Codigo del .txt canjeado recien: papel de prueba (sin bloquear el arranque).
+  if (canje && canje.ok) imprimirVinculado(canje.nombre);
   console.log(MODO_CONSOLA ? 'MODO CONSOLA (sin impresoras reales)' : 'Modo impresión real');
   iniciarGui();
   if (!faltaConfig()) ciclo();
