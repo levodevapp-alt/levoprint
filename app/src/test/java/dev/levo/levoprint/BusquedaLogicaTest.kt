@@ -33,6 +33,17 @@ class BusquedaLogicaTest {
     assertFalse(h.contains("192.168.1.5") || h.contains("192.168.1.6"))
   }
 
+  @Test fun soloRedesPrivadas() {
+    assertTrue(BusquedaLogica.esPrivada("10.1.2.3"))
+    assertTrue(BusquedaLogica.esPrivada("172.16.0.1"))
+    assertTrue(BusquedaLogica.esPrivada("172.31.255.1"))
+    assertFalse(BusquedaLogica.esPrivada("172.32.0.1"))
+    assertTrue(BusquedaLogica.esPrivada("192.168.5.5"))
+    assertFalse(BusquedaLogica.esPrivada("192.169.0.1"))
+    assertFalse(BusquedaLogica.esPrivada("100.64.1.1"))
+    assertTrue(BusquedaLogica.hostsDeSubredes(listOf("190.40.1.2" to 24)).isEmpty())
+  }
+
   @Test fun mascaraAngostaSoloSuRango() {
     val h = BusquedaLogica.hostsDeSubredes(listOf("192.168.1.130" to 26))
     assertEquals(61, h.size) // .129 a .190 sin la propia

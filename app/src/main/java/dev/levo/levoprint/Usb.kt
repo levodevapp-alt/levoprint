@@ -23,9 +23,12 @@ import androidx.core.app.NotificationCompat
 // Ref de la impresora (usbId): "vvvv:pppp[:serie]" (BusquedaLogica.refUsb / coincideUsb).
 object Usb {
   const val ACCION_PERMISO = "dev.levo.levoprint.USB_PERMISO"
+  // [QA LP-F3 · BAJO 7] La notificacion abre LevoPrint en sus impresoras con este extra (usbId) y la
+  // pantalla pide el permiso de Android en primer plano.
+  const val EXTRA_USB_PERMISO = "usbPermiso"
+  const val NOTIF_USB = 3
   private const val BLOQUE = 16 * 1024
   private const val TIEMPO_MS = 5000
-  private const val NOTIF_USB = 3
 
   private fun manager(ctx: Context): UsbManager? = ctx.getSystemService(UsbManager::class.java)
 
@@ -84,7 +87,7 @@ object Usb {
     val dev = buscarEquipo(m, usbId) ?: throw RuntimeException("USB_DESCONECTADA: la impresora USB no esta conectada a este equipo")
     if (!m.hasPermission(dev)) {
       pedirPermiso(ctx, usbId)
-      avisarSinPermiso(ctx)
+      avisarSinPermiso(ctx, usbId)
       throw RuntimeException("USB_SIN_PERMISO: abre LevoPrint y toca «Permitir» para la impresora USB")
     }
     val (intf, ep) = salida(dev) ?: throw RuntimeException("USB_NO_ES_IMPRESORA: el equipo USB no recibe impresion")
@@ -107,10 +110,11 @@ object Usb {
   }
 
   // Notificacion «Toca para permitir la impresora USB» (abre LevoPrint, donde Android muestra el permiso).
-  private fun avisarSinPermiso(ctx: Context) {
+  private fun avisarSinPermiso(ctx: Context, usbId: String) {
     try {
-      val abrir = PendingIntent.getActivity(ctx, 12, Intent(ctx, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+      val i = Intent(ctx, MainActivity::class.java).putExtra(EXTRA_USB_PERMISO, usbId)
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+      val abrir = PendingIntent.getActivity(ctx, 12, i, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
       val n = NotificationCompat.Builder(ctx, PrintService.CANAL)
         .setContentTitle("Falta permiso para la impresora USB")
         .setContentText("Toca aquí y acepta el permiso para que salgan los pedidos.")

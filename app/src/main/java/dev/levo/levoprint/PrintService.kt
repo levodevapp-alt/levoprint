@@ -155,9 +155,10 @@ class PrintService : Service() {
       if (lista.isEmpty()) break
       // [LP-F3] Busqueda de impresoras al arrancar y cada 15 min, en otro hilo (no frena la impresion).
       if (System.currentTimeMillis() - ultimaBusqueda >= Impresoras.BUSCAR_CADA_MS && !Impresoras.buscando) {
+        val primera = ultimaBusqueda == 0L
         ultimaBusqueda = System.currentTimeMillis()
         val ctx = applicationContext
-        Thread { try { Impresoras.buscar(ctx, false) } catch (_: Exception) {} }.start()
+        Thread { try { Impresoras.buscar(ctx, false, forzarInforme = primera) } catch (_: Exception) {} }.start()
       }
       // Vinculos quitados o reemplazados (token nuevo) dejan su estado: el nuevo arranca limpio.
       val claves = lista.map { clave(it) }.toSet()

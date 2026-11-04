@@ -51,7 +51,7 @@
 1. **Generar el código** igual que en A.1 (código + QR en pantalla).
 2. **Descargar la app.** Botón **"Descargar (Android)"** → baja `LevoPrint.apk`.
    - Android pedirá permiso para **instalar apps de esta fuente**: **Permitir**.
-   - Instala. (Si ya tenías una versión vieja, esta se instala **encima** — versionCode 4.)
+   - Instala. (Si ya tenías una versión vieja, esta se instala **encima** — versionCode 12.)
 3. **Abrir LevoPrint.** Verás la sección de **vinculación**.
 4. **Vincular — dos caminos, cualquiera vale:**
    - **Escanear QR:** botón **"Escanear QR"** → permite la **cámara** → apunta al QR de la
@@ -78,7 +78,8 @@
   meter `&u=&a=&p=` en el QR (ya está preparado en `Emparejamiento.parseLink`).
 - **Publicación automática (opcional):** el CI ya tiene el paso de subir al bucket; solo
   falta el secret `SUPABASE_SERVICE_KEY` en el repo. Mientras no esté, se publica a mano
-  (descargar artifact del CI → subir al bucket). Con el secret puesto, **cada push publica solo**.
+  (descargar artifact del CI → subir al bucket). Con el secret puesto, se publica con *Run workflow*
+  desde `main` y la casilla **publicar** (un push o merge ya no publica solo; ver README › Publicar).
 - **Portar a KOMO:** el backend del código de estación está aplicado en KIPU; en KOMO queda
   generado, falta `node apply.mjs komo levoprint` + un smoke test.
 

@@ -120,7 +120,7 @@ const DEV_OTRO = '44444444-4444-4444-8444-444444444444';
     ok(!!(await hasta(async () => (await pedir(baseA, '/estado', { headers: { Host: '127.0.0.1:' + guiA } })).json, 10000)), 'la ventana del agente responde /estado');
 
     // 1) Búsqueda: red (2 falsas) + USB (sin PDF ni Fax), informada a KOMO con versión y capacidades.
-    const vistas = await hasta(() => { const v = mock.estado.komo.vistas.get(DEV_KOMO); return v && v.length >= 5 ? v : null; }, 15000);
+    const vistas = await hasta(() => { const v = mock.estado.komo.vistas.get(DEV_KOMO); return v && v.length >= 6 ? v : null; }, 15000);
     const refs = (vistas || []).map((x) => x.transporte + ':' + x.ref).sort();
     ok(refs.includes('red:127.0.0.1:' + P) && refs.includes('red:127.0.0.2:' + P), 'la búsqueda en red encontró las 2 impresoras falsas', refs);
     ok(refs.includes('usb:POS-80 USB') && refs.includes('usb:Caja Ñandú'), 'las colas USB llegan (con tildes)', refs);
@@ -149,7 +149,7 @@ const DEV_OTRO = '44444444-4444-4444-8444-444444444444';
 
     // 4) GET /impresoras y «Probar» en red y en USB.
     const lista = (await pedir(baseA, '/impresoras', { headers: H })).json;
-    ok(!!lista && lista.red.length === 2 && lista.usb.length === 3, 'GET /impresoras: 2 de red y 3 USB', lista);
+    ok(!!lista && lista.red.length === 2 && lista.usb.length === 4, 'GET /impresoras: 2 de red y 4 USB', lista);
     let r = (await pedir(baseA, '/probar-destino', { headers: H, body: { prefijo: 'komo', estacion: 'e1', transporte: 'red', ref: '127.0.0.2:' + P } })).json;
     ok(!!r && r.ok === true, 'probar-destino red responde ok', r);
     ok(!!(await hasta(() => imp2.recibido.some((t) => t.includes('PRUEBA LEVOPRINT OK')), 4000)), 'la impresora 127.0.0.2 recibió el papel de prueba');
@@ -209,6 +209,8 @@ const DEV_OTRO = '44444444-4444-4444-8444-444444444444';
     // 10) USB que no responde: tiempo máximo, error claro y el proceso se reabre para el siguiente.
     r = (await pedir(baseA, '/probar-destino', { headers: H, body: { prefijo: 'komo', transporte: 'usb', ref: 'CUELGA' } })).json;
     ok(!!r && r.ok === false && r.error === 'USB_TIEMPO', 'cola USB colgada → USB_TIEMPO (tiempo máximo)', r);
+    r = (await pedir(baseA, '/probar-destino', { headers: H, body: { prefijo: 'komo', transporte: 'usb', ref: 'CUELGA_AL_CERRAR' } })).json;
+    ok(!!r && r.ok === true, 'datos ya escritos y Windows trabado al cerrar → se da por impreso (sin duplicar)', r);
     const pidsAntes = new Set(usbLineas().map((x) => x.pid));
     r = (await pedir(baseA, '/probar-destino', { headers: H, body: { prefijo: 'komo', transporte: 'usb', ref: 'POS-80 USB' } })).json;
     const ultima = usbLineas().pop() || {};
@@ -235,20 +237,23 @@ const DEV_OTRO = '44444444-4444-4444-8444-444444444444';
     ok(!!capB && capB.p.capacidades.join(',') === 'red', 'PowerShell restringido → capacidades sin usb', capB && capB.p.capacidades);
     const impB = (await pedir(baseB, '/impresoras', { headers: HB })).json;
     ok(!!impB && impB.usb.length === 0 && /bloquea la impresión USB/.test(impB.usbAviso || ''), 'la ventana avisa que Windows bloquea la impresión USB', impB);
+    // Se retira solo cuando LevoPrint ya tomó la cola de KOMO con éxito (print_tomar reciente).
+    ok(!!(await hasta(() => mock.llamadas.some((l) => l.fn === 'print_tomar' && l.p && l.p.device === DEV_KOMO_ANTIGUO), 10000)), 'el vínculo adoptado ya toma la cola de KOMO');
+    await espera(500);
     r = (await pedir(baseB, '/komo-agente/retirar', { headers: HB, body: {} })).json;
     ok(!!r && r.ok === true && !fs.existsSync(lnk), 'retirar KOMO Agente quita el acceso del arranque', r);
-    // Sin vínculo de KOMO no se cierra KOMO Agente (KOMO dejaría de imprimir): se prueba con un 3.er agente solo de KIPU.
+    // Con el vínculo de KOMO desactivado no se cierra KOMO Agente (KOMO dejaría de imprimir): 3.er agente con un token de KOMO que el servidor rechaza.
     const dirC = path.join(tmp, 'c'); fs.mkdirSync(dirC, { recursive: true });
     const guiC = await puertoGui();
     const C = arrancarAgente(dirC, Object.assign({}, comunes, {
-      LEVO_VINCULOS: 'kipu:' + DEV_KIPU, LEVO_PUERTO_GUI: String(guiC),
+      LEVO_VINCULOS: 'kipu:' + DEV_KIPU + ',komo:' + DEV_OTRO, LEVO_PUERTO_GUI: String(guiC),
       LEVO_LOCK_DIR: path.join(dirC, 'lock'), APPDATA: path.join(dirC, 'appdata'), LOCALAPPDATA: path.join(dirC, 'local'),
     }));
     agentes.push(C.hijo);
     const HC = { Host: '127.0.0.1:' + guiC };
-    await hasta(async () => (await pedir('http://127.0.0.1:' + guiC, '/estado', { headers: HC })).json, 10000);
+    await hasta(async () => { const e = (await pedir('http://127.0.0.1:' + guiC, '/estado', { headers: HC })).json; return e && (e.vinculos || []).some((v) => v.prefijo === 'komo' && v.desactivado); }, 10000);
     r = (await pedir('http://127.0.0.1:' + guiC, '/komo-agente/retirar', { headers: HC, body: {} })).json;
-    ok(!!r && r.ok === false && r.error === 'KOMO_SIN_VINCULO', 'sin vínculo de KOMO no se cierra KOMO Agente', r);
+    ok(!!r && r.ok === false && r.error === 'KOMO_DESACTIVADO', 'con KOMO desactivado no se cierra KOMO Agente', r);
 
     await mock.close();
     imp1.s.close(); imp2.s.close();

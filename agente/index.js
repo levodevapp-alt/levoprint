@@ -115,6 +115,7 @@ function nuevoVinculo(prefijo, device, nombre) {
   return {
     prefijo: String(prefijo || 'komo').trim().toLowerCase(), device: String(device || '').trim(), nombre: String(nombre || ''),
     estaciones: new Map(), cicloConfig: 0, ultimaSync: null, desactivado: null, proximoIntento: 0,
+    ultimoTomarOk: 0, // [QA LP-F3 · MEDIO 3] último print_tomar que respondió bien (KOMO Agente se retira solo con esto reciente)
     // [LP-F3] destino por estación (<prefijo>_agente_impresoras). transporte: null = aún no se sabe,
     // true = el servidor tiene la RPC, false = backend viejo (modo 1.12 hasta sinTransporteHasta).
     destinos: new Map(), transporte: null, sinTransporteHasta: 0, estacionVinculo: null,
@@ -677,12 +678,19 @@ function numAIp(n) { return [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255
 // Interfaces IPv4 de esta PC (sin loopback ni 169.254 = sin DHCP). Máscara más
 // ancha que /24 (p. ej. /16) se recorta a la /24 propia: 254 equipos en ~3 s.
 // Como mucho 4 redes (Wi-Fi + cable + adaptadores virtuales).
-function hostsDeSubredes(ifaces) {
+// [QA LP-F3 · MEDIO 2] Solo redes privadas (10/8, 172.16/12, 192.168/16): una PC con IP pública
+// (módem en puente, VPN) no sondea equipos ajenos de internet.
+function esIpPrivada(ip) {
+  const n = ipANum(ip);
+  return (n >>> 24) === 10 || (n >>> 20) === ((172 * 256 + 16) >>> 4) || (n >>> 16) === 192 * 256 + 168;
+}
+function hostsDeSubredes(ifaces, soloPrivadas) {
   const out = [], redes = new Set(), propias = new Set();
   const M24 = ipANum('255.255.255.0');
   for (const i of ifaces || []) {
     if (!i || i.internal || !(i.family === 'IPv4' || i.family === 4)) continue;
     if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(String(i.address)) || /^169\.254\./.test(i.address)) continue;
+    if (soloPrivadas !== false && !esIpPrivada(i.address)) continue;
     propias.add(i.address);
     let mascara = ipANum(i.netmask || '255.255.255.0');
     if (mascara < M24) mascara = M24;
@@ -712,7 +720,8 @@ function sondear(ip, puerto, ms) {
   });
 }
 async function buscarRed() {
-  const hosts = hostsDeSubredes(interfacesParaBuscar());
+  // La subred de prueba (127.0.0.x, solo con node index.js) no es privada: se permite solo en ese caso.
+  const hosts = hostsDeSubredes(interfacesParaBuscar(), !AJUSTE_PRUEBA('LEVO_BUSCAR_SUBRED'));
   const hallados = [];
   let i = 0;
   const trabajador = async () => { while (i < hosts.length) { const h = hosts[i++]; if (await sondear(h, PUERTO_IMPRESORA, SONDEO_MS)) hallados.push(h); } };
@@ -744,23 +753,31 @@ const PS_CS = [
   '  [DllImport("winspool.drv", SetLastError = true)] static extern bool StartPagePrinter(IntPtr h);',
   '  [DllImport("winspool.drv", SetLastError = true)] static extern bool EndPagePrinter(IntPtr h);',
   '  [DllImport("winspool.drv", SetLastError = true)] static extern bool WritePrinter(IntPtr h, byte[] b, int n, out int escritos);',
-  '  public static string Enviar(string cola, byte[] datos) {',
-  '    IntPtr h;',
-  '    if (!OpenPrinter(cola, out h, IntPtr.Zero)) return "WIN32_" + Marshal.GetLastWin32Error();',
-  '    try {',
-  '      DocInfo di = new DocInfo(); di.pDocName = "LevoPrint"; di.pDataType = "RAW";',
-  '      if (StartDocPrinter(h, 1, di) == 0) return "WIN32_" + Marshal.GetLastWin32Error();',
-  '      try {',
-  '        if (!StartPagePrinter(h)) return "WIN32_" + Marshal.GetLastWin32Error();',
-  '        int escritos;',
-  '        bool ok = WritePrinter(h, datos, datos.Length, out escritos);',
-  '        int err = Marshal.GetLastWin32Error();',
-  '        EndPagePrinter(h);',
-  '        if (!ok) return "WIN32_" + err;',
-  '        if (escritos != datos.Length) return "INCOMPLETO_" + escritos + "_" + datos.Length;',
-  '        return "";',
-  '      } finally { EndDocPrinter(h); }',
-  '    } finally { ClosePrinter(h); }',
+  // [QA LP-F3 · BAJO 5] En 3 pasos: Abrir (cola + documento RAW + página), Escribir y Cerrar. Entre
+  // Escribir y Cerrar el script avisa {id, escrito:true}: si después algo se traba, el agente sabe que
+  // los datos ya llegaron completos a la cola y no lo reintenta como fallido (sin papel duplicado).
+  '  public static string Abrir(string cola, out IntPtr h) {',
+  '    if (!OpenPrinter(cola, out h, IntPtr.Zero)) { string e0 = "WIN32_" + Marshal.GetLastWin32Error(); h = IntPtr.Zero; return e0; }',
+  '    DocInfo di = new DocInfo(); di.pDocName = "LevoPrint"; di.pDataType = "RAW";',
+  '    if (StartDocPrinter(h, 1, di) == 0) { string e1 = "WIN32_" + Marshal.GetLastWin32Error(); ClosePrinter(h); h = IntPtr.Zero; return e1; }',
+  '    if (!StartPagePrinter(h)) { string e2 = "WIN32_" + Marshal.GetLastWin32Error(); EndDocPrinter(h); ClosePrinter(h); h = IntPtr.Zero; return e2; }',
+  '    return "";',
+  '  }',
+  '  public static string Escribir(IntPtr h, byte[] datos) {',
+  '    int escritos;',
+  '    bool ok = WritePrinter(h, datos, datos.Length, out escritos);',
+  '    int err = Marshal.GetLastWin32Error();',
+  '    if (!ok) return "WIN32_" + err;',
+  '    if (escritos != datos.Length) return "INCOMPLETO_" + escritos + "_" + datos.Length;',
+  '    return "";',
+  '  }',
+  '  public static string Cerrar(IntPtr h) {',
+  '    if (h == IntPtr.Zero) return "";',
+  '    string e = "";',
+  '    if (!EndPagePrinter(h)) e = "WIN32_" + Marshal.GetLastWin32Error();',
+  '    if (!EndDocPrinter(h) && e == "") e = "WIN32_" + Marshal.GetLastWin32Error();',
+  '    ClosePrinter(h);',
+  '    return e;',
   '  }',
   '}',
 ].join('\n');
@@ -773,7 +790,7 @@ const PS_SCRIPT = [
   "try { Add-Type -TypeDefinition $env:LP_CS -Language CSharp } catch { LpSale @{ listo = $false; error = 'POWERSHELL_RESTRINGIDO'; detalle = $_.Exception.Message }; exit 3 }",
   "function LpListar { try { @(Get-Printer | ForEach-Object { @{ nombre = [string]$_.Name; driver = [string]$_.DriverName; puerto = [string]$_.PortName } }) } catch { @(Get-CimInstance Win32_Printer | ForEach-Object { @{ nombre = [string]$_.Name; driver = [string]$_.DriverName; puerto = [string]$_.PortName } }) } }",
   'LpSale @{ listo = $true }',
-  "while ($true) { $l = [Console]::In.ReadLine(); if ($l -eq $null) { break }; if (-not $l.Trim()) { continue }; $r = @{ ok = $false }; try { $m = $l | ConvertFrom-Json; $r.id = $m.id; if ($m.op -eq 'listar') { $r.impresoras = @(LpListar); $r.ok = $true } elseif ($m.op -eq 'imprimir') { $e = [LpRaw]::Enviar([string]$m.cola, [Convert]::FromBase64String([string]$m.b64)); if ($e) { $r.error = $e } else { $r.ok = $true } } else { $r.error = 'OP_DESCONOCIDA' } } catch { $r.error = 'PS: ' + $_.Exception.Message }; LpSale $r }",
+  "while ($true) { $l = [Console]::In.ReadLine(); if ($l -eq $null) { break }; if (-not $l.Trim()) { continue }; $r = @{ ok = $false }; try { $m = $l | ConvertFrom-Json; $r.id = $m.id; if ($m.op -eq 'listar') { $r.impresoras = @(LpListar); $r.ok = $true } elseif ($m.op -eq 'imprimir') { $d = [Convert]::FromBase64String([string]$m.b64); $h = [IntPtr]::Zero; $e = [LpRaw]::Abrir([string]$m.cola, [ref]$h); if (-not $e) { $e = [LpRaw]::Escribir($h, $d); if (-not $e) { LpSale @{ id = $m.id; escrito = $true } }; $e2 = [LpRaw]::Cerrar($h); if (-not $e -and $e2) { $r.escrito = $true; $e = $e2 } }; if ($e) { $r.error = $e } else { $r.ok = $true } } else { $r.error = 'OP_DESCONOCIDA' } } catch { $r.error = 'PS: ' + $_.Exception.Message }; LpSale $r }",
 ].join('; ');
 const psWin = { proc: null, listo: null, pendientes: new Map(), sig: 1, estado: '', detalle: '' };
 const PS_TIEMPO_MS = parseInt(AJUSTE_PRUEBA('LEVO_PRUEBA_PS_TIEMPO') || '20000', 10) || 20000;
@@ -833,6 +850,7 @@ function psIniciar() {
         }
         const pend = psWin.pendientes.get(m.id);
         if (!pend) continue;
+        if (m.escrito === true && !('ok' in m)) { pend.escrito = true; continue; } // aviso intermedio: datos ya en la cola
         psWin.pendientes.delete(m.id); clearTimeout(pend.timer);
         pend.resolve(m);
       }
@@ -848,12 +866,16 @@ async function psPedir(obj) {
   if (!p) throw errorCodigo('USB_PROCESO_CAYO', 'el proceso de impresión USB se cerró');
   return new Promise((resolve, reject) => {
     const id = psWin.sig++;
-    const timer = setTimeout(() => {
+    const pend = { resolve, reject, timer: null, escrito: false };
+    pend.timer = setTimeout(() => {
       psWin.pendientes.delete(id);
-      reject(errorCodigo('USB_TIEMPO', 'la impresora USB no respondió en ' + Math.round(PS_TIEMPO_MS / 1000) + ' s'));
+      // [QA LP-F3 · BAJO 5] Si Windows ya había recibido TODOS los datos (aviso «escrito»), el papel está en
+      // la cola: se da por impreso (reintentarlo lo duplicaría). Si se cortó antes, puede haber salido a medias.
+      if (pend.escrito) resolve({ id, ok: true, tardio: true });
+      else reject(errorCodigo('USB_TIEMPO', 'la impresora USB no respondio en ' + Math.round(PS_TIEMPO_MS / 1000) + ' s (posible duplicado: si salio un papel, no hace falta reimprimir)'));
       psCerrar('USB_TIEMPO'); // proceso trabado: se abre otro en el próximo pedido
     }, PS_TIEMPO_MS);
-    psWin.pendientes.set(id, { resolve, reject, timer });
+    psWin.pendientes.set(id, pend);
     try { p.stdin.write(jsonAscii({ id, ...obj }) + '\n'); } catch (e) { clearTimeout(timer); psWin.pendientes.delete(id); reject(errorCodigo('USB_PROCESO_CAYO', e.message)); }
   });
 }
@@ -879,7 +901,9 @@ function mensajeUsb(err) {
 }
 async function imprimirUsbWin(cola, datos) {
   const r = await psPedir({ op: 'imprimir', cola, b64: Buffer.from(datos, 'binary').toString('base64') });
-  if (!r || r.ok !== true) throw errorCodigo('USB_ERROR', mensajeUsb(r && r.error));
+  if (r && r.tardio) console.error('[usb] ' + cola + ': Windows se trabo al cerrar el trabajo, pero ya tenia todos los datos: se da por impreso.');
+  // Escribió todo y falló al cerrar: puede que salga igual → se avisa para no reimprimir a ciegas.
+  if (!r || r.ok !== true) throw errorCodigo('USB_ERROR', mensajeUsb(r && r.error) + (r && r.escrito ? ' (posible duplicado: los datos ya estaban en la cola)' : ''));
 }
 
 // --- Destino de cada estación (agente_config + agente_impresoras) ---
@@ -927,6 +951,7 @@ async function imprimirDestino(d, texto) {
 }
 
 // --- Estado de la búsqueda (lo comparten todos los vínculos: es el mismo equipo) ---
+const PERIODICA = 'cada 15 min';
 const busqueda = { enCurso: null, ts: 0, red: [], usb: [], md5: '', usbAviso: '', motivo: '', pedidaTs: 0 };
 function encontradasActuales() { return busqueda.red.concat(busqueda.usb).slice(0, MAX_ENCONTRADAS); }
 function md5Lista(lista) {
@@ -961,7 +986,10 @@ function buscarImpresoras(motivo) {
     busqueda.md5 = md5Lista(encontradasActuales());
     console.log('[buscar] ' + (motivo || '') + ': ' + red.length + ' de red, ' + usb.length + ' USB (' + (Date.now() - t0) + ' ms)');
     for (const v of vinculos) v.buscadoPendiente = true;
-    await Promise.all(vinculos.slice().map((v) => informarImpresoras(v, true).catch((e) => {
+    // [QA LP-F3 · BAJO 4] La búsqueda periódica manda la lista solo si cambió (md5); si no, solo
+    // «buscado:true». Las pedidas (ventana, consola, vínculo, arranque) la mandan siempre.
+    const forzar = motivo !== PERIODICA;
+    await Promise.all(vinculos.slice().map((v) => informarImpresoras(v, forzar).catch((e) => {
       if (!esAgenteInvalido(e)) console.error('[impresoras ' + v.prefijo + '] ' + e.message);
     })));
     return encontradasActuales();
@@ -1079,8 +1107,17 @@ function revisarKomoAgente(forzar) {
 }
 function retirarKomoAgente() {
   return new Promise((resolve) => {
-    if (!vinculos.some((v) => v.prefijo === 'komo')) {
+    // [QA LP-F3 · MEDIO 3] Solo si LevoPrint YA recibe los pedidos de KOMO: vínculo activo y un
+    // print_tomar correcto hace menos de 2 min. Si no, cerrar KOMO Agente dejaría a KOMO sin imprimir.
+    const k = vinculos.find((v) => v.prefijo === 'komo');
+    if (!k) {
       return resolve({ ok: false, error: 'KOMO_SIN_VINCULO', mensaje: 'Primero vincula KOMO en LevoPrint (escribe el código de KOMO arriba). Si cierras KOMO Agente antes, KOMO deja de imprimir.' });
+    }
+    if (k.desactivado) {
+      return resolve({ ok: false, error: 'KOMO_DESACTIVADO', mensaje: 'KOMO está desactivado en LevoPrint: no cierres KOMO Agente todavía. Vincula KOMO de nuevo con un código y vuelve a intentar.' });
+    }
+    if (!k.ultimoTomarOk || Date.now() - k.ultimoTomarOk > 120000) {
+      return resolve({ ok: false, error: 'KOMO_SIN_CONEXION', mensaje: 'LevoPrint todavía no confirma que recibe los pedidos de KOMO (revisa el internet de esta PC). Espera un minuto y vuelve a intentar; mientras, KOMO Agente sigue abierto.' });
     }
     let quitado = true;
     try { const r = rutaKomoLnk(); if (r && fs.existsSync(r)) fs.unlinkSync(r); } catch (e) { quitado = false; console.error('[komo-agente] no se pudo quitar el acceso: ' + e.message); }
@@ -1191,6 +1228,7 @@ async function cicloVinculo(v) {
   try {
     if (Date.now() - v.cicloConfig >= CONFIG_CADA_MS) await refrescarConfig(v);
     const r = await rpc(`${pfx}_print_tomar`, { device: dev, limite: 10 });
+    v.ultimoTomarOk = Date.now();
     if (v.desactivado && vigente()) {
       console.log(`[agente ${pfx}] el servidor volvio a aceptar este equipo: retomo la impresion.`);
       v.desactivado = null;
@@ -2425,7 +2463,7 @@ async function arrancar() {
   // [LP-F3] Búsqueda de impresoras al arrancar y cada 15 min (además: tras vincular, cuando la
   // consola la pide con buscar:true y con «Buscar de nuevo» en la ventana).
   setTimeout(() => { if (vinculos.length) buscarImpresoras('arranque').catch(() => {}); }, 1500);
-  setInterval(() => { if (vinculos.length) buscarImpresoras('cada 15 min').catch(() => {}); }, BUSCAR_CADA_MS);
+  setInterval(() => { if (vinculos.length) buscarImpresoras(PERIODICA).catch(() => {}); }, BUSCAR_CADA_MS);
   if (!faltaConfig()) {
     console.log('Apps vinculadas: ' + vinculos.map((v) => v.prefijo).join(', '));
     ciclo();

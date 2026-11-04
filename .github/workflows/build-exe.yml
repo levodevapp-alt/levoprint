@@ -1,8 +1,13 @@
 name: build-exe
+# [QA LP-F3 · ALTO 1] Un merge a main ya NO publica solo: el CI se lanza a mano (Actions -> Run workflow).
+# Compila y prueba siempre; publica al bucket solo desde main y con «publicar» marcado.
 on:
-  push:
-    branches: [ main, master ]
   workflow_dispatch:
+    inputs:
+      publicar:
+        description: 'Publicar al bucket de descargas (solo desde main)'
+        type: boolean
+        default: false
 jobs:
   exe:
     runs-on: windows-latest
@@ -34,9 +39,9 @@ jobs:
       # Empaqueta el .exe en el ZIP que espera el boton "Descargar (PC)" de
       # la consola y lo publica a la URL estable. Sin service key: no falla,
       # solo deja el artifact.
-      # [LP-F3] Solo desde main: un workflow_dispatch en una rama de trabajo no pisa la descarga publica.
+      # [QA LP-F3 · ALTO 1] Solo desde main y con «publicar» marcado.
       - name: Publicar al bucket de descargas (si hay service key)
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/main' && inputs.publicar == true
         shell: pwsh
         working-directory: agente
         env:

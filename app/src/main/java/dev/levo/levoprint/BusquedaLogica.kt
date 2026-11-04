@@ -54,14 +54,21 @@ object BusquedaLogica {
 
   fun numAIp(n: Long): String = listOf((n shr 24) and 255, (n shr 16) and 255, (n shr 8) and 255, n and 255).joinToString(".")
 
-  // Hosts a sondear de varias interfaces (ip, largo del prefijo). Sin la propia, sin 169.254, tope /24, maximo 4 redes.
+  // [QA LP-F3 · MEDIO 2] Solo redes privadas (10/8, 172.16/12, 192.168/16): con IP publica no se sondea internet.
+  fun esPrivada(ip: String): Boolean {
+    val n = ipANum(ip)
+    if (n < 0) return false
+    return (n shr 24) == 10L || (n shr 20) == ((172L shl 4) or 1L) || (n shr 16) == ((192L shl 8) or 168L)
+  }
+
+  // Hosts a sondear de varias interfaces (ip, largo del prefijo). Solo privadas, sin la propia, tope /24, maximo 4 redes.
   fun hostsDeSubredes(ifaces: List<Pair<String, Int>>): List<String> {
     val out = ArrayList<String>()
     val propias = HashSet<String>()
     val redes = LinkedHashSet<Long>()
     for ((ip, prefijoIn) in ifaces) {
       val n = ipANum(ip)
-      if (n < 0 || ip.startsWith("169.254.") || ip.startsWith("127.")) continue
+      if (n < 0 || !esPrivada(ip)) continue
       propias.add(ip)
       val prefijo = prefijoIn.coerceIn(24, 32)
       val mascara = (0xFFFFFFFFL shl (32 - prefijo)) and 0xFFFFFFFFL

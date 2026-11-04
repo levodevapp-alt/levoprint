@@ -56,6 +56,7 @@ class MainActivity : AppCompatActivity() {
     setIntent(intent)
     // [LP-F4] Se conecto una impresora USB (filtro res/xml/usb_impresoras.xml): buscar de nuevo.
     if (intent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) buscarEnFondo(false)
+    atenderPermisoUsb(intent)
     intent.data?.let { uri -> Emparejamiento.parseLink(uri)?.let { d ->
       alRecibirEmparejamiento?.invoke(d.codigo, d.prefijo, d.url, d.anon)
     } }
@@ -320,6 +321,7 @@ class MainActivity : AppCompatActivity() {
       else probarEncontrada(Encontrada("red", rr.first + ":" + rr.second, "Impresora en " + rr.first))
     }
     if (intent?.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) buscarEnFondo(false)
+    atenderPermisoUsb(intent)
 
     // Arranque automático si ya hay configuración (tras reinicio/reapertura).
     // Si el servicio corre pero esta desactivado, abrir la app lo despierta
@@ -451,6 +453,26 @@ class MainActivity : AppCompatActivity() {
         val t = findViewById<TextView>(R.id.txtDestinoMsg)
         if (t.text.startsWith("Buscando")) msgDestino("", COLOR_NEUTRO)
       }
+    }.start()
+  }
+
+  // [QA LP-F3 · BAJO 7] Desde la notificacion «Falta permiso para la impresora USB»: se baja a las
+  // impresoras y se pide el permiso de Android con la pantalla delante (en segundo plano no siempre sale).
+  private fun atenderPermisoUsb(i: Intent?) {
+    if (i == null) return
+    val usbId = i.getStringExtra(Usb.EXTRA_USB_PERMISO) ?: return
+    i.removeExtra(Usb.EXTRA_USB_PERMISO)
+    try { getSystemService(android.app.NotificationManager::class.java)?.cancel(Usb.NOTIF_USB) } catch (_: Exception) {}
+    val t = findViewById<TextView>(R.id.txtEmparejar)
+    t.text = "Acepta el permiso de Android para la impresora USB: así salen los pedidos. Si no aparece, desconecta y vuelve a conectar el cable."
+    t.setTextColor(COLOR_AVISO)
+    val sv = findViewById<android.widget.ScrollView>(R.id.scrollMain)
+    val box = findViewById<View>(R.id.boxEstaciones)
+    sv.post { sv.smoothScrollTo(0, maxOf(0, box.top - (24 * resources.displayMetrics.density).toInt())) }
+    val ctx = applicationContext
+    Thread {
+      val ya = try { Usb.pedirPermiso(ctx, usbId) } catch (_: Exception) { false }
+      if (ya) h.post { t.text = "La impresora USB ya tiene permiso: los pedidos vuelven a salir solos."; t.setTextColor(COLOR_OK) }
     }.start()
   }
 

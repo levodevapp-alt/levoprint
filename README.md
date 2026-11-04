@@ -37,7 +37,7 @@ Cada estación (Cocina, Caja…) tiene **su** impresora, que puede ser de **red*
 ### Pruebas (sin Supabase ni impresoras)
 - `node agente/prueba_render.cjs` — render local del `.exe`.
 - `node agente/prueba_integracion.cjs` — el agente contra `agente/mock_rpc.cjs` (PostgREST falso), dos impresoras falsas en 127.0.0.1/127.0.0.2 y `agente/doble_powershell.cjs` en vez de PowerShell: búsqueda, elegir, impresión por transporte, modo 1.12, guardas 403, USB colgado/restringido, `komo-agente.txt`. Los ajustes de prueba (`LEVO_BUSCAR_SUBRED`, `LEVO_BUSCAR_PUERTO`, `LEVO_PRUEBA_PS`, `LEVO_PRUEBA_PS_TIEMPO`, `LEVO_PRUEBA_CONFIG_MS`) solo valen con `node index.js`; el `.exe` los ignora.
-- APK: `gradle testReleaseUnitTest` (render y `BusquedaLogicaTest`). El CI los corre antes de compilar y **solo publica al bucket desde `main`**.
+- APK: `gradle testReleaseUnitTest` (render y `BusquedaLogicaTest`). El CI los corre antes de compilar.
 
 ### Pendientes (LP-U1)
 - **Quitar vínculo** desde la interfaz (ventana del `.exe` y APK): hoy un vínculo solo se reemplaza con un código nuevo de la misma app; para quitar una app hay que editar `LEVO_VINCULOS` en `levoprint.txt` (PC) o borrar los datos de la app (Android).
@@ -49,6 +49,14 @@ Cada estación (Cocina, Caja…) tiene **su** impresora, que puede ser de **red*
   imprime ESC/POS en el destino de la estación (red `ip:9100`, Bluetooth o USB) → `<prefijo>_print_marcar`.
 - Servicio en primer plano (sigue imprimiendo con la pantalla apagada).
 - Impresora Bluetooth general (APK, de la 1.6): sigue como respaldo para estaciones de red sin IP; lo nuevo es elegir la Bluetooth **por estación**.
+
+## Publicar (QA LP-F3 · ALTO 1)
+Un merge o un push a `main` **ya no publica solo**. Los dos workflows (*build-apk* y *build-exe*) se lanzan a mano y siempre compilan y prueban; publican al bucket `descargas/levoprint/` solo si se cumplen las dos cosas: rama `main` **y** la casilla **publicar** marcada.
+1. GitHub → *Actions* → *build-apk* (o *build-exe*) → **Run workflow** → rama **main** → marca **publicar** → (APK) escribe las **notas** de la versión → *Run*.
+   - *build-apk* sube `LevoPrint.apk` y `LevoPrint.json` (`{versionCode, versionName, url, notas}`, la versión se lee de `app/build.gradle.kts`, así nunca queda desalineada; el APK lo usa para avisar que hay actualización).
+   - *build-exe* sube `LevoPrint-Windows.zip`.
+2. Sin la casilla (o desde otra rama) solo quedan los *Artifacts* del run, para probar.
+3. **Publicación manual** (sin el secret `SUPABASE_SERVICE_KEY`, o si el CI falla): baja el artifact del run y súbelo al bucket con el script/procedimiento manual de siempre (Storage → `descargas/levoprint/`, con *upsert*), y sube a mano `LevoPrint.json` con la misma versión de `app/build.gradle.kts`.
 
 ## El APK
 Se compila solo en **GitHub Actions** (pestaña *Actions* → último run → *Artifacts* →

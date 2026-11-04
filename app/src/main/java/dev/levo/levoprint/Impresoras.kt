@@ -78,7 +78,9 @@ object Impresoras {
 
   // Busqueda completa (bloquea: llamar desde un hilo de fondo). descubrirBt = 12 s de descubrimiento
   // Bluetooth (solo desde la pantalla). Al terminar se informa a cada app al instante con «buscado».
-  fun buscar(ctx: Context, descubrirBt: Boolean) {
+  // [QA LP-F3 · BAJO 4] forzarInforme = false (busqueda periodica del servicio): la lista va solo si cambio
+  // el md5; si no, solo «buscado:true». Las pedidas (pantalla, consola, vinculo) la mandan siempre.
+  fun buscar(ctx: Context, descubrirBt: Boolean, forzarInforme: Boolean = true) {
     synchronized(candadoBusqueda) {
       buscando = true
       try {
@@ -104,7 +106,7 @@ object Impresoras {
     }
     for (c in Prefs.leerVinculos(ctx)) {
       app(c).buscadoPendiente = true
-      try { informar(ctx, c, true) } catch (_: Exception) {}
+      try { informar(ctx, c, forzarInforme) } catch (_: Exception) {}
     }
   }
 
