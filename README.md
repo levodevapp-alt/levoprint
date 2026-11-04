@@ -16,6 +16,13 @@ imprime por **TCP a la impresora ESC/POS (:9100)**. Sirve para **todas las apps 
 Se compila solo en **GitHub Actions** (pestaña *Actions* → último run → *Artifacts* →
 `LevoPrint-debug-apk`). Se instala por *sideload* (activar "orígenes desconocidos").
 
+> **Ahorro de batería y Play Store (MM4-07).** El APK declara `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` para
+> pedir quedar fuera del ahorro de batería (si no, Xiaomi/Samsung/Huawei/Motorola duermen el servicio y
+> la cocina no recibe comandas). Se instala desde el bucket, no desde Play, así que la política de Play
+> no aplica. **Si algún día va a Play Store:** quitar ese permiso o moverlo a un *flavor* «bucket»
+> (Play solo lo acepta para casos puntuales y puede rechazar la app); la tarjeta de MainActivity cae sola
+> a la lista general de Ajustes si el diálogo directo no está.
+
 ⚡ by LevoDev · levodev.app
 
 ## Dos formas, un mismo cerebro

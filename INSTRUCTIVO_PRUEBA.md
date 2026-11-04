@@ -1,6 +1,6 @@
 # LevoPrint · Instructivo de prueba (PC .exe y Android .apk)
 
-> Objetivo: verificar en equipo real que un cliente puede **descargar, emparejar
+> Objetivo: verificar en equipo real que un cliente puede **descargar, vincular
 > en 1 código e imprimir**, sin editar ningún archivo de texto.
 > Versiones publicadas: **exe v1.6** (ventana visual) · **APK v1.2.0** (código/QR).
 > Publicado el 2026-09-16 en `descargas/levoprint/` — los botones de la consola ya lo sirven.
@@ -27,8 +27,8 @@
    - Si Windows muestra *"Windows protegió tu PC"* (SmartScreen): **Más información →
      Ejecutar de todas formas**. Es normal en programas nuevos sin firma comercial.
    - Se abre **una ventanita en el navegador** (localhost) con un **semáforo** y campos.
-4. **Emparejar.** Escribe el **código de 8 letras** en el campo y pulsa **Vincular**.
-   → Debe decir *"Emparejado como: Caja · <tu negocio>. Listo."* y el semáforo pasa a **verde**.
+4. **Vincular.** Escribe el **código de 8 letras** en el campo y pulsa **Vincular**.
+   → Debe decir *"Vinculado como: Caja · <tu negocio>. Listo."* y el semáforo pasa a **verde**.
    *(A partir de aquí se configura solo: no se toca ningún .txt.)*
 5. **Poner la IP de la impresora.** En la ventanita, campo **IP** → escribe la IP
    (ej. `192.168.1.50`) y guarda. Elige **58 u 80 mm** según tu papel.
@@ -52,16 +52,16 @@
 2. **Descargar la app.** Botón **"Descargar (Android)"** → baja `LevoPrint.apk`.
    - Android pedirá permiso para **instalar apps de esta fuente**: **Permitir**.
    - Instala. (Si ya tenías una versión vieja, esta se instala **encima** — versionCode 4.)
-3. **Abrir LevoPrint.** Verás la sección de **emparejamiento**.
-4. **Emparejar — dos caminos, cualquiera vale:**
+3. **Abrir LevoPrint.** Verás la sección de **vinculación**.
+4. **Vincular — dos caminos, cualquiera vale:**
    - **Escanear QR:** botón **"Escanear QR"** → permite la **cámara** → apunta al QR de la
-     consola. Se empareja solo.
+     consola. Se vincula solo.
    - **O código:** escribe las **9 letras y números** (con o sin guiones) y pulsa **Vincular**. Sale un papel de prueba y el aviso en verde; si falla, en rojo con doble vibración. Si aparece la tarjeta del ahorro de batería, toca **Permitir**.
-   → Debe confirmar el emparejamiento y quedar listo.
+   → Debe confirmar la vinculación y quedar listo.
 5. **Poner la IP** de la impresora (o elegir la impresora **Bluetooth**) y **guardar**.
 6. **Imprimir prueba** y luego una **venta real** desde KIPU.
 
-**✔ Éxito si:** empareja por QR **y** por código, y ambos imprimen.
+**✔ Éxito si:** vincula por QR **y** por código, y ambos imprimen.
 
 ### Qué reportar si algo falla (Android)
 - ¿El **QR** no se leyó? (luz, distancia, permiso de cámara denegado).
@@ -81,3 +81,7 @@
   (descargar artifact del CI → subir al bucket). Con el secret puesto, **cada push publica solo**.
 - **Portar a KOMO:** el backend del código de estación está aplicado en KIPU; en KOMO queda
   generado, falta `node apply.mjs komo levoprint` + un smoke test.
+
+> **Nota (MM4-07):** el permiso de ahorro de batería es para la instalación desde el bucket. Si LevoPrint
+> se publica en Play Store, quitar `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` o ponerlo en un *flavor* aparte
+> (ver README).

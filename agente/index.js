@@ -1,5 +1,5 @@
 // ============================================================
-// LevoPrint · Agente de impresión v1.7 (ventana visual + emparejamiento por código + render servidor) · LevoDev
+// LevoPrint · Agente de impresión v1.9 (ventana visual + vinculación por código + render servidor) · LevoDev
 // Corre en la PC del local. Poll cada 2s a komo_print_tomar,
 // renderiza ESC/POS y lo manda a la IP:puerto de cada estación.
 // Se empaqueta a LevoPrint.exe (Node SEA). El dueño solo edita
@@ -393,13 +393,17 @@ async function imprimirVinculado(nombre){
   try {
     try { await refrescarConfig(DEVICE, PREFIJO); cicloConfig = Date.now(); } catch (_) { /* sin estaciones: se avisa abajo */ }
     const deCodigo = String(nombre || '').split(' · ')[0].trim().toLowerCase();
+    // [QA MEDIO-1] Sin adivinar: la estación del código si tiene IP; si no, la ÚNICA con IP si hay
+    // exactamente una; con varias o ninguna, se avisa (el .exe no imprime por Bluetooth).
     const conIp = [...estaciones.values()].filter((e) => e && e.ip);
-    const est = conIp.find((e) => String(e.nombre || '').trim().toLowerCase() === deCodigo) || conIp[0];
+    const est = conIp.find((e) => String(e.nombre || '').trim().toLowerCase() === deCodigo) || (conIp.length === 1 ? conIp[0] : null);
     const texto = renderVinculado(nombre, horaLocal());
     if (MODO_CONSOLA || !est) {
       console.log('[vinculado] ' + texto.replace(/[\x00-\x1f]/g, ' ').trim());
-      return MODO_CONSOLA ? { ok: true, mensaje: 'Modo consola: el papel de prueba se mostró en la consola.' }
-        : { ok: false, mensaje: 'No salió el papel de prueba: falta la IP de la impresora en ' + consolaDe(PREFIJO) + '.' };
+      if (MODO_CONSOLA) return { ok: true, mensaje: 'Modo consola: el papel de prueba se mostró en la consola.' };
+      return { ok: false, mensaje: conIp.length
+        ? 'No salió el papel de prueba: hay varias impresoras y no se sabe cuál es la de esta estación. Revisa el nombre de la estación en ' + consolaDe(PREFIJO) + '.'
+        : 'No salió el papel de prueba: falta la IP de la impresora en ' + consolaDe(PREFIJO) + '.' };
     }
     await imprimirRaw(est.ip, est.puerto || 9100, texto);
     console.log('[vinculado] papel de prueba -> ' + est.nombre + ' (' + est.ip + ')');
@@ -704,13 +708,13 @@ async function canjearCodigo(codigoIn) {
     console.error(msg);
     return { ok: false, error: 'CODIGO_RESERVADO', mensaje: msg };
   }
-  console.log('Emparejando con el codigo ' + cod + ' (' + prefijoCod + ')...');
+  console.log('Vinculando con el codigo ' + cod + ' (' + prefijoCod + ')...');
   let d;
   try {
     d = await rpc(`${prefijoCod}_estacion_codigo_canjear`, { codigo: cod });
   } catch (e) {
-    console.error('No se pudo emparejar (revisa tu internet): ' + e.message);
-    return { ok: false, error: 'RED', mensaje: 'No se pudo emparejar (revisa tu internet): ' + e.message };
+    console.error('No se pudo vincular (revisa tu internet): ' + e.message);
+    return { ok: false, error: 'RED', mensaje: 'No se pudo vincular (revisa tu internet): ' + e.message };
   }
   if (d && d.seccion) seccionVista[prefijoCod] = String(d.seccion).trim();
   if (!d || d.ok !== true) {
@@ -747,7 +751,7 @@ async function canjearCodigo(codigoIn) {
   const aviso = (d.modo === 'reemplazar' && n === 1) ? 'Cuando imprimas tu primera comanda, se apagará el equipo anterior.'
     : (d.modo === 'reemplazar' && n > 1) ? `Cuando imprimas tu primera comanda, se apagarán los ${n} equipos anteriores.`
     : d.modo === 'adicional' ? 'Quedó como equipo adicional.' : '';
-  console.log('Emparejado como: ' + (d.nombre || 'estacion') + '. Listo.' + (aviso ? ' ' + aviso : '') + (d.reintento ? ' (reintento)' : ''));
+  console.log('Vinculado como: ' + (d.nombre || 'estacion') + '. Listo.' + (aviso ? ' ' + aviso : '') + (d.reintento ? ' (reintento)' : ''));
   return { ok: true, nombre: d.nombre, modo: d.modo || null, reemplazara: n, reintento: !!d.reintento, aviso };
 }
 
@@ -1000,7 +1004,8 @@ async function manejarVincular(req, res) {
     // arrancar() no lo inicio, o corta la pausa de 45 s si estaba desactivado).
     despertarCiclo();
     // [MM4-06] Papel de prueba: la ventana muestra si salió (verde) o no (ámbar).
-    r.papel = await imprimirVinculado(r.nombre);
+    // [QA BAJO-4] Recanje idempotente (reintento): el papel ya salió la primera vez.
+    if (!r.reintento) r.papel = await imprimirVinculado(r.nombre);
   }
   return responderJson(res, r.ok ? 200 : 400, r);
 }
@@ -1067,7 +1072,7 @@ async function arrancar() {
   if (faltaUrlAnon()) { abortarSinConfig(); return; }
   console.log('LevoPrint agente de impresion v1.9 (ventana visual + vinculacion por codigo) - LevoDev');
   // [MM4-06] Codigo del .txt canjeado recien: papel de prueba (sin bloquear el arranque).
-  if (canje && canje.ok) imprimirVinculado(canje.nombre);
+  if (canje && canje.ok && !canje.reintento) imprimirVinculado(canje.nombre);
   console.log(MODO_CONSOLA ? 'MODO CONSOLA (sin impresoras reales)' : 'Modo impresión real');
   iniciarGui();
   if (!faltaConfig()) ciclo();

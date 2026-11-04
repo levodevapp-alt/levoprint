@@ -45,6 +45,15 @@ object Prefs {
   fun getBtMac(ctx: Context): String =
     ctx.getSharedPreferences(F, Context.MODE_PRIVATE).getString("btMac", "") ?: ""
 
+  // [MM4-07 · QA BAJO-7] La tarjeta del ahorro de bateria ya se mostro alguna vez: al volver con el
+  // permiso queda en verde aunque la app se haya cerrado entre medio (Ajustes puede matar el proceso).
+  fun setBateriaPedida(ctx: Context, v: Boolean) {
+    ctx.getSharedPreferences(F, Context.MODE_PRIVATE).edit().putBoolean("bateriaPedida", v).apply()
+  }
+
+  fun getBateriaPedida(ctx: Context): Boolean =
+    ctx.getSharedPreferences(F, Context.MODE_PRIVATE).getBoolean("bateriaPedida", false)
+
   fun getBtNombre(ctx: Context): String =
     ctx.getSharedPreferences(F, Context.MODE_PRIVATE).getString("btNombre", "") ?: ""
 }

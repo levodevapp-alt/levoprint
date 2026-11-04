@@ -119,7 +119,8 @@ object Emparejamiento {
   // (incluye saltos de linea CR/LF de un copiar/pegar).
   // [MM4-08] Tambien sin guiones ni puntos, por si la consola lo muestra en grupos
   // ("K-ABCD-2345"): solo quedan letras y numeros (el FORMATO rechaza el resto).
-  fun normalizar(codigo: String): String = codigo.uppercase().filter { it.isLetterOrDigit() }
+  // [QA BAJO-5] Solo ASCII (A-Z, 0-9): una letra con tilde o un digito de otro alfabeto no pasa.
+  fun normalizar(codigo: String): String = codigo.uppercase().filter { it in 'A'..'Z' || it in '0'..'9' }
 
   // "levoprint://emparejar?c=KXXXXXXXX&p=komo" (o el equivalente https, por
   // si la consola cambia el esquema del QR) -> DatosLink. null si no trae codigo.

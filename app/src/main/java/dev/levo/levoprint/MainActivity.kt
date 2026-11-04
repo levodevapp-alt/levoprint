@@ -43,7 +43,7 @@ class MainActivity : AppCompatActivity() {
       alRecibirEmparejamiento?.invoke(datos.codigo, datos.prefijo, datos.url, datos.anon)
     } else {
       // No es un link levoprint:// conocido: asume que el QR trae el codigo pelado.
-      val cod = texto.trim().uppercase().filter { it.isLetterOrDigit() }.take(9)
+      val cod = Emparejamiento.normalizar(texto).take(9)
       alRecibirEmparejamiento?.invoke(cod, null, null, null)
     }
   }
@@ -171,25 +171,34 @@ class MainActivity : AppCompatActivity() {
               inUrl.setText(r.cfg.url); inAnon.setText(r.cfg.anon); inDevice.setText(r.cfg.device)
               inPrefijo.setText(r.cfg.prefijo); inAncho.setText(r.cfg.ancho.toString())
               // El servidor apaga a los anteriores recien con el PRIMER trabajo impreso de este equipo.
-              // [MM4-06] Exito en verde con vibracion corta.
+              // [MM4-06] Vibracion corta de exito. [QA BAJO-3] Mientras sale el papel el texto va en
+              // tono neutro ("Imprimiendo…"); el verde o el ambar llegan con el resultado.
               val exito = Emparejamiento.textoExito(r)
-              txtEmparejar.text = exito + " Imprimiendo un papel de prueba…"
-              txtEmparejar.setTextColor(COLOR_OK)
               vibrar(doble = false)
               val i = Intent(this, PrintService::class.java)
               if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(i) else startService(i)
               h.postDelayed({ refrescar() }, 500)
-              // [MM4-06] Papel de prueba local en un hilo (red/Bluetooth). Si no sale, el
-              // vinculo igual quedo hecho: se avisa en ambar, sin vibrar otra vez.
-              val cfg = r.cfg
-              val nombre = r.nombre
-              Thread {
-                val papel = imprimirPapelVinculado(cfg, nombre)
-                h.post {
-                  if (papel == null) txtEmparejar.text = exito + " Salió un papel de prueba: la impresora ya funciona."
-                  else { txtEmparejar.text = exito + " " + papel; txtEmparejar.setTextColor(COLOR_AVISO) }
-                }
-              }.start()
+              if (r.reintento) {
+                // [QA BAJO-4] Recanje idempotente (misma IP, < 3 min): el papel ya salio la primera vez.
+                txtEmparejar.text = exito
+                txtEmparejar.setTextColor(COLOR_OK)
+              } else {
+                txtEmparejar.text = exito + " Imprimiendo un papel de prueba…"
+                txtEmparejar.setTextColor(COLOR_NEUTRO)
+                // [MM4-06] Papel de prueba local en un hilo (red/Bluetooth). Si no sale, el
+                // vinculo igual quedo hecho: se avisa en ambar, sin vibrar otra vez.
+                val cfg = r.cfg
+                val nombre = r.nombre
+                Thread {
+                  val papel = imprimirPapelVinculado(cfg, nombre)
+                  h.post {
+                    if (papel == null) {
+                      txtEmparejar.text = exito + " Salió un papel de prueba: la impresora ya funciona."
+                      txtEmparejar.setTextColor(COLOR_OK)
+                    } else { txtEmparejar.text = exito + " " + papel; txtEmparejar.setTextColor(COLOR_AVISO) }
+                  }
+                }.start()
+              }
               // [MM4-07] Recien vinculado: pedir quedar fuera del ahorro de bateria.
               refrescarBateria()
             }
@@ -263,8 +272,7 @@ class MainActivity : AppCompatActivity() {
   // Xiaomi, Samsung, Huawei y Motorola matan el servicio en primer plano a los minutos de apagar
   // la pantalla ("la cocina no recibio el pedido"). Con el equipo vinculado y Android pudiendo
   // dormirlo, se muestra la tarjeta con "Permitir"; si ya esta permitido y la tarjeta se mostro en
-  // esta sesion, queda en verde; si nunca hizo falta, no aparece.
-  private var bateriaPedida = false
+  // alguna vez (Prefs.getBateriaPedida, QA BAJO-7), queda en verde; si nunca hizo falta, no aparece.
   private fun sinAhorroBateria(): Boolean = try {
     (getSystemService(Context.POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(packageName)
   } catch (_: Exception) { true }
@@ -275,13 +283,13 @@ class MainActivity : AppCompatActivity() {
     val btn = findViewById<Button>(R.id.btnBateria)
     if (Prefs.leer(this) == null) { card.visibility = View.GONE; return }
     if (sinAhorroBateria()) {
-      if (!bateriaPedida) { card.visibility = View.GONE; return }
+      if (!Prefs.getBateriaPedida(this)) { card.visibility = View.GONE; return }
       card.visibility = View.VISIBLE
       txt.text = "Listo: el ahorro de batería ya no detiene a LevoPrint."
       txt.setTextColor(COLOR_OK)
       btn.visibility = View.GONE
     } else {
-      bateriaPedida = true
+      Prefs.setBateriaPedida(this, true)
       card.visibility = View.VISIBLE
       txt.text = "Para que las comandas salgan siempre, deja a LevoPrint sin ahorro de batería. " +
         "Si no, el celular lo duerme a los minutos de apagar la pantalla."
@@ -300,27 +308,38 @@ class MainActivity : AppCompatActivity() {
   }
 
   // ---- [MM4-06] Papel de prueba al vincular ----
-  // Corre en un hilo (red/Bluetooth). Elige la estacion del codigo (el canje responde
-  // "<estacion> · <negocio>"), si no la primera con IP por nombre y, sin IP, la impresora
-  // Bluetooth. Devuelve null si salio, o el aviso para el cajero si no.
+  // Corre en un hilo (red/Bluetooth). [QA MEDIO-1] Sin adivinar: 1) la estacion del codigo (el canje
+  // responde "<estacion> · <negocio>") si tiene IP; 2) la impresora Bluetooth si esta activada;
+  // 3) la UNICA estacion con IP si hay exactamente una; si no, se avisa. Devuelve null si salio,
+  // o el aviso para el cajero si no.
   // OJO: es local, no pasa por la cola: el servidor sigue apagando a los equipos anteriores
   // recien con el primer trabajo de la cola que imprima este equipo.
   private fun imprimirPapelVinculado(cfg: Cfg, nombre: String): String? {
     val hora = java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.US).format(java.util.Date())
     val texto = Agent.renderVinculado(nombre, hora, cfg.ancho, cfg.prefijo)
-    return try {
-      val ests = try { Agent.estaciones(cfg).values.toList() } catch (_: Exception) { emptyList() }
-      val deCodigo = nombre.substringBefore(" · ").trim()
-      val est = ests.firstOrNull { it.ip != null && it.nombre.trim().equals(deCodigo, ignoreCase = true) }
-        ?: ests.filter { it.ip != null }.minByOrNull { it.nombre.lowercase() }
-      val btMac = Prefs.getBtMac(this)
-      when {
-        est?.ip != null -> { Agent.imprimirTcp(est.ip, est.puerto, texto); null }
-        Prefs.getBluetooth(this) && btMac.isNotBlank() -> { Bt.imprimir(btMac, texto); null }
-        else -> "No salió el papel de prueba: falta la IP de la impresora en " + Emparejamiento.consolaDe(cfg.prefijo) + "."
+    val ests = try { Agent.estaciones(cfg).values.toList() } catch (_: Exception) { emptyList() }
+    val deCodigo = nombre.substringBefore(" · ").trim()
+    val conIp = ests.filter { it.ip != null }
+    val est = conIp.firstOrNull { it.nombre.trim().equals(deCodigo, ignoreCase = true) }
+    val btMac = Prefs.getBtMac(this)
+    val bt = Prefs.getBluetooth(this) && btMac.isNotBlank()
+    return when {
+      est?.ip != null -> try { Agent.imprimirTcp(est.ip, est.puerto, texto); null } catch (_: Exception) {
+        "No salió el papel de prueba: revisa que la impresora de " + est.nombre + " esté encendida y en la misma red."
       }
-    } catch (e: Exception) {
-      "No salió el papel de prueba: revisa que la impresora esté encendida y en la misma red."
+      bt -> try { Bt.imprimir(btMac, texto); null } catch (_: Exception) {
+        // [QA BAJO-2] Mensaje propio de Bluetooth.
+        "No salió el papel de prueba: revisa que la impresora Bluetooth esté encendida y emparejada con este celular."
+      }
+      conIp.size == 1 -> {
+        val u = conIp[0]
+        try { Agent.imprimirTcp(u.ip!!, u.puerto, texto); null } catch (_: Exception) {
+          "No salió el papel de prueba: revisa que la impresora de " + u.nombre + " esté encendida y en la misma red."
+        }
+      }
+      conIp.isEmpty() -> "No salió el papel de prueba: falta la IP de la impresora en " + Emparejamiento.consolaDe(cfg.prefijo) + "."
+      else -> "No salió el papel de prueba: hay varias impresoras y no se sabe cuál es la de esta estación. " +
+        "Revisa el nombre de la estación en " + Emparejamiento.consolaDe(cfg.prefijo) + "."
     }
   }
 
