@@ -34,3 +34,6 @@ Ambos son **genéricos**: el mismo binario sirve para cualquier app de LevoDev c
 - El pie de los tickets lleva el isotipo de LevoDev en 1 bit (`GS v 0`, 64x64) + «Hecho con KOMO|KIPU|KUTI - levodev.app» + el lema «Tu negocio, inteligente y bajo control.». El ticket sigue siendo del negocio del cliente; la comanda no lleva marca (MESA enorme, ítems en doble alto).
 - Impresora sin soporte de imagen: **APK 1.5.0** → Opciones avanzadas › «Pie con logo» (apagado = solo texto); **.exe 1.11** → botón «Pie con logo» de la ventana o `LEVO_IMAGEN=0` en `levoprint.txt`. El papel de prueba lleva el pie para verlo.
 - El mapa de bits es el mismo en los 6 render (`levodev-modules/tools/marca/isotipo_termico.mjs --check`).
+
+### Probar la impresora: ¿sale basura donde va el logo?
+El papel **PRUEBA** (botón «Imprimir prueba» del .exe, y el papel que sale al vincular el APK) trae el pie con el logo. Si sale basura o signos raros, tu impresora no imprime imágenes: apágalo con **`LEVO_IMAGEN=0`** en `levoprint.txt` (o el botón «Pie con logo» de la ventana del .exe) o con el interruptor **«Pie con logo»** de Opciones avanzadas del APK. En modo consola el logo se muestra como «[logo]».

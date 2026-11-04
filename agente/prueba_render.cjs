@@ -109,6 +109,37 @@ ok(texto(R.render({ tipo: 'TICKET', payload: { ...nv, copia: true, reimpresion: 
 ok(texto(R.render({ tipo: 'COMANDA', payload: { mesa: '3', mozo: 'Ana', items: [], atrasada: true, hora: '12:00' } })).startsWith('*** ATRASADA ***'), 'COMANDA atrasada con su sello')
 ok(texto(R.render({ tipo: 'PRUEBA', payload: {} })).includes('PRUEBA LEVOPRINT OK'), 'PRUEBA')
 
+
+// [QA M1 · M2 · 4-nov] ítem sin nombre y nombre de negocio largo en doble ancho: nunca se pierde nada.
+const plano = (t) => t.replace(/\x1b@|\x1b[Ea!J][\x00-\xff]|\x1d[!V][\x00-\xff]/g, '')
+const NEGOCIOS = ['Pollería Don Lucho', 'Distribuidora Inversiones Santa Rosa SAC', 'Cevichería y Pollería Los Hermanos del Centro Histórico', 'Supercalifragilisticoespialidosoextraordinariamente SAC']
+for (const ancho of [48, 32]) {
+  const cv = (() => { R.setAncho(ancho); return R.render({ tipo: 'COMANDA', payload: { mesa: '3', items: [{ cantidad: 2, nombre: '' }, { cantidad: 1 }, { cantidad: 1, nombre: '   ' }, { cantidad: 1, nombre: 'Chicha' }] } }) })()
+  ok(cv.includes('2 x (sin nombre)') && (cv.match(/\(sin nombre\)/g) || []).length === 3 && cv.includes('1 x Chicha'), 'COMANDA ' + ancho + ': un ítem sin nombre sale igual con su cantidad (sin nombre)')
+  for (const negocio of NEGOCIOS) {
+    for (const tipo of ['TICKET', 'TURNO']) {
+      const t = (() => { R.setAncho(ancho); return R.render({ tipo: tipo, payload: { ...nv, ...def, negocio, mesa: tipo === 'TURNO' ? undefined : '3', definitivo: true, numero: 15, refTipo: 'DIRECTO' } }) })()
+      const cab = t.slice(0, t.search(/=====/))
+      const lineas = cab.split('\n')
+      const mitad = Math.floor(ancho / 2)
+      const bien = lineas.every((l) => (/\x1d!\x11/.test(l) ? plano(l).replace(/\x1d!./g, '').length <= mitad : plano(l).replace(/\x1d!./g, '').length <= ancho))
+      const sinEspacios = plano(cab).replace(/\x1d!./g, '').replace(/[\s]/g, '')
+      const esperado = negocio.toUpperCase().replace(/\s/g, '')
+      ok(sinEspacios.includes(esperado) && bien, tipo + ' ' + ancho + ': «' + negocio.slice(0, 22) + '…» en doble ancho entero, sin perder un carácter y sin pasar del ancho', cab)
+    }
+  }
+  
+}
+
+// B3: modo consola sin basura
+{
+  const m = /function paraConsola\(t, sep\) \{[\s\S]*?\r?\n\}\r?\n/.exec(src)
+  const paraConsola = new Function(m[0] + 'return paraConsola;')()
+  const papel = R.render({ tipo: 'PRUEBA', payload: {} })
+  const c = paraConsola(papel)
+  ok(papel.includes('\x1dv0') && c.includes('[logo]') && !/[\x00-\x1f\x80-\xff]/.test(c) && c.includes('Hecho con'), 'B3: en modo consola el logo sale «[logo]» y no sus bytes', c.slice(0, 200))
+}
+
 // ---------- [QA MEDIO-2] la versión que el agente manda en agente_config ----------
 {
   const m = /const VERSION_AGENTE = '([0-9.]+)';/.exec(src)

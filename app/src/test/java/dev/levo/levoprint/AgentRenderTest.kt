@@ -216,4 +216,28 @@ class AgentRenderTest {
       assertTrue(t, t.split("\n").all { it.length <= ancho })
     }
   }
+
+  // [QA M1 · 4-nov] Un item sin nombre sale igual, con su cantidad.
+  @Test fun comandaItemSinNombre() {
+    for (ancho in listOf(32, 48)) {
+      val t = Agent.render(job("COMANDA", o("""{"mesa":"3","items":[{"cantidad":2,"nombre":""},{"cantidad":1},{"cantidad":1,"nombre":"   "},{"cantidad":1,"nombre":"Chicha"}]}""")), ancho, "komo")
+      assertTrue(t, t.contains("2 x (sin nombre)") && Regex("\\(sin nombre\\)").findAll(t).count() == 3 && t.contains("1 x Chicha"))
+    }
+  }
+
+  // [QA M2 · 4-nov] El nombre del negocio en doble ancho se parte en varios renglones: nunca pierde un caracter ni pasa del ancho.
+  @Test fun negocioLargoEnDobleAncho() {
+    val negocios = listOf("Pollería Don Lucho", "Distribuidora Inversiones Santa Rosa SAC", "Cevichería y Pollería Los Hermanos del Centro Histórico", "Supercalifragilisticoespialidosoextraordinariamente SAC")
+    val grande = 29.toChar() + "!" + 17.toChar()
+    for (ancho in listOf(32, 48)) for (neg in negocios) for (tipo in listOf("TICKET", "TURNO")) {
+      val pl = o(kuti).put("negocio", neg).put("local", JSONObject.NULL).put("definitivo", true).put("numero", 15)
+      val t = Agent.render(job(tipo, pl), ancho, "kuti")
+      val cab = t.substring(0, t.indexOf("====="))
+      val lineas = cab.split("\n")
+      val limpia = { l: String -> l.replace(Regex("\u001b@|\u001b[aEJ!][\\s\\S]|\u001d![\\s\\S]"), "") }
+      assertTrue(cab, lineas.all { l -> limpia(l).length <= (if (l.contains(grande)) ancho / 2 else ancho) })
+      val plano = lineas.joinToString("") { limpia(it) }.replace(Regex("\\s"), "")
+      assertTrue("$tipo $ancho: $cab", plano.contains(neg.uppercase().replace(Regex("\\s"), "")))
+    }
+  }
 }

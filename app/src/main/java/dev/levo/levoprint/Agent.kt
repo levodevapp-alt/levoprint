@@ -173,7 +173,7 @@ object Agent {
     for (i in 0 until its.length()) {
       val it = its.getJSONObject(i)
       val cab = cant(it.optDouble("cantidad", 1.0)) + " x "
-      envolver(it.optString("nombre"), maxOf(8, ancho - cab.length)).forEachIndexed { j, l ->
+      envolver(it.optString("nombre"), maxOf(8, ancho - cab.length)).ifEmpty { listOf("(sin nombre)") }.forEachIndexed { j, l ->
         b.append(NEG_ON + ALTO + (if (j == 0) cab else " ".repeat(cab.length)) + l + NL + NORMAL + NEG_OFF)
       }
       val nota = it.optString("nota")
@@ -248,9 +248,22 @@ object Agent {
   // negocio, local, VENTA o ALQUILER DE SILLA, nota, quien atendio, cliente
   // (en alquiler, el profesional), servicios con su profesional en una segunda
   // linea, TOTAL, pagos y propinas APARTE (no suman al total).
+  // [QA M2 · 4-nov] El nombre del negocio va en doble ancho (cabe la mitad de las columnas): se parte por palabras en varios
+  // renglones dobles; una palabra que sola no cabe baja a tamano normal en negrita (partida al ancho si hace falta). Nunca se pierde un caracter.
+  private fun negocioGrande(nombre: String, ancho: Int): String {
+    val mitad = ancho / 2
+    val out = StringBuilder(); var l = ""
+    fun sale(s: String) { out.append(NEG_ON + (if (s.length <= mitad) GRANDE else "") + s + NL + NORMAL + NEG_OFF) }
+    for (w in nombre.uppercase().split(Regex("\\s+")).filter { it.isNotEmpty() }) {
+      if (w.length > mitad) { if (l.isNotEmpty()) { sale(l); l = "" }; w.chunked(ancho).forEach { sale(it) }; continue }
+      if (l.isNotEmpty() && l.length + 1 + w.length <= mitad) l += " " + w else { if (l.isNotEmpty()) sale(l); l = w }
+    }
+    if (l.isNotEmpty()) sale(l)
+    return out.toString()
+  }
   private fun renderTicketKuti(pl: JSONObject, ancho: Int, app: String): String {
     val b = StringBuilder(INIT + CENTRO)
-    if (txt(pl, "negocio").isNotBlank()) b.append(NEG_ON + GRANDE + txt(pl, "negocio").uppercase() + NL + NORMAL + NEG_OFF)
+    if (txt(pl, "negocio").isNotBlank()) b.append(negocioGrande(txt(pl, "negocio"), ancho))
     if (txt(pl, "local").isNotBlank()) b.append(txt(pl, "local") + NL)
     b.append(GRANDE + (if (txt(pl, "refTipo") == "ALQUILER") "ALQUILER DE SILLA" else "VENTA") + NL + NORMAL)
     b.append(IZQ + linea(ancho, "="))
@@ -398,8 +411,8 @@ object Agent {
   private fun renderTurno(pl: JSONObject, ancho: Int, app: String): String {
     val b = StringBuilder(INIT + CENTRO)
     val neg = txt(pl, "negocio"); val loc = txt(pl, "local")
-    // [QA BAJO] el negocio va en doble ancho: a lo sumo la mitad de las columnas (no se parte ni desborda)
-    if (neg.isNotBlank()) b.append(NEG_ON + GRANDE + neg.uppercase().take(ancho / 2) + NL + NORMAL + NEG_OFF)
+    // [QA M2] el negocio va en doble ancho, partido en varios renglones (nunca se corta)
+    if (neg.isNotBlank()) b.append(negocioGrande(neg, ancho))
     if (loc.isNotBlank() && loc != neg) b.append(loc + NL)
     b.append(NEG_ON + "TURNO SIN CITA" + NL + NEG_OFF + linea(ancho, "="))
     b.append((if (pl.optBoolean("definitivo")) "Tu numero" else "Tu numero provisional") + NL)

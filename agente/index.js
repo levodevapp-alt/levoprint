@@ -219,7 +219,7 @@ function renderComanda(pl) {
   if (pl.mensaje) t += CMD.negritaOn + CMD.grande + pl.mensaje + '\n' + CMD.normal + CMD.negritaOff + linea();
   for (const it of pl.items || []) {
     const cab = fmtCant(it.cantidad) + ' x ';
-    envolver(it.nombre, Math.max(8, ANCHO - cab.length)).forEach((l, i) => {
+    (envolver(it.nombre, Math.max(8, ANCHO - cab.length)).length ? envolver(it.nombre, Math.max(8, ANCHO - cab.length)) : ['(sin nombre)']).forEach((l, i) => {
       t += CMD.negritaOn + alto + (i === 0 ? cab : ' '.repeat(cab.length)) + l + '\n' + CMD.normal + CMD.negritaOff;
     });
     if (it.nota) for (const l of envolver(it.nota, ANCHO - 6)) t += CMD.negritaOn + '   >> ' + l + CMD.negritaOff + '\n';
@@ -264,13 +264,37 @@ function qrEscPos(texto, tam = 5) {
        + GS + '(k\x03\x00\x31\x51\x30';                        // imprimir
 }
 
+// [QA M2 · 4-nov] El nombre del negocio va en doble ancho (cabe la mitad de las columnas): se parte por palabras en varios
+// renglones dobles; una palabra que sola no cabe baja a tamaño normal en negrita (partida al ancho si hace falta). Nunca se pierde un carácter.
+function negocioGrande(nombre) {
+  const mitad = Math.floor(ANCHO / 2);
+  let out = '', l = '';
+  const sale = (s) => { out += CMD.negritaOn + (s.length <= mitad ? CMD.grande : '') + s + '\n' + CMD.normal + CMD.negritaOff; };
+  for (const w of String(nombre == null ? '' : nombre).toUpperCase().split(/\s+/).filter(Boolean)) {
+    if (w.length > mitad) { if (l) { sale(l); l = ''; } for (let i = 0; i < w.length; i += ANCHO) sale(w.slice(i, i + ANCHO)); continue; }
+    if (l && l.length + 1 + w.length <= mitad) l += ' ' + w; else { if (l) sale(l); l = w; }
+  }
+  if (l) sale(l);
+  return out;
+}
+
+// [QA B3] En modo consola el logo (GS v 0 + mapa de bits) no se vuelca como basura: sale «[logo]».
+function paraConsola(t, sep) {
+  let i;
+  while ((i = t.indexOf('\x1dv0')) >= 0) {
+    const xl = t.charCodeAt(i + 4) + 256 * t.charCodeAt(i + 5), yl = t.charCodeAt(i + 6) + 256 * t.charCodeAt(i + 7);
+    t = t.slice(0, i) + '[logo]' + t.slice(i + 8 + xl * yl);
+  }
+  return t.replace(/[\x00-\x1f]/g, sep || '').trim();
+}
+
 // [F2] Ticket interno de cobro (no es comprobante)
 function renderTicket(pl) {
   // Retail (KIPU) no manda mesa; restaurante (KOMO) sí. Un solo template
   // sirve a ambos: con negocio + nota para la tienda, con mesa/mozo para el resto.
   const retail = !pl.mesa;
   let t = CMD.init + CMD.centro;
-  if (pl.negocio) t += CMD.negritaOn + CMD.grande + String(pl.negocio).toUpperCase() + '\n' + CMD.normal + CMD.negritaOff;
+  if (pl.negocio) t += negocioGrande(pl.negocio);
   // [kuti] local (si el negocio tiene varios) y titulo del alquiler de silla; KOMO/KIPU no mandan local ni refTipo.
   if (pl.local) t += String(pl.local) + '\n';
   t += CMD.grande + (retail ? (pl.refTipo === 'ALQUILER' ? 'ALQUILER DE SILLA\n' : 'VENTA\n') : 'COBRADO\n') + CMD.normal;
@@ -419,7 +443,7 @@ async function imprimirVinculado(nombre){
     const est = conIp.find((e) => String(e.nombre || '').trim().toLowerCase() === deCodigo) || (conIp.length === 1 ? conIp[0] : null);
     const texto = renderVinculado(nombre, horaLocal());
     if (MODO_CONSOLA || !est) {
-      console.log('[vinculado] ' + texto.replace(/[\x00-\x1f]/g, ' ').trim());
+      console.log('[vinculado] ' + paraConsola(texto, ' '));
       if (MODO_CONSOLA) return { ok: true, mensaje: 'Modo consola: el papel de prueba se mostró en la consola.' };
       return { ok: false, mensaje: conIp.length
         ? 'No salió el papel de prueba: hay varias impresoras y no se sabe cuál es la de esta estación. Revisa el nombre de la estación en ' + consolaDe(PREFIJO) + '.'
@@ -509,8 +533,8 @@ function renderTurno(pl) {
   pl = pl || {};
   let t = CMD.init + CMD.centro;
   const neg = String(pl.negocio || ''), loc = String(pl.local || '');
-  // [QA BAJO] el negocio va en doble ancho: a lo sumo la mitad de las columnas (no se parte ni desborda)
-  if (neg) t += CMD.negritaOn + CMD.grande + neg.toUpperCase().slice(0, Math.floor(ANCHO / 2)) + '\n' + CMD.normal + CMD.negritaOff;
+  // [QA M2] el negocio va en doble ancho, partido en varios renglones (nunca se corta)
+  if (neg) t += negocioGrande(neg);
   if (loc && loc !== neg) t += loc + '\n';
   t += CMD.negritaOn + 'TURNO SIN CITA\n' + CMD.negritaOff + linea('=');
   t += (pl.definitivo ? 'Tu numero' : 'Tu numero provisional') + '\n';
@@ -642,7 +666,7 @@ async function ciclo() {
         catch (_) { texto = render(job); }
         if (MODO_CONSOLA || !est || !est.ip) {
           console.log(`\n--- JOB ${job.id} (${job.tipo}) -> ${est ? est.nombre : 'SIN ESTACION'} ---`);
-          console.log(texto.replace(/[\x00-\x1f]/g, '').trim());
+          console.log(paraConsola(texto));
           if (!MODO_CONSOLA && (!est || !est.ip)) throw new Error('estacion sin IP');
         } else {
           await imprimirRaw(est.ip, est.puerto || 9100, texto);
@@ -1070,7 +1094,7 @@ async function manejarPrueba(req, res) {
   const texto = render({ tipo: 'PRUEBA', payload: {} });
   try {
     if (MODO_CONSOLA || !est || !est.ip) {
-      console.log('[prueba] ' + texto.replace(/[\x00-\x1f]/g, '').trim());
+      console.log('[prueba] ' + paraConsola(texto));
       return responderJson(res, 200, {
         ok: true,
         aviso: !est ? 'Sin estaciones asignadas: se mostro en consola.'
