@@ -1,8 +1,14 @@
 // ============================================================
-// LevoPrint · Agente de impresión v1.12 (vincular SOLO con el código + varias apps + arranque con Windows) · LevoDev
+// LevoPrint · Agente de impresión v1.13 (impresora por estación: red o USB, búsqueda sola) · LevoDev
 // Corre en la PC del local. Poll cada 2-6 s a <prefijo>_print_tomar de CADA app
-// vinculada (KOMO, KIPU, KUTI...), renderiza ESC/POS y lo manda a la IP:puerto
-// de cada estación. Se empaqueta a LevoPrint.exe (Node SEA).
+// vinculada (KOMO, KIPU, KUTI...), renderiza ESC/POS y lo manda a la impresora
+// de cada estación: por red (IP:puerto) o por una impresora instalada en esta
+// PC («USB», cola de Windows en RAW). Se empaqueta a LevoPrint.exe (Node SEA).
+// [LP-F3/F4] 1.13: busca impresoras solo (red :9100 y colas de Windows), las
+// informa a <prefijo>_agente_impresoras y la ventana pregunta «¿Dónde está la
+// impresora de <estación>?» (prueba → «¿Salió?» → <prefijo>_agente_estacion_elegir).
+// Con un backend sin esas RPC se comporta como la 1.12 (solo IP) por 30 min.
+// También adopta el vínculo de komo-agente.txt y ayuda a retirar KOMO Agente.
 // [LP-U1] Instalación en 3 pasos: descargar desde la app → abrir → escribir el
 // código (o nada, si el nombre del .exe ya lo trae). URL y anon del proyecto
 // compartido vienen DENTRO del programa; "levoprint.txt" (junto al .exe) es
@@ -20,7 +26,9 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
-const { exec, execFile } = require('child_process');
+const os = require('os');
+const crypto = require('crypto');
+const { exec, execFile, spawn } = require('child_process');
 
 // --- ¿corro como .exe (SEA) o como `node index.js`? ---
 // Empaquetado como Single Executable App, `__dirname` no apunta a una
@@ -107,6 +115,10 @@ function nuevoVinculo(prefijo, device, nombre) {
   return {
     prefijo: String(prefijo || 'komo').trim().toLowerCase(), device: String(device || '').trim(), nombre: String(nombre || ''),
     estaciones: new Map(), cicloConfig: 0, ultimaSync: null, desactivado: null, proximoIntento: 0,
+    // [LP-F3] destino por estación (<prefijo>_agente_impresoras). transporte: null = aún no se sabe,
+    // true = el servidor tiene la RPC, false = backend viejo (modo 1.12 hasta sinTransporteHasta).
+    destinos: new Map(), transporte: null, sinTransporteHasta: 0, estacionVinculo: null,
+    md5Informado: '', informadoTs: 0, buscadoPendiente: false, preguntar: false,
   };
 }
 const esDeviceValido = (d) => /^[0-9a-f-]{20,}$/i.test(String(d || '')) && !/PEGA-AQUI/.test(String(d));
@@ -162,10 +174,11 @@ const CODIGO_ARCHIVO = codigoDelNombre(esExe ? path.basename(process.execPath) :
 const MODO_CONSOLA = ((process.env.LEVO_MODO || process.env.KOMO_MODO) || '') === 'consola';
 const INTERVALO_MS = 2000;      // con trabajo reciente: la comanda sale al toque
 const INTERVALO_MAX_MS = 6000;  // sin trabajo: se espacia de a poco hasta 6 s
-const CONFIG_CADA_MS = 60000;   // estaciones/impresoras: cada minuto
-// [O-23 · QA MEDIO-2] Versión de este agente: va en <prefijo>_agente_config (p.version = 'exe/1.12'). KUTI
+// estaciones/impresoras: cada minuto (solo en desarrollo, LEVO_PRUEBA_CONFIG_MS acorta la espera para las pruebas)
+const CONFIG_CADA_MS = (!esExe && parseInt(process.env.LEVO_PRUEBA_CONFIG_MS || '', 10)) || 60000;
+// [O-23 · QA MEDIO-2] Versión de este agente: va en <prefijo>_agente_config (p.version = 'exe/1.13'). KUTI
 // (kuti_turno_print) solo manda el papel TURNO a un local cuyos agentes vivos lo saben dibujar; KOMO/KIPU la ignoran.
-const VERSION_AGENTE = '1.12';
+const VERSION_AGENTE = '1.13';
 let ANCHO = Math.min(100, Math.max(20, parseInt(process.env.LEVO_ANCHO || '48', 10) || 48)); // [Re-QA] 20–100 como la ventana // columnas típicas de térmica 58mm (48) u 80mm (64/72)
 // [ventana] LEVO_SINVENTANA=1 (o corriendo como servicio de Windows): no abrir
 // navegador, pero la mini-GUI web se sigue sirviendo igual (soporte remoto).
@@ -206,12 +219,16 @@ async function rpc(fn, p) {
   if (!r.ok) {
     const txt = await r.text();
     const e = new Error(`${fn} HTTP ${r.status}: ${txt.slice(0, 200)}`);
-    try { e.pg = String((JSON.parse(txt) || {}).message || '').trim(); } catch { e.pg = ''; }
+    e.http = r.status;
+    try { const j = JSON.parse(txt) || {}; e.pg = String(j.message || '').trim(); e.codigo = String(j.code || '').trim(); } catch { e.pg = ''; e.codigo = ''; }
     throw e;
   }
   return r.json();
 }
 const esAgenteInvalido = (e) => !!(e && e.pg === 'AGENTE_INVALIDO');
+// [LP-F3] Backend sin el módulo levoprint_transporte: PostgREST responde 404 con code PGRST202
+// («Could not find the function»). El agente sigue como la 1.12 (solo IP) y no reintenta en 30 min.
+const esRpcAusente = (e) => !!(e && (e.codigo === 'PGRST202' || e.http === 404 || /could not find the function/i.test(e.pg || '')));
 
 // --- ESC/POS ---
 const ESC = '\x1b', GS = '\x1d';
@@ -471,26 +488,33 @@ function horaLocal(){
 async function imprimirVinculado(v, nombre){
   try {
     try { await refrescarConfig(v); } catch (_) { /* sin estaciones: se avisa abajo */ }
-    const estaciones = v.estaciones;
     const deCodigo = String(nombre || '').split(' · ')[0].trim().toLowerCase();
-    // [QA MEDIO-1] Sin adivinar: la estación del código si tiene IP; si no, la ÚNICA con IP si hay
-    // exactamente una; con varias o ninguna, se avisa (el .exe no imprime por Bluetooth).
-    const conIp = [...estaciones.values()].filter((e) => e && e.ip);
-    const est = conIp.find((e) => String(e.nombre || '').trim().toLowerCase() === deCodigo) || (conIp.length === 1 ? conIp[0] : null);
+    // [QA MEDIO-1] Sin adivinar: [LP-F3] la estación del vínculo (estacionVinculo) o la del nombre del
+    // código si tiene impresora que este equipo alcance (red o USB de esta PC); si no, la ÚNICA así.
+    // Con varias o ninguna, la ventana pregunta «¿Dónde está la impresora de <estación>?».
+    const dests = [...v.estaciones.keys()].map((id) => destinoDe(v, id)).filter(Boolean);
+    const imprimibles = dests.filter(destinoImprimible);
+    const est = imprimibles.find((d) => d.estacion === v.estacionVinculo)
+      || imprimibles.find((d) => String(d.nombre || '').trim().toLowerCase() === deCodigo)
+      || (imprimibles.length === 1 && !v.estacionVinculo ? imprimibles[0] : null);
     const texto = conPrefijo(v.prefijo, () => renderVinculado(nombre, horaLocal()));
     if (MODO_CONSOLA || !est) {
       console.log('[vinculado] ' + paraConsola(texto, ' '));
       if (MODO_CONSOLA) return { ok: true, mensaje: 'Modo consola: el papel de prueba se mostró en la consola.' };
-      return { ok: false, mensaje: conIp.length
-        ? 'No salió el papel de prueba: hay varias impresoras y no se sabe cuál es la de esta estación. Revisa el nombre de la estación en ' + consolaDe(v.prefijo) + '.'
-        : 'No salió el papel de prueba: falta la IP de la impresora en ' + consolaDe(v.prefijo) + '.' };
+      v.preguntar = true;
+      return { ok: false, mensaje: v.transporte === false
+        ? (imprimibles.length
+          ? 'No salió el papel de prueba: hay varias impresoras y no se sabe cuál es la de esta estación. Revisa el nombre de la estación en ' + consolaDe(v.prefijo) + '.'
+          : 'No salió el papel de prueba: falta la IP de la impresora en ' + consolaDe(v.prefijo) + '.')
+        : 'Falta elegir la impresora: abajo te mostramos las que encontramos.' };
     }
-    await imprimirRaw(est.ip, est.puerto || 9100, texto);
-    console.log('[vinculado] papel de prueba -> ' + est.nombre + ' (' + est.ip + ')');
+    await imprimirDestino(est, texto);
+    console.log('[vinculado] papel de prueba -> ' + est.nombre + ' (' + textoDestino(est) + ')');
     return { ok: true, mensaje: 'Salió un papel de prueba en ' + est.nombre + ': la impresora ya funciona.' };
   } catch (e) {
     console.error('[vinculado] no salio el papel de prueba: ' + e.message);
-    return { ok: false, mensaje: 'No salió el papel de prueba: revisa que la impresora esté encendida y en la misma red.' };
+    v.preguntar = true;
+    return { ok: false, mensaje: 'No salió el papel de prueba: revisa que la impresora esté encendida y conectada.' };
   }
 }
 
@@ -607,6 +631,469 @@ function imprimirRaw(ip, puerto, datos) {
   });
 }
 
+// ============================================================
+// [LP-F3 · LP-F4] Impresora por estación: red, USB (cola de Windows) o Bluetooth
+// (backend levoprint_transporte, docs/LEVOPRINT.md §8). Cada estación trae su
+// destino en <prefijo>_agente_impresoras: { estacion, transporte, ip, puerto,
+// btMac, usbId, impresoraNombre, propio }. «propio» = la impresora USB/BT está
+// en ESTE equipo; si no, el trabajo no es nuestro (el servidor ya no nos lo da,
+// pero si llega se marca IMPRESORA_EN_OTRO_EQUIPO). En Windows «USB» es una
+// impresora instalada en la PC: se le manda el ESC/POS en RAW por la cola de
+// impresión (winspool), así sirve también una BT emparejada como impresora.
+// Sin las RPC nuevas (backend viejo) todo esto se apaga 30 min y el agente
+// imprime como la 1.12: solo por la IP de la estación.
+// ============================================================
+// Solo en desarrollo (node index.js) se aceptan los ajustes de prueba: un
+// levoprint.txt ajeno no puede cambiar a qué programa llama el .exe.
+const AJUSTE_PRUEBA = (k) => (esExe ? '' : String(process.env[k] || '').trim());
+const PUERTO_IMPRESORA = parseInt(AJUSTE_PRUEBA('LEVO_BUSCAR_PUERTO') || '9100', 10) || 9100;
+const BUSCAR_CADA_MS = 15 * 60000;     // búsqueda sola cada 15 min
+const INFORMAR_CADA_MS = 30 * 60000;   // la lista se reenvía igual cada 30 min aunque no cambie
+const SIN_TRANSPORTE_MS = 30 * 60000;  // backend sin las RPC nuevas: modo 1.12 por 30 min
+const MAX_ENCONTRADAS = 64;            // mismo tope que lp_impresoras_vistas
+const SONDEO_MS = 400, SONDEO_PARALELO = 48;
+
+// Error con código corto (va a print_marcar y a la ventana).
+function errorCodigo(codigo, texto) {
+  const e = new Error(codigo + ': ' + texto);
+  e.codigoLp = codigo;
+  return e;
+}
+
+// Candado por destino: dos trabajos (o el ciclo y un «Probar» de la ventana)
+// no se mezclan en la misma impresora.
+const candados = new Map();
+function conCandado(clave, fn) {
+  const previo = candados.get(clave) || Promise.resolve();
+  const p = previo.then(fn);
+  const fin = p.catch(() => {}).then(() => { if (candados.get(clave) === fin) candados.delete(clave); });
+  candados.set(clave, fin);
+  return p;
+}
+
+// --- Búsqueda en la red: hosts de las /24 propias con el :9100 abierto ---
+function ipANum(ip) { return String(ip).split('.').reduce((a, b) => a * 256 + (parseInt(b, 10) || 0), 0); }
+function numAIp(n) { return [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.'); }
+// Interfaces IPv4 de esta PC (sin loopback ni 169.254 = sin DHCP). Máscara más
+// ancha que /24 (p. ej. /16) se recorta a la /24 propia: 254 equipos en ~3 s.
+// Como mucho 4 redes (Wi-Fi + cable + adaptadores virtuales).
+function hostsDeSubredes(ifaces) {
+  const out = [], redes = new Set(), propias = new Set();
+  const M24 = ipANum('255.255.255.0');
+  for (const i of ifaces || []) {
+    if (!i || i.internal || !(i.family === 'IPv4' || i.family === 4)) continue;
+    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(String(i.address)) || /^169\.254\./.test(i.address)) continue;
+    propias.add(i.address);
+    let mascara = ipANum(i.netmask || '255.255.255.0');
+    if (mascara < M24) mascara = M24;
+    const red = (ipANum(i.address) & mascara) >>> 0;
+    const difusion = (red | (~mascara >>> 0)) >>> 0;
+    if (redes.has(red) || redes.size >= 4) continue;
+    redes.add(red);
+    for (let h = red + 1; h < difusion; h++) out.push(numAIp(h));
+  }
+  return out.filter((h) => !propias.has(h));
+}
+function interfacesParaBuscar() {
+  // Prueba: LEVO_BUSCAR_SUBRED=127.0.0 recorre esa /24 (impresoras falsas en 127.0.0.x).
+  const forzada = AJUSTE_PRUEBA('LEVO_BUSCAR_SUBRED');
+  if (forzada) return [{ address: forzada + '.250', netmask: '255.255.255.0', family: 'IPv4', internal: false }];
+  return Object.values(os.networkInterfaces() || {}).flat();
+}
+// connect + close, sin mandar ni un byte (no imprime nada ni despierta la impresora).
+function sondear(ip, puerto, ms) {
+  return new Promise((resolve) => {
+    let listo = false;
+    const fin = (v) => { if (listo) return; listo = true; try { s.destroy(); } catch { /* nada */ } resolve(v); };
+    const s = net.createConnection({ host: ip, port: puerto });
+    s.setTimeout(ms, () => fin(false));
+    s.once('connect', () => fin(true));
+    s.once('error', () => fin(false));
+  });
+}
+async function buscarRed() {
+  const hosts = hostsDeSubredes(interfacesParaBuscar());
+  const hallados = [];
+  let i = 0;
+  const trabajador = async () => { while (i < hosts.length) { const h = hosts[i++]; if (await sondear(h, PUERTO_IMPRESORA, SONDEO_MS)) hallados.push(h); } };
+  await Promise.all(Array.from({ length: Math.min(SONDEO_PARALELO, hosts.length) }, trabajador));
+  return hallados.sort((a, b) => ipANum(a) - ipANum(b)).map((ip) => ({
+    transporte: 'red', ref: ip + ':' + PUERTO_IMPRESORA, nombre: 'Impresora en ' + ip, detalle: { puerto: PUERTO_IMPRESORA },
+  }));
+}
+
+// --- USB en Windows: PowerShell hijo PERSISTENTE con winspool en RAW ---
+// Se abre UNA vez (powershell.exe -NoProfile -NonInteractive -Command -), sin
+// -EncodedCommand ni -ExecutionPolicy Bypass (los antivirus los miran feo). El
+// C# va en la variable de entorno LP_CS; el script, en una sola línea por la
+// entrada estándar. Protocolo: una línea JSON por pedido {id, op, ...} → una
+// línea JSON por respuesta {id, ok, error?, impresoras?}. Primero responde
+// {listo:true} (Add-Type compiló) o {listo:false, error:'POWERSHELL_RESTRINGIDO'}
+// (Constrained Language / AppLocker): entonces no hay USB y se avisa en la
+// ventana. Si el proceso cae, se vuelve a abrir en el siguiente pedido.
+// Riesgo conocido: drivers v4 pueden rechazar RAW (sale el error de Windows).
+const PS_CS = [
+  'using System; using System.Runtime.InteropServices;',
+  'public static class LpRaw {',
+  '  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]',
+  '  public class DocInfo { [MarshalAs(UnmanagedType.LPWStr)] public string pDocName; [MarshalAs(UnmanagedType.LPWStr)] public string pOutputFile; [MarshalAs(UnmanagedType.LPWStr)] public string pDataType; }',
+  '  [DllImport("winspool.drv", EntryPoint = "OpenPrinterW", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool OpenPrinter(string n, out IntPtr h, IntPtr d);',
+  '  [DllImport("winspool.drv", SetLastError = true)] static extern bool ClosePrinter(IntPtr h);',
+  '  [DllImport("winspool.drv", EntryPoint = "StartDocPrinterW", SetLastError = true, CharSet = CharSet.Unicode)] static extern int StartDocPrinter(IntPtr h, int nivel, [In, MarshalAs(UnmanagedType.LPStruct)] DocInfo di);',
+  '  [DllImport("winspool.drv", SetLastError = true)] static extern bool EndDocPrinter(IntPtr h);',
+  '  [DllImport("winspool.drv", SetLastError = true)] static extern bool StartPagePrinter(IntPtr h);',
+  '  [DllImport("winspool.drv", SetLastError = true)] static extern bool EndPagePrinter(IntPtr h);',
+  '  [DllImport("winspool.drv", SetLastError = true)] static extern bool WritePrinter(IntPtr h, byte[] b, int n, out int escritos);',
+  '  public static string Enviar(string cola, byte[] datos) {',
+  '    IntPtr h;',
+  '    if (!OpenPrinter(cola, out h, IntPtr.Zero)) return "WIN32_" + Marshal.GetLastWin32Error();',
+  '    try {',
+  '      DocInfo di = new DocInfo(); di.pDocName = "LevoPrint"; di.pDataType = "RAW";',
+  '      if (StartDocPrinter(h, 1, di) == 0) return "WIN32_" + Marshal.GetLastWin32Error();',
+  '      try {',
+  '        if (!StartPagePrinter(h)) return "WIN32_" + Marshal.GetLastWin32Error();',
+  '        int escritos;',
+  '        bool ok = WritePrinter(h, datos, datos.Length, out escritos);',
+  '        int err = Marshal.GetLastWin32Error();',
+  '        EndPagePrinter(h);',
+  '        if (!ok) return "WIN32_" + err;',
+  '        if (escritos != datos.Length) return "INCOMPLETO_" + escritos + "_" + datos.Length;',
+  '        return "";',
+  '      } finally { EndDocPrinter(h); }',
+  '    } finally { ClosePrinter(h); }',
+  '  }',
+  '}',
+].join('\n');
+// Una sola línea (con -Command - cada línea completa se ejecuta al llegar).
+const PS_SCRIPT = [
+  "$ErrorActionPreference = 'Stop'",
+  '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false',
+  "function LpSale($o) { [Console]::Out.WriteLine(($o | ConvertTo-Json -Compress -Depth 4)); [Console]::Out.Flush() }",
+  "if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { LpSale @{ listo = $false; error = 'POWERSHELL_RESTRINGIDO'; detalle = [string]$ExecutionContext.SessionState.LanguageMode }; exit 3 }",
+  "try { Add-Type -TypeDefinition $env:LP_CS -Language CSharp } catch { LpSale @{ listo = $false; error = 'POWERSHELL_RESTRINGIDO'; detalle = $_.Exception.Message }; exit 3 }",
+  "function LpListar { try { @(Get-Printer | ForEach-Object { @{ nombre = [string]$_.Name; driver = [string]$_.DriverName; puerto = [string]$_.PortName } }) } catch { @(Get-CimInstance Win32_Printer | ForEach-Object { @{ nombre = [string]$_.Name; driver = [string]$_.DriverName; puerto = [string]$_.PortName } }) } }",
+  'LpSale @{ listo = $true }',
+  "while ($true) { $l = [Console]::In.ReadLine(); if ($l -eq $null) { break }; if (-not $l.Trim()) { continue }; $r = @{ ok = $false }; try { $m = $l | ConvertFrom-Json; $r.id = $m.id; if ($m.op -eq 'listar') { $r.impresoras = @(LpListar); $r.ok = $true } elseif ($m.op -eq 'imprimir') { $e = [LpRaw]::Enviar([string]$m.cola, [Convert]::FromBase64String([string]$m.b64)); if ($e) { $r.error = $e } else { $r.ok = $true } } else { $r.error = 'OP_DESCONOCIDA' } } catch { $r.error = 'PS: ' + $_.Exception.Message }; LpSale $r }",
+].join('; ');
+const psWin = { proc: null, listo: null, pendientes: new Map(), sig: 1, estado: '', detalle: '' };
+const PS_TIEMPO_MS = parseInt(AJUSTE_PRUEBA('LEVO_PRUEBA_PS_TIEMPO') || '20000', 10) || 20000;
+function usbDisponible() { return process.platform === 'win32' || !!AJUSTE_PRUEBA('LEVO_PRUEBA_PS'); }
+// JSON solo ASCII (lo demás como \uXXXX): la consola de PowerShell 5.1 no siempre lee UTF-8 por la entrada.
+const jsonAscii = (o) => JSON.stringify(o).replace(/[\u007f-￿]/g, (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+function psCerrar(motivo) {
+  const p = psWin.proc;
+  psWin.proc = null; psWin.listo = null;
+  if (p) { try { p.kill(); } catch { /* ya cerró */ } }
+  for (const [, pend] of psWin.pendientes) { clearTimeout(pend.timer); pend.reject(errorCodigo(motivo, 'el proceso de impresión USB se reinició')); }
+  psWin.pendientes.clear();
+}
+function psIniciar() {
+  if (psWin.estado === 'restringido') return Promise.resolve(false);
+  if (psWin.listo) return psWin.listo;
+  psWin.listo = new Promise((resolve) => {
+    let p;
+    const doble = AJUSTE_PRUEBA('LEVO_PRUEBA_PS'); // prueba: un .cjs que imita a PowerShell
+    try {
+      p = doble
+        ? spawn(process.execPath, [doble], { windowsHide: true, env: { ...process.env, LP_CS: PS_CS } })
+        : spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '-'], { windowsHide: true, env: { ...process.env, LP_CS: PS_CS } });
+    } catch (e) { psWin.estado = 'no_disponible'; psWin.detalle = e.message; psWin.listo = null; return resolve(false); }
+    psWin.proc = p;
+    let buf = '', resuelto = false;
+    const arranque = setTimeout(() => {
+      if (resuelto) return;
+      resuelto = true; psWin.estado = 'no_disponible'; psWin.detalle = 'PowerShell no respondió';
+      psCerrar('USB_TIEMPO'); resolve(false);
+    }, PS_TIEMPO_MS);
+    p.on('error', (e) => {
+      if (!resuelto) { resuelto = true; clearTimeout(arranque); psWin.estado = 'no_disponible'; psWin.detalle = e.message; psWin.listo = null; psWin.proc = null; resolve(false); }
+    });
+    p.on('exit', () => {
+      if (psWin.proc !== p) return;
+      psWin.proc = null; psWin.listo = null;
+      for (const [, pend] of psWin.pendientes) { clearTimeout(pend.timer); pend.reject(errorCodigo('USB_PROCESO_CAYO', 'el proceso de impresión USB se cerró')); }
+      psWin.pendientes.clear();
+      if (!resuelto) { resuelto = true; clearTimeout(arranque); if (psWin.estado !== 'restringido') { psWin.estado = 'no_disponible'; psWin.detalle = psWin.detalle || 'PowerShell se cerró al iniciar'; } resolve(false); }
+    });
+    p.stdin.on('error', () => { /* EPIPE: el 'exit' lo resuelve */ });
+    p.stderr.on('data', (d) => { const t = String(d).trim(); if (t) console.error('[usb] ' + t.slice(0, 300)); });
+    p.stdout.on('data', (d) => {
+      buf += String(d);
+      let k;
+      while ((k = buf.indexOf('\n')) >= 0) {
+        const lineaPs = buf.slice(0, k).replace(/^﻿/, '').trim();
+        buf = buf.slice(k + 1);
+        if (!lineaPs.startsWith('{')) continue; // eco o avisos de PowerShell: se ignoran
+        let m; try { m = JSON.parse(lineaPs); } catch { continue; }
+        if (!resuelto && 'listo' in m) {
+          resuelto = true; clearTimeout(arranque);
+          if (m.listo === true) { psWin.estado = 'ok'; psWin.detalle = ''; resolve(true); }
+          else { psWin.estado = 'restringido'; psWin.detalle = String(m.detalle || m.error || ''); console.error('[usb] POWERSHELL_RESTRINGIDO: ' + psWin.detalle.slice(0, 200)); resolve(false); }
+          continue;
+        }
+        const pend = psWin.pendientes.get(m.id);
+        if (!pend) continue;
+        psWin.pendientes.delete(m.id); clearTimeout(pend.timer);
+        pend.resolve(m);
+      }
+    });
+    try { p.stdin.write(PS_SCRIPT + '\n'); } catch { /* el 'exit' lo resuelve */ }
+  });
+  return psWin.listo;
+}
+async function psPedir(obj) {
+  if (!usbDisponible()) throw errorCodigo('USB_NO_DISPONIBLE', 'esta PC no tiene impresión USB');
+  if (!(await psIniciar())) throw errorCodigo(psWin.estado === 'restringido' ? 'POWERSHELL_RESTRINGIDO' : 'USB_NO_DISPONIBLE', 'Windows no deja usar la impresión USB en esta PC (' + (psWin.detalle || psWin.estado) + ')');
+  const p = psWin.proc;
+  if (!p) throw errorCodigo('USB_PROCESO_CAYO', 'el proceso de impresión USB se cerró');
+  return new Promise((resolve, reject) => {
+    const id = psWin.sig++;
+    const timer = setTimeout(() => {
+      psWin.pendientes.delete(id);
+      reject(errorCodigo('USB_TIEMPO', 'la impresora USB no respondió en ' + Math.round(PS_TIEMPO_MS / 1000) + ' s'));
+      psCerrar('USB_TIEMPO'); // proceso trabado: se abre otro en el próximo pedido
+    }, PS_TIEMPO_MS);
+    psWin.pendientes.set(id, { resolve, reject, timer });
+    try { p.stdin.write(jsonAscii({ id, ...obj }) + '\n'); } catch (e) { clearTimeout(timer); psWin.pendientes.delete(id); reject(errorCodigo('USB_PROCESO_CAYO', e.message)); }
+  });
+}
+// Colas que no son impresoras de tickets: PDF, XPS, Fax, OneNote, «Enviar a…» y el puerto «preguntar».
+const COLA_EXCLUIDA = /pdf|xps|fax|onenote|send to|enviar a|document writer/i;
+const DRIVER_TERMICA = /pos|receipt|thermal|t[eé]rmic|tm-|tm ?t|xprinter|xp-|star |tsp|bixolon|srp|citizen|ct-s|sewoo|zj-?\d|gprinter|3nstar|hprt|rongta|sunmi|generic \/ text|gen[eé]ric|58 ?mm|80 ?mm/i;
+function colaUsbValida(i) {
+  return !!(i && i.nombre) && !COLA_EXCLUIDA.test(i.nombre + ' ' + (i.driver || '')) && !/^PORTPROMPT:/i.test(String(i.puerto || ''));
+}
+async function listarUsb() {
+  const r = await psPedir({ op: 'listar' });
+  if (!r || r.ok !== true) throw errorCodigo('USB_LISTA', String((r && r.error) || 'sin respuesta'));
+  return (Array.isArray(r.impresoras) ? r.impresoras : []).filter(colaUsbValida).slice(0, 32).map((i) => ({
+    transporte: 'usb', ref: String(i.nombre).slice(0, 128), nombre: String(i.nombre).slice(0, 80),
+    detalle: { modelo: String(i.driver || '').slice(0, 80), puerto: String(i.puerto || '').slice(0, 60), probableTermica: DRIVER_TERMICA.test(String(i.driver || '') + ' ' + i.nombre) },
+  }));
+}
+function mensajeUsb(err) {
+  const m = String(err || '');
+  if (/WIN32_1801\b/.test(m)) return 'no encuentro esa impresora en esta PC (¿la desinstalaron o cambió de nombre?)';
+  if (/WIN32_5\b/.test(m)) return 'Windows no dio permiso para usar esa impresora';
+  return m;
+}
+async function imprimirUsbWin(cola, datos) {
+  const r = await psPedir({ op: 'imprimir', cola, b64: Buffer.from(datos, 'binary').toString('base64') });
+  if (!r || r.ok !== true) throw errorCodigo('USB_ERROR', mensajeUsb(r && r.error));
+}
+
+// --- Destino de cada estación (agente_config + agente_impresoras) ---
+function destinoDe(v, estId) {
+  const est = v.estaciones.get(estId);
+  const d = v.destinos && v.destinos.get(estId);
+  if (d) {
+    return {
+      estacion: estId, nombre: d.nombre || (est && est.nombre) || '', transporte: d.transporte || 'red',
+      ip: d.ip || null, puerto: parseInt(d.puerto, 10) || 9100, btMac: d.btMac || null, usbId: d.usbId || null,
+      impresoraNombre: d.impresoraNombre || '', propio: d.propio !== false,
+    };
+  }
+  if (!est) return null;
+  return { estacion: estId, nombre: est.nombre || '', transporte: 'red', ip: est.ip || null, puerto: est.puerto || 9100, propio: true };
+}
+// ¿Este equipo puede imprimir ahí ahora? (red con IP, o USB que está en esta PC)
+function destinoImprimible(d) {
+  if (!d) return false;
+  if (d.transporte === 'red') return !!d.ip;
+  if (d.transporte === 'usb') return d.propio && !!d.usbId;
+  return false;
+}
+function claveDestino(d) {
+  return d.transporte === 'red' ? 'red:' + d.ip + ':' + (d.puerto || 9100) : d.transporte + ':' + (d.usbId || d.btMac || '');
+}
+function textoDestino(d) {
+  if (!d) return 'Sin estación';
+  if (d.transporte === 'usb') return (d.propio ? 'USB en esta PC: ' : 'USB en otro equipo: ') + (d.impresoraNombre || d.usbId || '');
+  if (d.transporte === 'bluetooth') return 'Bluetooth en otro equipo' + (d.impresoraNombre ? ': ' + d.impresoraNombre : '');
+  return d.ip ? 'Red: ' + d.ip + ':' + (d.puerto || 9100) : '';
+}
+async function imprimirDestino(d, texto) {
+  if (!d) throw errorCodigo('SIN_ESTACION', 'el trabajo no trae una estación conocida');
+  if (d.transporte === 'red') {
+    if (!d.ip) throw errorCodigo('SIN_IP', 'estacion sin IP');
+    return conCandado(claveDestino(d), () => imprimirRaw(d.ip, d.puerto || 9100, texto));
+  }
+  if (!d.propio) throw errorCodigo('IMPRESORA_EN_OTRO_EQUIPO', 'la impresora de ' + (d.nombre || 'esta estacion') + ' esta conectada a otro equipo');
+  if (d.transporte === 'usb') {
+    if (!d.usbId) throw errorCodigo('SIN_USB', 'estacion USB sin impresora');
+    return conCandado(claveDestino(d), () => imprimirUsbWin(d.usbId, texto));
+  }
+  throw errorCodigo('TRANSPORTE_NO_SOPORTADO', 'esta PC no imprime por Bluetooth directo: instala la impresora en Windows y elígela como USB');
+}
+
+// --- Estado de la búsqueda (lo comparten todos los vínculos: es el mismo equipo) ---
+const busqueda = { enCurso: null, ts: 0, red: [], usb: [], md5: '', usbAviso: '', motivo: '', pedidaTs: 0 };
+function encontradasActuales() { return busqueda.red.concat(busqueda.usb).slice(0, MAX_ENCONTRADAS); }
+function md5Lista(lista) {
+  const orden = lista.map((x) => [x.transporte, x.ref, x.nombre]).sort((a, b) => (a.join('|') < b.join('|') ? -1 : 1));
+  return crypto.createHash('md5').update(JSON.stringify(orden)).digest('hex');
+}
+function capacidades() {
+  const c = ['red'];
+  if (usbDisponible() && psWin.estado !== 'restringido' && psWin.estado !== 'no_disponible') c.push('usb');
+  return c;
+}
+const nombreEquipo = () => String(os.hostname() || 'PC').slice(0, 60);
+function textoUsbAviso() {
+  if (!usbDisponible()) return '';
+  if (psWin.estado === 'restringido') return 'Windows bloquea la impresión USB en esta PC (PowerShell restringido por la empresa o el antivirus). Usa una impresora de red o pide a quien administra la PC que lo permita.';
+  if (psWin.estado === 'no_disponible') return 'No se pudo revisar las impresoras USB de esta PC (' + (psWin.detalle || 'PowerShell no responde') + ').';
+  return '';
+}
+// Busca en la red y en las impresoras de Windows a la vez; al terminar lo
+// informa al instante a cada app (con «buscado») para que su consola lo vea.
+function buscarImpresoras(motivo) {
+  if (busqueda.enCurso) return busqueda.enCurso;
+  busqueda.motivo = motivo || '';
+  busqueda.enCurso = (async () => {
+    const t0 = Date.now();
+    const [red, usb] = await Promise.all([
+      buscarRed().catch((e) => { console.error('[buscar] red: ' + e.message); return busqueda.red; }),
+      usbDisponible() ? listarUsb().catch((e) => { console.error('[buscar] usb: ' + e.message); return []; }) : Promise.resolve([]),
+    ]);
+    busqueda.red = red; busqueda.usb = usb; busqueda.ts = Date.now();
+    busqueda.usbAviso = textoUsbAviso();
+    busqueda.md5 = md5Lista(encontradasActuales());
+    console.log('[buscar] ' + (motivo || '') + ': ' + red.length + ' de red, ' + usb.length + ' USB (' + (Date.now() - t0) + ' ms)');
+    for (const v of vinculos) v.buscadoPendiente = true;
+    await Promise.all(vinculos.slice().map((v) => informarImpresoras(v, true).catch((e) => {
+      if (!esAgenteInvalido(e)) console.error('[impresoras ' + v.prefijo + '] ' + e.message);
+    })));
+    return encontradasActuales();
+  })().finally(() => { busqueda.enCurso = null; });
+  return busqueda.enCurso;
+}
+
+// <prefijo>_agente_impresoras: cada ciclo de config (y tras cada búsqueda).
+// La lista va solo si cambió (md5) o pasaron 30 min; «buscado» avisa que ya se
+// buscó (la consola espera ese resultado). Responde los destinos por estación,
+// la estación del vínculo y si la consola pidió buscar. RPC ausente → modo 1.12.
+async function informarImpresoras(v, forzar) {
+  if (v.sinTransporteHasta > Date.now()) return null;
+  const p = { device: v.device, version: 'exe/' + VERSION_AGENTE, equipo: nombreEquipo(), capacidades: capacidades() };
+  if (busqueda.ts && (forzar || busqueda.md5 !== v.md5Informado || Date.now() - v.informadoTs >= INFORMAR_CADA_MS)) p.encontradas = encontradasActuales();
+  if (v.buscadoPendiente && busqueda.ts) p.buscado = true;
+  let r;
+  try {
+    r = await rpc(`${v.prefijo}_agente_impresoras`, p);
+  } catch (e) {
+    if (esRpcAusente(e)) {
+      if (v.transporte !== false) console.log(`[impresoras ${v.prefijo}] el servidor aun no tiene la impresora por estacion: sigo como la 1.12 (solo IP) por 30 min.`);
+      v.transporte = false; v.sinTransporteHasta = Date.now() + SIN_TRANSPORTE_MS; v.destinos = new Map();
+      return null;
+    }
+    throw e;
+  }
+  v.transporte = true; v.sinTransporteHasta = 0;
+  if (p.encontradas) { v.md5Informado = busqueda.md5; v.informadoTs = Date.now(); }
+  if (p.buscado) v.buscadoPendiente = false;
+  v.estacionVinculo = (r && r.estacionVinculo) || null;
+  v.destinos = new Map(((r && r.destinos) || []).filter((d) => d && d.estacion).map((d) => [d.estacion, d]));
+  // La consola pidió buscar (lp_buscar). Sin bucle: no si esta misma llamada ya llevaba «buscado»
+  // y como mucho una búsqueda pedida por minuto.
+  if (r && r.buscar && !p.buscado && !busqueda.enCurso && Date.now() - busqueda.pedidaTs > 60000) {
+    busqueda.pedidaTs = Date.now();
+    setTimeout(() => buscarImpresoras('pedido de la consola').catch(() => {}), 0);
+  }
+  return r;
+}
+
+// <prefijo>_agente_estacion_elegir desde la ventana (tras «¿Salió?» → Sí).
+const ERRORES_ELEGIR = {
+  ESTACION_NO_EXISTE: 'Esa estación ya no existe en tu app. Actualiza la página de tu app y vuelve a intentar.',
+  PARAMETRO_INVALIDO: 'Los datos de la impresora no son válidos. Busca de nuevo y vuelve a intentar.',
+  DESTINO_NO_VISTO: 'Tu app aún no ve esa impresora. Pulsa «Buscar de nuevo» y vuelve a elegirla.',
+  AGENTE_INVALIDO: 'Este equipo está desactivado en tu app: vincúlalo de nuevo con un código.',
+};
+async function elegirDestino(v, estacion, transporte, ref, nombre) {
+  const cuerpo = { device: v.device, estacion, transporte, nombre: String(nombre || '').slice(0, 80) };
+  if (transporte === 'red') {
+    const m = String(ref).match(/^(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?$/);
+    if (!m) return { ok: false, error: 'PARAMETRO_INVALIDO', mensaje: ERRORES_ELEGIR.PARAMETRO_INVALIDO };
+    cuerpo.ip = m[1]; cuerpo.puerto = parseInt(m[2] || '9100', 10);
+  } else if (transporte === 'usb') {
+    cuerpo.usbId = String(ref).slice(0, 128);
+    // Que el servidor la tenga en lo visto por este equipo (si no, DESTINO_NO_VISTO).
+    try { await informarImpresoras(v, true); } catch (_) { /* el elegir dirá lo que falte */ }
+  }
+  let r;
+  try { r = await rpc(`${v.prefijo}_agente_estacion_elegir`, cuerpo); }
+  catch (e) {
+    if (esRpcAusente(e)) { v.transporte = false; v.sinTransporteHasta = Date.now() + SIN_TRANSPORTE_MS; return { ok: false, modo112: true }; }
+    const cod = ERRORES_ELEGIR[e.pg] ? e.pg : '';
+    return { ok: false, error: cod || 'RED', mensaje: ERRORES_ELEGIR[cod] || 'No se pudo guardar (revisa tu internet): ' + e.message };
+  }
+  if (!r || r.ok !== true) {
+    const cod = String((r && r.error) || 'ERROR');
+    return { ok: false, error: cod, mensaje: ERRORES_ELEGIR[cod] || 'No se pudo guardar (' + cod + ').' };
+  }
+  try { await refrescarConfig(v); } catch (_) { /* el ciclo lo vuelve a leer */ }
+  return { ok: true, destino: r.destino || null };
+}
+
+// --- KOMO Agente (el programa antiguo de KOMO) ---
+// LevoPrint 1.13 lee también komo-agente.txt (misma carpeta): si trae
+// KOMO_DEVICE y aún no hay vínculo de KOMO, lo adopta (mismo token, sin
+// código). Si komo-agente.exe sigue abierto o está en el arranque de Windows
+// («KOMO Agente.lnk»), la ventana ofrece cerrarlo y quitarlo: si no, los dos
+// toman la misma cola. Solo se ofrece con un vínculo de KOMO ya hecho aquí.
+const KOMO_LNK = 'KOMO Agente.lnk';
+const komoAgente = { abierto: false, enInicio: false, adoptado: false, revisado: 0 };
+function rutaKomoLnk() { const c = carpetaInicio(); return c ? path.join(c, KOMO_LNK) : null; }
+function adoptarKomoAgente() {
+  const ruta = path.join(BASE_DIR, 'komo-agente.txt');
+  if (!fs.existsSync(ruta) || vinculos.some((v) => v.prefijo === 'komo')) return false;
+  let dev = '', url = '';
+  try {
+    for (const l of fs.readFileSync(ruta, 'utf8').replace(/^﻿/, '').split(/\r\n|\r|\n/)) {
+      const m = l.match(/^\s*(KOMO_DEVICE|KOMO_URL)\s*=\s*(.+?)\s*$/);
+      if (m && m[1] === 'KOMO_DEVICE') dev = m[2];
+      if (m && m[1] === 'KOMO_URL') url = m[2];
+    }
+  } catch { return false; }
+  // Otro proyecto (URL distinta a la de LevoPrint): no se adopta (el token no serviría aquí).
+  if (!esDeviceValido(dev) || (url && !/TU-PROYECTO/.test(url) && url.replace(/\/+$/, '') !== URL_BASE.replace(/\/+$/, ''))) return false;
+  vinculos.push(nuevoVinculo('komo', dev, ''));
+  if (vinculos.length === 1) PREFIJO = 'komo';
+  komoAgente.adoptado = true;
+  persistirVinculos(false);
+  console.log('[komo-agente] vinculo de KOMO tomado de komo-agente.txt.');
+  return true;
+}
+function revisarKomoAgente(forzar) {
+  if (!forzar && Date.now() - komoAgente.revisado < 30000) return;
+  komoAgente.revisado = Date.now();
+  try { const r = rutaKomoLnk(); komoAgente.enInicio = !!r && fs.existsSync(r); } catch { komoAgente.enInicio = false; }
+  if (process.platform !== 'win32') { komoAgente.abierto = false; return; }
+  execFile('tasklist', ['/FI', 'IMAGENAME eq komo-agente.exe', '/FO', 'CSV', '/NH'], { windowsHide: true, timeout: 10000 }, (err, out) => {
+    komoAgente.abierto = !err && /komo-agente\.exe/i.test(String(out || ''));
+  });
+}
+function retirarKomoAgente() {
+  return new Promise((resolve) => {
+    if (!vinculos.some((v) => v.prefijo === 'komo')) {
+      return resolve({ ok: false, error: 'KOMO_SIN_VINCULO', mensaje: 'Primero vincula KOMO en LevoPrint (escribe el código de KOMO arriba). Si cierras KOMO Agente antes, KOMO deja de imprimir.' });
+    }
+    let quitado = true;
+    try { const r = rutaKomoLnk(); if (r && fs.existsSync(r)) fs.unlinkSync(r); } catch (e) { quitado = false; console.error('[komo-agente] no se pudo quitar el acceso: ' + e.message); }
+    const fin = (cerrado) => {
+      revisarKomoAgente(true);
+      console.log('[komo-agente] retirado (cerrado=' + cerrado + ', acceso quitado=' + quitado + ').');
+      resolve(cerrado && quitado
+        ? { ok: true, mensaje: 'Listo: KOMO Agente se cerró y ya no se abrirá al encender la PC. LevoPrint imprime lo de KOMO.' }
+        : { ok: false, error: 'KOMO_NO_SE_PUDO', mensaje: 'No se pudo cerrar KOMO Agente del todo. Ciérralo a mano (su ventana negra) y borra «KOMO Agente» de la carpeta Inicio.' });
+    };
+    if (process.platform !== 'win32') return fin(true);
+    // /T cierra también su consola; «no se encontró» (código 128) cuenta como cerrado.
+    execFile('taskkill', ['/IM', 'komo-agente.exe', '/F', '/T'], { windowsHide: true, timeout: 15000 }, (err) => fin(!err || err.code === 128));
+  });
+}
+
 // Render SERVIDOR: el ticket se arma en la edge function `<prefijo>-print`
 // y aquí solo se imprime. Así los cambios de formato/firma se despliegan
 // sin re-instalar el agente. Si el endpoint falla, cae al render local.
@@ -682,8 +1169,12 @@ async function refrescarConfig(v) {
   v.estaciones = new Map((cfg.estaciones || []).map((e) => [e.id, e]));
   v.ultimaSync = Date.now();
   v.cicloConfig = Date.now();
+  // [LP-F3] Luego el destino por estación (red / USB / Bluetooth). agente_config se sigue llamando
+  // primero (KUTI guarda ahí la versión); un fallo aquí no frena la impresión por IP.
+  try { await informarImpresoras(v, false); }
+  catch (e) { if (esAgenteInvalido(e)) throw e; console.error(`[impresoras ${v.prefijo}] ${e.message}`); }
   console.log(`[cfg ${v.prefijo}] ${v.estaciones.size} estaciones:`,
-    [...v.estaciones.values()].map((e) => `${e.nombre}@${e.ip || 'SIN-IP'}:${e.puerto}`).join(' · '));
+    [...v.estaciones.keys()].map((id) => { const d = destinoDe(v, id); return `${d.nombre}@${textoDestino(d) || 'SIN-IMPRESORA'}`; }).join(' · '));
 }
 
 // Una vuelta de UN vínculo. Devuelve cuántos trabajos atendió.
@@ -704,20 +1195,21 @@ async function cicloVinculo(v) {
     }
     const jobs = r.jobs || [];
     for (const job of jobs) {
-      const est = v.estaciones.get(job.estacion);
+      // [LP-F3] Destino según el transporte de la estación (red o USB de esta PC).
+      const dest = destinoDe(v, job.estacion);
       guiEstado.imprimiendo = true;
       try {
         // Render en el SERVIDOR (formato siempre al día); respaldo local si cae.
         let texto;
         try { texto = await renderRemoto(job, pfx); }
         catch (_) { texto = conPrefijo(pfx, () => render(job)); }
-        if (MODO_CONSOLA || !est || !est.ip) {
-          console.log(`\n--- JOB ${pfx} ${job.id} (${job.tipo}) -> ${est ? est.nombre : 'SIN ESTACION'} ---`);
+        if (MODO_CONSOLA || !destinoImprimible(dest)) {
+          console.log(`\n--- JOB ${pfx} ${job.id} (${job.tipo}) -> ${dest ? dest.nombre : 'SIN ESTACION'} ---`);
           console.log(paraConsola(texto));
-          if (!MODO_CONSOLA && (!est || !est.ip)) throw new Error('estacion sin IP');
+          if (!MODO_CONSOLA) await imprimirDestino(dest, texto); // no imprimible: lanza el error que corresponde
         } else {
-          await imprimirRaw(est.ip, est.puerto || 9100, texto);
-          console.log(`[ok] ${pfx} job ${job.id} ${job.tipo} -> ${est.nombre} (${est.ip})`);
+          await imprimirDestino(dest, texto);
+          console.log(`[ok] ${pfx} job ${job.id} ${job.tipo} -> ${dest.nombre} (${textoDestino(dest)})`);
         }
         await rpc(`${pfx}_print_marcar`, { device: dev, id: job.id, ok: true });
         guiEstado.ultimoOk = Date.now();
@@ -1044,6 +1536,9 @@ async function revisarInicioAlArrancar() {
 // instante, papel de prueba y arranque con Windows.
 async function trasVincular(r) {
   despertarCiclo(true);
+  // [LP-F3] Primero se buscan impresoras (red y USB, ~3 s): así la app ya las ve y, si la estación
+  // aún no tiene impresora, la ventana pregunta «¿Dónde está la impresora de <estación>?».
+  try { await buscarImpresoras('vinculo'); } catch (e) { console.error('[buscar] ' + e.message); }
   // [MM4-06] Papel de prueba. [QA BAJO-4] Recanje idempotente (reintento): ya salió la primera vez.
   if (!r.reintento) r.papel = await imprimirVinculado(r.vinculo, r.nombre);
   if (inicioDisponible()) r.inicio = await crearAccesoInicio();
@@ -1081,8 +1576,17 @@ function estadoActual() {
     seccion: seccionVista[v.prefijo] || SECCION_POR_PREFIJO[v.prefijo] || '',
     desactivado: textoDesactivado(v.desactivado),
     ultimaSync: v.ultimaSync,
-    estaciones: [...v.estaciones.values()].map((e) => ({ id: e.id, nombre: e.nombre, ip: e.ip || null, puerto: e.puerto || 9100 })),
+    // [LP-F3] transporte: true = la app admite impresora por estación; false = app sin actualizar (solo IP).
+    transporte: v.transporte,
+    estacionVinculo: v.estacionVinculo,
+    preguntar: !!v.preguntar,
+    estaciones: [...v.estaciones.values()].map((e) => {
+      const d = destinoDe(v, e.id) || {};
+      return { id: e.id, nombre: e.nombre, ip: d.ip || null, puerto: d.puerto || 9100, transporte: d.transporte || 'red',
+        destino: textoDestino(d), imprimible: destinoImprimible(d), propio: d.propio !== false };
+    }),
   }));
+  revisarKomoAgente(false);
   let semaforo = 'sin_vincular';
   if (sinUrlAnon) semaforo = 'sin_configurar';
   else if (!vinculado) semaforo = 'sin_vincular';
@@ -1110,6 +1614,9 @@ function estadoActual() {
     desactivado: vinculos.length && vinculos.every((v) => v.desactivado) ? textoDesactivado(vinculos[0].desactivado) : null,
     inicio: { disponible: inicioDisponible(), activo: inicioActivo() },
     aviso: guiEstado.aviso || null,   // resultado del vínculo automático (nombre del .exe / .txt)
+    // [LP-F3] KOMO Agente (programa antiguo) abierto o en el arranque: la ventana ofrece retirarlo.
+    komoAgente: { abierto: komoAgente.abierto, enInicio: komoAgente.enInicio, adoptado: komoAgente.adoptado },
+    buscando: !!busqueda.enCurso,
   };
 }
 
@@ -1176,6 +1683,36 @@ function paginaHtml() {
     </div>
 
     <div id="appsBox"></div>
+
+    <!-- [LP-F3] Elegir la impresora de una estación: lo encontrado en la red y en esta PC; prueba → «¿Salió?» → guardar. -->
+    <div id="elegirBox" class="app" style="display:none">
+      <h2 id="elegirTitulo" style="margin-top:4px">¿Dónde está la impresora?</h2>
+      <div class="muted" style="font-size:13px">Toca «Probar» en una: sale un papel. Si salió, esa es.</div>
+      <div id="elegirListas"></div>
+      <div id="confirmBox" style="display:none; margin-top:10px">
+        <div id="confirmTexto" style="font-weight:600; margin-bottom:8px"></div>
+        <button id="btnSalioSi">Sí, salió</button> <button id="btnSalioNo" class="secundario">No salió</button>
+      </div>
+      <div id="msgElegir" class="msg"></div>
+      <div style="margin-top:10px">
+        <button id="btnBuscarDeNuevo" class="secundario chico">Buscar de nuevo</button>
+        <button id="btnNoLaVeo" class="secundario chico">No la veo</button>
+        <button id="btnCerrarElegir" class="secundario chico">Cerrar</button>
+      </div>
+      <div id="ayudaNoLaVeo" style="display:none; margin-top:10px; font-size:13px">
+        <div class="muted">Revisa que la impresora esté encendida. Si es de red, que su cable vaya al mismo router que esta PC (o al mismo Wi-Fi). Si es USB, que esté conectada a esta PC e instalada en Windows. Luego pulsa «Buscar de nuevo».</div>
+        <div class="muted" style="margin-top:8px">¿Sabes su IP? (sale en el papel de autoprueba de la impresora)</div>
+        <input id="ipManual" type="text" maxlength="21" autocomplete="off" spellcheck="false" placeholder="192.168.1.50" style="letter-spacing:0; text-transform:none; font-size:15px; margin-top:6px">
+        <button id="btnProbarIp" class="secundario chico">Probar esta IP</button>
+      </div>
+    </div>
+
+    <!-- [LP-F3] KOMO Agente (programa antiguo de KOMO) abierto o en el arranque de Windows. -->
+    <div id="komoBox" class="app" style="display:none">
+      <div id="komoTexto" style="font-size:14px"></div>
+      <button id="btnKomo" class="chico" style="margin-top:8px">Cerrar y quitar KOMO Agente</button>
+      <div id="msgKomo" class="msg"></div>
+    </div>
 
     <button id="btnPrueba" class="ancho" style="margin-top:6px">Imprimir prueba</button>
     <div id="msgPrueba" class="msg"></div>
@@ -1248,10 +1785,15 @@ async function refrescar() {
     if (!v.estaciones.length) {
       h += '<div class="fila muted">' + (v.ultimaSync ? 'Sin impresoras todavía: agrégalas en ' + esc(v.app) + (v.seccion ? ' › ' + esc(v.seccion) : '') + '.' : 'Leyendo impresoras...') + '</div>';
     } else {
+      // [LP-F3] Cada estación dice dónde imprime (red, USB de esta PC u otro equipo) y trae «Elegir»/«Cambiar».
       h += v.estaciones.map(function (est) {
-        const ip = est.ip ? (esc(est.ip) + ':' + esc(est.puerto)) : 'Falta la IP: escríbela en ' + esc(v.app) + (v.seccion ? ' › ' + esc(v.seccion) : '');
-        return '<div class="fila"><span>' + esc(est.nombre) + '<br><span class="muted">' + ip + '</span></span>'
-          + (est.ip ? '<button class="secundario chico" data-probar="' + esc(est.id) + '" data-prefijo="' + esc(v.prefijo) + '">Probar</button>' : '') + '</div>';
+        const falta = v.transporte === false
+          ? 'Falta la IP: escríbela en ' + esc(v.app) + (v.seccion ? ' › ' + esc(v.seccion) : '')
+          : 'Falta elegir la impresora';
+        const donde = est.destino ? esc(est.destino) : falta;
+        const botones = (est.imprimible ? '<button class="secundario chico" data-probar="' + esc(est.id) + '" data-prefijo="' + esc(v.prefijo) + '">Probar</button> ' : '')
+          + '<button class="secundario chico" data-elegir="' + esc(est.id) + '" data-prefijo="' + esc(v.prefijo) + '" data-nombre="' + esc(est.nombre) + '">' + (est.destino ? 'Cambiar' : 'Elegir impresora') + '</button>';
+        return '<div class="fila"><span>' + esc(est.nombre) + '<br><span class="muted">' + donde + '</span></span><span style="white-space:nowrap">' + botones + '</span></div>';
       }).join('');
     }
     return h + '</div>';
@@ -1264,7 +1806,133 @@ async function refrescar() {
   document.getElementById('inicioTexto').textContent = ini.activo ? '(sí)' : '(no)';
   document.getElementById('btnInicio').textContent = ini.activo ? 'Quitar' : 'Activar';
   document.getElementById('btnPrueba').disabled = !e.vinculado;
+
+  // [LP-F3] KOMO Agente (programa antiguo) abierto o en el arranque: se ofrece cerrarlo y quitarlo.
+  const ka = e.komoAgente || {};
+  document.getElementById('komoBox').style.display = (ka.abierto || ka.enInicio) ? 'block' : 'none';
+  document.getElementById('komoTexto').textContent = ka.abierto
+    ? 'El programa antiguo de KOMO (KOMO Agente) sigue abierto. LevoPrint ya imprime lo de KOMO: ciérralo para que no se repartan los pedidos entre los dos.'
+    : 'El programa antiguo de KOMO (KOMO Agente) se abre solo al encender la PC. Ya no hace falta: quítalo.';
+
+  // [LP-F3] Tras vincular (o si la estación del código no tiene impresora) se pregunta sola, una vez.
+  if (!eleccion) {
+    for (const v of (e.vinculos || [])) {
+      if (v.desactivado || v.transporte === null) continue;
+      const sin = v.estaciones.filter(function (s) { return !s.imprimible && !cerrados[v.prefijo + '|' + s.id]; });
+      const est = sin.find(function (s) { return s.id === v.estacionVinculo; }) || (v.preguntar ? sin[0] : null);
+      if (est) { abrirElegir(v.prefijo, est.id, est.nombre); break; }
+    }
+  }
 }
+
+// ---- [LP-F3] «¿Dónde está la impresora de <estación>?» ----
+let eleccion = null;   // { prefijo, estacion, nombre } abierta ahora
+let probada = null;    // { transporte, ref, nombre } a la espera de «¿Salió?»
+const cerrados = {};   // prefijo|estación que el dueño cerró: no se vuelve a abrir sola
+function vinculoVisto(prefijo) { return ((ultimo && ultimo.vinculos) || []).find(function (v) { return v.prefijo === prefijo; }) || {}; }
+function msgElegir(texto, clase) { const m = document.getElementById('msgElegir'); m.textContent = texto || ''; m.className = 'msg ' + (clase || ''); }
+function abrirElegir(prefijo, estacion, nombre) {
+  eleccion = { prefijo: prefijo, estacion: estacion, nombre: nombre };
+  probada = null;
+  document.getElementById('elegirTitulo').textContent = '¿Dónde está la impresora de ' + nombre + '?';
+  document.getElementById('confirmBox').style.display = 'none';
+  document.getElementById('ayudaNoLaVeo').style.display = 'none';
+  document.getElementById('elegirBox').style.display = 'block';
+  msgElegir('', '');
+  j('/impresoras').then(pintarImpresoras);
+  document.getElementById('elegirBox').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+function cerrarElegir() {
+  if (eleccion) cerrados[eleccion.prefijo + '|' + eleccion.estacion] = true;
+  eleccion = null; probada = null;
+  document.getElementById('elegirBox').style.display = 'none';
+}
+function botonImpresora(t, x) {
+  let sub = '';
+  if (t === 'usb') sub = (x.detalle && x.detalle.modelo ? x.detalle.modelo : '') + (x.detalle && x.detalle.probableTermica ? ' · parece de tickets' : '');
+  else sub = x.ref;
+  return '<div class="fila"><span>' + esc(x.nombre) + '<br><span class="muted">' + esc(sub) + '</span></span>'
+    + '<button class="chico" data-t="' + esc(t) + '" data-ref="' + esc(x.ref) + '" data-n="' + esc(x.nombre) + '">Probar</button></div>';
+}
+function pintarImpresoras(r) {
+  if (!eleccion || !r || !r.ok) return;
+  const v = vinculoVisto(eleccion.prefijo);
+  const red = r.red || [], usb = v.transporte === false ? [] : (r.usb || []);
+  let h = '<h2>En la red</h2>' + (red.length ? red.map(function (x) { return botonImpresora('red', x); }).join('') : '<div class="fila muted">No encontramos impresoras de red.</div>');
+  if (v.transporte !== false) {
+    h += '<h2>Conectadas a esta PC (USB)</h2>' + (usb.length ? usb.map(function (x) { return botonImpresora('usb', x); }).join('') : '<div class="fila muted">No hay impresoras instaladas en esta PC.</div>');
+    if (r.usbAviso) h += '<div class="msg warn">' + esc(r.usbAviso) + '</div>';
+  } else {
+    h += '<div class="msg warn">Tu app todavía no admite impresoras USB: por ahora elige una de red.</div>';
+  }
+  if (r.buscando) h += '<div class="msg">Buscando…</div>';
+  document.getElementById('elegirListas').innerHTML = h;
+}
+async function probarDestino(t, ref, nombre) {
+  if (!eleccion) return;
+  probada = null;
+  document.getElementById('confirmBox').style.display = 'none';
+  msgElegir('Enviando un papel de prueba a ' + nombre + '…', '');
+  let r = null;
+  try { r = await j('/probar-destino', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prefijo: eleccion.prefijo, estacion: eleccion.estacion, transporte: t, ref: ref }) }); } catch (_) { r = null; }
+  if (!r || !r.ok) { msgElegir((r && r.mensaje) || 'No se pudo enviar la prueba.', 'err'); return; }
+  probada = { transporte: t, ref: ref, nombre: nombre };
+  msgElegir('', '');
+  document.getElementById('confirmTexto').textContent = 'Enviamos un papel de prueba a ' + nombre + '. ¿Salió?';
+  document.getElementById('confirmBox').style.display = 'block';
+}
+document.getElementById('elegirListas').addEventListener('click', function (ev) {
+  const b = ev.target.closest('button[data-t]');
+  if (b) probarDestino(b.getAttribute('data-t'), b.getAttribute('data-ref'), b.getAttribute('data-n'));
+});
+document.getElementById('btnSalioSi').addEventListener('click', async function () {
+  if (!eleccion || !probada) return;
+  const btn = this; btn.disabled = true;
+  msgElegir('Guardando…', '');
+  let r = null;
+  try { r = await j('/elegir', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prefijo: eleccion.prefijo, estacion: eleccion.estacion, transporte: probada.transporte, ref: probada.ref, nombre: probada.nombre }) }); } catch (_) { r = null; }
+  btn.disabled = false;
+  document.getElementById('confirmBox').style.display = 'none';
+  if (r && r.ok) {
+    msgElegir(r.mensaje || 'Listo.', 'ok');
+    const cerrar = eleccion;
+    setTimeout(function () { if (eleccion === cerrar) cerrarElegir(); }, 2500);
+  } else msgElegir((r && r.mensaje) || 'No se pudo guardar. Revisa tu internet e intenta de nuevo.', r && r.modo112 ? 'warn' : 'err');
+  refrescar();
+});
+document.getElementById('btnSalioNo').addEventListener('click', function () {
+  probada = null;
+  document.getElementById('confirmBox').style.display = 'none';
+  msgElegir('Prueba con otra de la lista. Si ninguna sale, revisa que la impresora esté encendida y conectada, y pulsa «Buscar de nuevo».', 'warn');
+});
+document.getElementById('btnBuscarDeNuevo').addEventListener('click', async function () {
+  const btn = this; btn.disabled = true;
+  msgElegir('Buscando impresoras (unos segundos)…', '');
+  let r = null;
+  try { r = await j('/buscar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch (_) { r = null; }
+  btn.disabled = false;
+  msgElegir('', '');
+  pintarImpresoras(r);
+});
+document.getElementById('btnNoLaVeo').addEventListener('click', function () {
+  const a = document.getElementById('ayudaNoLaVeo');
+  a.style.display = a.style.display === 'none' ? 'block' : 'none';
+});
+document.getElementById('btnProbarIp').addEventListener('click', function () {
+  const ip = document.getElementById('ipManual').value.trim();
+  if (!ip) { msgElegir('Escribe la IP de la impresora. Ejemplo: 192.168.1.50', 'err'); return; }
+  probarDestino('red', ip, ip);
+});
+document.getElementById('btnCerrarElegir').addEventListener('click', cerrarElegir);
+document.getElementById('btnKomo').addEventListener('click', async function () {
+  const btn = this; btn.disabled = true;
+  const m = document.getElementById('msgKomo');
+  let r = null;
+  try { r = await j('/komo-agente/retirar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch (_) { r = null; }
+  btn.disabled = false;
+  m.textContent = (r && r.mensaje) || 'No se pudo. Intenta de nuevo.'; m.className = 'msg ' + (r && r.ok ? 'ok' : 'err');
+  refrescar();
+});
 
 async function probar(cuerpo) {
   const msg = document.getElementById('msgPrueba');
@@ -1302,6 +1970,8 @@ document.getElementById('btnPrueba').addEventListener('click', function () { pro
 document.getElementById('appsBox').addEventListener('click', function (ev) {
   const b = ev.target.closest('button[data-probar]');
   if (b) probar({ estacion: b.getAttribute('data-probar'), prefijo: b.getAttribute('data-prefijo') });
+  const el = ev.target.closest('button[data-elegir]');
+  if (el) abrirElegir(el.getAttribute('data-prefijo'), el.getAttribute('data-elegir'), el.getAttribute('data-nombre'));
 });
 
 function cambiarAncho(v) {
@@ -1342,12 +2012,13 @@ async function manejarPrueba(req, res) {
   if (faltaConfig()) return responderJson(res, 400, { ok: false, error: 'SIN_VINCULAR', mensaje: 'Primero vincula esta PC con el código de tu app.' });
   const body = await leerBodyJson(req);
   let destinos = [];
-  for (const v of vinculos) for (const est of v.estaciones.values()) destinos.push({ v, est });
-  if (body.estacion) destinos = destinos.filter((d) => String(d.est.id) === String(body.estacion) && (!body.prefijo || d.v.prefijo === body.prefijo));
+  // [LP-F3] Cada estación con su destino (red o USB de esta PC), no solo la IP.
+  for (const v of vinculos) for (const id of v.estaciones.keys()) destinos.push({ v, est: destinoDe(v, id) });
+  if (body.estacion) destinos = destinos.filter((d) => String(d.est.estacion) === String(body.estacion) && (!body.prefijo || d.v.prefijo === body.prefijo));
   const vistos = new Set();
   const unicos = destinos.filter((d) => {
-    if (!d.est.ip) return false;
-    const k = d.est.ip + ':' + (d.est.puerto || 9100);
+    if (!destinoImprimible(d.est)) return false;
+    const k = claveDestino(d.est);
     if (vistos.has(k)) return false;
     vistos.add(k);
     return true;
@@ -1360,28 +2031,107 @@ async function manejarPrueba(req, res) {
       ok: false, error: 'SIN_IMPRESORA',
       mensaje: !destinos.length
         ? 'Todavía no hay impresoras: agrégalas en tu app (Estaciones o Impresoras) y vuelve a probar en un minuto.'
-        : 'Falta la IP de la impresora: escríbela en tu app y vuelve a probar en un minuto.',
+        : 'Falta elegir la impresora: pulsa «Elegir impresora» junto a la estación.',
     });
   }
   const bien = [], mal = [];
   for (const d of unicos) {
+    const etiqueta = d.est.nombre + ' (' + textoDestino(d.est) + ')';
     try {
-      await imprimirRaw(d.est.ip, d.est.puerto || 9100, conPrefijo(d.v.prefijo, () => render({ tipo: 'PRUEBA', payload: {} })));
-      bien.push(d.est.nombre + ' (' + d.est.ip + ')');
+      await imprimirDestino(d.est, conPrefijo(d.v.prefijo, () => render({ tipo: 'PRUEBA', payload: {} })));
+      bien.push(etiqueta);
     } catch (e) {
-      mal.push(d.est.nombre + ' (' + d.est.ip + ')');
+      mal.push(etiqueta);
       console.error('[prueba] ' + d.est.nombre + ': ' + e.message);
     }
   }
   if (bien.length) guiEstado.ultimoOk = Date.now();
   if (!bien.length) {
     guiEstado.ultimoError = { mensaje: 'prueba sin respuesta', ts: Date.now() };
-    return responderJson(res, 500, { ok: false, error: 'IMPRESION', mensaje: 'No respondió: ' + mal.join(', ') + '. Revisa que la impresora esté encendida y en la misma red que esta PC.' });
+    return responderJson(res, 500, { ok: false, error: 'IMPRESION', mensaje: 'No respondió: ' + mal.join(', ') + '. Revisa que la impresora esté encendida y conectada.' });
   }
   return responderJson(res, 200, {
     ok: true, parcial: mal.length > 0,
-    aviso: 'Prueba enviada a ' + bien.join(', ') + '.' + (mal.length ? ' No respondió: ' + mal.join(', ') + '; revisa que esté encendida y en la misma red.' : ''),
+    aviso: 'Prueba enviada a ' + bien.join(', ') + '.' + (mal.length ? ' No respondió: ' + mal.join(', ') + '; revisa que esté encendida y conectada.' : ''),
   });
+}
+
+// ============================================================
+// [LP-F3] «¿Dónde está la impresora de <estación>?» — endpoints de la ventana.
+// Pasan por las MISMAS guardas que el resto (Host exacto, Origin propio, POST
+// solo con application/json: peticionLocalValida, en iniciarGui).
+// ============================================================
+function vinculoDe(prefijo) { return vinculos.find((v) => v.prefijo === String(prefijo || '').toLowerCase()) || null; }
+function resumenImpresoras() {
+  return {
+    ok: true, buscando: !!busqueda.enCurso, ts: busqueda.ts || null, equipo: nombreEquipo(),
+    red: busqueda.red, usb: busqueda.usb, usbAviso: busqueda.usbAviso || textoUsbAviso(),
+  };
+}
+// Valida lo que llega de la ventana: red = IPv4 (y puerto) bien formada; USB = una cola que la búsqueda vio en esta PC.
+function refValida(transporte, ref) {
+  ref = String(ref || '').trim();
+  if (transporte === 'red') {
+    const m = ref.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?::(\d{1,5}))?$/);
+    if (!m || m.slice(1, 5).some((x) => +x > 255) || (m[5] && (+m[5] < 1 || +m[5] > 65535))) return null;
+    const ip = m.slice(1, 5).map((x) => String(+x)).join('.');
+    return { transporte: 'red', ip, puerto: parseInt(m[5] || '9100', 10), ref: ip + ':' + (m[5] || '9100'), nombre: 'Impresora en ' + ip };
+  }
+  if (transporte === 'usb') {
+    const u = busqueda.usb.find((x) => x.ref === ref);
+    return u ? { transporte: 'usb', usbId: u.ref, ref: u.ref, nombre: u.nombre } : null;
+  }
+  return null;
+}
+async function manejarImpresoras(req, res) { return responderJson(res, 200, resumenImpresoras()); }
+async function manejarBuscar(req, res) {
+  await leerBodyJson(req);
+  try { await buscarImpresoras('ventana'); } catch (e) { console.error('[buscar] ' + e.message); }
+  return responderJson(res, 200, resumenImpresoras());
+}
+async function manejarProbarDestino(req, res) {
+  const body = await leerBodyJson(req);
+  const v = vinculoDe(body.prefijo) || vinculos[0];
+  const d = refValida(body.transporte, body.ref);
+  if (!d) return responderJson(res, 400, { ok: false, error: 'DESTINO_INVALIDO', mensaje: body.transporte === 'red' ? 'Esa IP no es válida. Ejemplo: 192.168.1.50' : 'No encuentro esa impresora: pulsa «Buscar de nuevo».' });
+  const texto = conPrefijo(v ? v.prefijo : PREFIJO, () => render({ tipo: 'PRUEBA', payload: {} }));
+  if (MODO_CONSOLA) { console.log('[probar] ' + paraConsola(texto)); return responderJson(res, 200, { ok: true, mensaje: 'Modo consola: la prueba se mostró en la consola.' }); }
+  try {
+    await imprimirDestino({ ...d, propio: true }, texto);
+    console.log('[probar] papel de prueba -> ' + d.transporte + ' ' + d.ref);
+    return responderJson(res, 200, { ok: true, mensaje: 'Enviamos un papel de prueba. ¿Salió?' });
+  } catch (e) {
+    console.error('[probar] ' + d.ref + ': ' + e.message);
+    return responderJson(res, 200, { ok: false, error: e.codigoLp || 'IMPRESION', mensaje: e.codigoLp === 'POWERSHELL_RESTRINGIDO' ? textoUsbAviso() : 'No respondió: revisa que esté encendida y conectada, o prueba con otra.' });
+  }
+}
+async function manejarElegir(req, res) {
+  const body = await leerBodyJson(req);
+  const v = vinculoDe(body.prefijo);
+  if (!v) return responderJson(res, 400, { ok: false, error: 'SIN_VINCULO', mensaje: 'Esa app no está vinculada en esta PC.' });
+  const est = v.estaciones.get(String(body.estacion || ''));
+  if (!est) return responderJson(res, 400, { ok: false, error: 'ESTACION_NO_EXISTE', mensaje: ERRORES_ELEGIR.ESTACION_NO_EXISTE });
+  const d = refValida(body.transporte, body.ref);
+  if (!d) return responderJson(res, 400, { ok: false, error: 'DESTINO_INVALIDO', mensaje: 'No encuentro esa impresora: pulsa «Buscar de nuevo».' });
+  // App sin actualizar (backend sin la RPC): como la 1.12, el dueño escribe la IP en su consola.
+  const modo112 = () => responderJson(res, 200, {
+    ok: false, modo112: true, error: 'APP_SIN_ACTUALIZAR',
+    mensaje: d.transporte === 'red'
+      ? 'Escribe esta IP en ' + consolaDe(v.prefijo) + ' (estación ' + est.nombre + '): ' + d.ip + (d.puerto !== 9100 ? ' puerto ' + d.puerto : '') + '.'
+      : 'Tu app todavía no admite impresoras USB. Por ahora usa una impresora de red.',
+  });
+  if (v.transporte === false && v.sinTransporteHasta > Date.now()) return modo112();
+  const r = await elegirDestino(v, est.id, d.transporte, d.ref, body.nombre || d.nombre || '');
+  if (r.modo112) return modo112();
+  if (!r.ok) return responderJson(res, 200, r);
+  v.preguntar = false;
+  console.log('[elegir] ' + v.prefijo + ' ' + est.nombre + ' -> ' + d.transporte + ' ' + d.ref);
+  return responderJson(res, 200, { ok: true, mensaje: 'Listo: ' + est.nombre + ' imprime en ' + (d.transporte === 'usb' ? 'la impresora USB «' + d.nombre + '»' : d.ip) + '.' });
+}
+async function manejarKomoRetirar(req, res) {
+  await leerBodyJson(req);
+  const r = await retirarKomoAgente();
+  return responderJson(res, r.ok ? 200 : 400, r);
 }
 
 async function manejarVincular(req, res) {
@@ -1483,6 +2233,12 @@ function iniciarGui() {
     if (req.method === 'POST' && url === '/imagen') return void manejarImagen(req, res);
     if (req.method === 'POST' && url === '/inicio') return void manejarInicio(req, res);
     if (req.method === 'POST' && url === '/aviso') return void manejarAviso(req, res);
+    // [LP-F3] Impresora por estación: lista, búsqueda, prueba en un destino y elección.
+    if (req.method === 'GET' && url === '/impresoras') return void manejarImpresoras(req, res);
+    if (req.method === 'POST' && url === '/buscar') return void manejarBuscar(req, res);
+    if (req.method === 'POST' && url === '/probar-destino') return void manejarProbarDestino(req, res);
+    if (req.method === 'POST' && url === '/elegir') return void manejarElegir(req, res);
+    if (req.method === 'POST' && url === '/komo-agente/retirar') return void manejarKomoRetirar(req, res);
     responderJson(res, 404, { ok: false, error: 'NO_ENCONTRADO' });
   });
   function intentarPuertos(intento) {
@@ -1656,10 +2412,17 @@ async function arrancar() {
   if (faltaUrlAnon()) {
     console.error('Falta LEVO_URL/LEVO_ANON: revisa levoprint.txt (o borra esas lineas para usar las de LevoPrint).');
   }
-  console.log('LevoPrint agente de impresion v' + VERSION_AGENTE + ' (vincular con el codigo + varias apps) - LevoDev');
+  console.log('LevoPrint agente de impresion v' + VERSION_AGENTE + ' (vincular con el codigo + varias apps + impresora por estacion) - LevoDev');
   console.log(MODO_CONSOLA ? 'MODO CONSOLA (sin impresoras reales)' : 'Modo impresión real');
   migrarConfigVieja();
+  // [LP-F3] komo-agente.txt en la misma carpeta: se adopta su vínculo (mismo token, sin código).
+  adoptarKomoAgente();
+  revisarKomoAgente(true);
   iniciarGui();
+  // [LP-F3] Búsqueda de impresoras al arrancar y cada 15 min (además: tras vincular, cuando la
+  // consola la pide con buscar:true y con «Buscar de nuevo» en la ventana).
+  setTimeout(() => { if (vinculos.length) buscarImpresoras('arranque').catch(() => {}); }, 1500);
+  setInterval(() => { if (vinculos.length) buscarImpresoras('cada 15 min').catch(() => {}); }, BUSCAR_CADA_MS);
   if (!faltaConfig()) {
     console.log('Apps vinculadas: ' + vinculos.map((v) => v.prefijo).join(', '));
     ciclo();
