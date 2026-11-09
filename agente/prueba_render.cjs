@@ -158,6 +158,20 @@ R.setAncho(48)
   ok(t.includes('?MEGA') && t.includes('POLLER') && !/[^\x00-\xff]/.test(t), 'mayúsculas: «Ωmega» sale «?MEGA» (latin1)')
 }
 
+// ---------- [KS-09 ICBPER] boleta con bolsas: línea ICBPER aparte del IGV; sin bolsas, nada nuevo ----------
+{
+  R.setAncho(48)
+  const cpe = { tipo: 'BOLETA DE VENTA ELECTRONICA', serie: 'B001', numero: 1, estado: 'EMITIDO', empresa: { razonSocial: 'DEMO SAC', ruc: '20000000001' },
+    cliente: { nombre: 'CLIENTE VARIOS', doc: '0' }, fecha: '09/11/2026 10:00',
+    items: [{ cantidad: '2.000', nombre: 'Arroz Costeño 1kg', total: '25.00' }, { cantidad: '2.000', nombre: 'Bolsa plástica', total: '0.20' }],
+    totales: { gravada: 21.36, igv: 3.84, icbper: 1.00 }, total: 26.20, pagos: [{ medio: 'EFECTIVO', monto: 26.2 }] }
+  const t = texto(R.render({ tipo: 'CPE', payload: cpe }))
+  ok(/IGV 18%\s+S\/ 3\.84\n/.test(t) && /ICBPER \(bolsas\)\s+S\/ 1\.00\n/.test(t) && /TOTAL\s+S\/ 26\.20\n/.test(t) && t.indexOf('ICBPER') > t.indexOf('IGV 18%') && t.indexOf('ICBPER') < t.indexOf('TOTAL'),
+    'CPE con bolsas: «ICBPER (bolsas) S/ 1.00» entre el IGV y el TOTAL', t)
+  const s = texto(R.render({ tipo: 'CPE', payload: { ...cpe, totales: { gravada: 21.19, igv: 3.81 }, total: 25 } }))
+  ok(!s.includes('ICBPER'), 'CPE sin bolsas: no aparece ICBPER', s)
+}
+
 // ---------- [QA MEDIO-2] la versión que el agente manda en agente_config ----------
 {
   const m = /const VERSION_AGENTE = '([0-9.]+)';/.exec(src)

@@ -424,6 +424,8 @@ function renderCpe(pl) {
   if (n(tot.exonerada) > 0) t += fila('OP. EXONERADA', money(tot.exonerada));
   if (n(tot.inafecta) > 0) t += fila('OP. INAFECTA', money(tot.inafecta));
   if (n(tot.igv) > 0) t += fila('IGV 18%', money(tot.igv));
+  // [KS-09 ICBPER] Bolsas de plastico: el impuesto va aparte del IGV (RS 150-2019/SUNAT). Solo si viene.
+  if (n(tot.icbper) > 0) t += fila('ICBPER (bolsas)', money(tot.icbper));
   t += CMD.negritaOn + fila('TOTAL', money(pl.total)) + CMD.negritaOff;
   t += CMD.izq + 'SON: ' + numeroALetras(pl.total) + '\n';
   for (const p of pl.pagos || []) t += fila('  ' + p.medio, money(p.monto));
