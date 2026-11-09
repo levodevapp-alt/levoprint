@@ -34,9 +34,9 @@ object Agent {
   // Va en <prefijo>_agente_config (p.version = "apk/1.7.0"): KUTI (kuti_turno_print) solo manda el papel TURNO a un
   // local cuyos agentes vivos lo saben dibujar. KOMO/KIPU la ignoran. [LP-F3] Tambien va en <prefijo>_agente_impresoras:
   // la consola avisa «Actualiza LevoPrint» a los equipos con menos de apk/1.7.0.
-  const val VERSION = "1.7.0"
+  const val VERSION = "1.7.1"
   // [Re-QA LP-F3] = versionCode de app/build.gradle.kts (AgentRenderTest lo comprueba): el aviso de actualizacion lo compara con LevoPrint.json.
-  const val VERSION_CODE = 12
+  const val VERSION_CODE = 13
   // ESC/POS con codigos de caracter (sin bytes de control crudos en el
   // fuente). Se construye TODO como String de chars 0..255 y se envia en
   // latin1 (ISO-8859-1), igual que el agente .exe (Buffer 'binary').

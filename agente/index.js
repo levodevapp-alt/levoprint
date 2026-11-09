@@ -1,5 +1,5 @@
 // ============================================================
-// LevoPrint · Agente de impresión v1.13 (impresora por estación: red o USB, búsqueda sola) · LevoDev
+// LevoPrint · Agente de impresión v1.14 (impresora por estación: red o USB, búsqueda sola; ICBPER en el CPE) · LevoDev
 // Corre en la PC del local. Poll cada 2-6 s a <prefijo>_print_tomar de CADA app
 // vinculada (KOMO, KIPU, KUTI...), renderiza ESC/POS y lo manda a la impresora
 // de cada estación: por red (IP:puerto) o por una impresora instalada en esta
@@ -179,7 +179,7 @@ const INTERVALO_MAX_MS = 6000;  // sin trabajo: se espacia de a poco hasta 6 s
 const CONFIG_CADA_MS = (!esExe && parseInt(process.env.LEVO_PRUEBA_CONFIG_MS || '', 10)) || 60000;
 // [O-23 · QA MEDIO-2] Versión de este agente: va en <prefijo>_agente_config (p.version = 'exe/1.13'). KUTI
 // (kuti_turno_print) solo manda el papel TURNO a un local cuyos agentes vivos lo saben dibujar; KOMO/KIPU la ignoran.
-const VERSION_AGENTE = '1.13';
+const VERSION_AGENTE = '1.14';
 let ANCHO = Math.min(100, Math.max(20, parseInt(process.env.LEVO_ANCHO || '48', 10) || 48)); // [Re-QA] 20–100 como la ventana // columnas típicas de térmica 58mm (48) u 80mm (64/72)
 // [ventana] LEVO_SINVENTANA=1 (o corriendo como servicio de Windows): no abrir
 // navegador, pero la mini-GUI web se sigue sirviendo igual (soporte remoto).

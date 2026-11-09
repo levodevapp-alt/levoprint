@@ -198,9 +198,20 @@ class AgentRenderTest {
     val f = listOf(java.io.File("build.gradle.kts"), java.io.File("app/build.gradle.kts")).first { it.exists() }
     val m = Regex("versionName\\s*=\\s*\"([^\"]+)\"").find(f.readText())
     assertEquals(m?.groupValues?.get(1), Agent.VERSION)
-    assertEquals("1.7.0", Agent.VERSION)
+    assertEquals("1.7.1", Agent.VERSION)
     val vc = Regex("versionCode\\s*=\\s*(\\d+)").find(f.readText())
     assertEquals(vc?.groupValues?.get(1)?.toInt(), Agent.VERSION_CODE)
+  }
+
+  // [KS-09 ICBPER] Boleta con bolsas: «ICBPER (bolsas)» entre el IGV y el TOTAL; sin bolsas no aparece.
+  @Test fun cpeConIcbper() {
+    val pl = o("""{"tipo":"BOLETA DE VENTA ELECTRONICA","serie":"B001","numero":1,"estado":"EMITIDO","empresa":{"razonSocial":"DEMO SAC","ruc":"20000000001"},"cliente":{"nombre":"CLIENTE VARIOS","doc":"0"},"items":[{"cantidad":"2.000","nombre":"Arroz","total":"25.00"},{"cantidad":"2.000","nombre":"Bolsa plastica","total":"0.20"}],"totales":{"gravada":21.36,"igv":3.84,"icbper":1.00},"total":26.2,"pagos":[{"medio":"EFECTIVO","monto":26.2}],"app":"KIPU"}""")
+    val t = texto(Agent.render(job("CPE", pl), 48, "KIPU"))
+    val iIgv = t.indexOf("IGV 18%"); val iIcb = t.indexOf("ICBPER (bolsas)"); val iTot = t.indexOf("TOTAL")
+    assertTrue(t, iIgv >= 0 && iIgv < iIcb && iIcb < iTot)
+    assertTrue(t, Regex("ICBPER \\(bolsas\\)\\s+S/ 1\\.00").containsMatchIn(t))
+    pl.put("totales", o("""{"gravada":21.19,"igv":3.81}"""))
+    assertFalse(texto(Agent.render(job("CPE", pl), 48, "KIPU")).contains("ICBPER"))
   }
 
   @Test fun envolverPorPalabra() {

@@ -54,6 +54,6 @@ class ActualizacionTest {
   }
 
   @Test fun versionPropiaEsLaDelGradle() {
-    assertEquals(12, Agent.VERSION_CODE)
+    assertEquals(13, Agent.VERSION_CODE)
   }
 }
