@@ -356,6 +356,8 @@ object Agent {
     if (n(tot.optDouble("exonerada", 0.0)) > 0) b.append(fila("OP. EXONERADA", money(tot.optDouble("exonerada")), ancho))
     if (n(tot.optDouble("inafecta", 0.0)) > 0) b.append(fila("OP. INAFECTA", money(tot.optDouble("inafecta")), ancho))
     if (n(tot.optDouble("igv", 0.0)) > 0) b.append(fila("IGV 18%", money(tot.optDouble("igv")), ancho))
+    // [KS-09 ICBPER] Bolsas de plastico: el impuesto va aparte del IGV (RS 150-2019/SUNAT). Solo si viene.
+    if (n(tot.optDouble("icbper", 0.0)) > 0) b.append(fila("ICBPER (bolsas)", money(tot.optDouble("icbper")), ancho))
     b.append(NEG_ON + fila("TOTAL", money(pl.optDouble("total", 0.0)), ancho) + NEG_OFF)
     val pg = pagos(pl)
     for (i in 0 until pg.length()) {
