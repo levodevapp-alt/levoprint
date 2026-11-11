@@ -1,17 +1,18 @@
 name: build-apk
 # [QA LP-F3 · ALTO 1] Un merge a main ya NO publica solo: el CI se lanza a mano (Actions -> Run workflow).
-# Compila y prueba siempre; publica al bucket solo desde main y con «publicar» marcado.
+# [RT-1 · 11-nov] Este repo es PUBLICO: el CI ya NO usa SUPABASE_SERVICE_KEY ni publica al bucket.
+# Solo compila, prueba y deja los artifacts (APK + LevoPrint.json validado). La publicacion la hace
+# Luis desde su PC con tools/publicar_bucket.mjs (la llave nunca sale de su .env local).
 on:
   workflow_dispatch:
     inputs:
-      publicar:
-        description: 'Publicar al bucket de descargas (solo desde main)'
-        type: boolean
-        default: false
       notas:
         description: 'Notas de la version para LevoPrint.json (aviso de actualizacion del APK)'
         type: string
         default: ''
+# [RT-1] GITHUB_TOKEN con el minimo: solo lectura del codigo.
+permissions:
+  contents: read
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -42,16 +43,7 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         # [LP-F3] Las pruebas de unidad (render y busqueda) corren antes de armar el APK.
         run: gradle testReleaseUnitTest assembleRelease --no-daemon --stacktrace && cp app/build/outputs/apk/release/app-release.apk LevoPrint.apk
-      - name: Subir APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: LevoPrint-apk
-          path: LevoPrint.apk
-          if-no-files-found: error
 
-      # Publica el APK a la URL estable que usan los botones de descarga de
-      # la consola (mi negocio > estaciones). Si no hay SUPABASE_SERVICE_KEY
-      # el paso NO falla: solo deja el artifact y avisa.
       # [Re-QA LP-F3 · BAJO 3] LevoPrint.json se arma y se VALIDA en cada run, antes de subir nada:
       # versionCode/versionName de app/build.gradle.kts (no se desalinean del APK) y url https.
       - name: Armar y validar LevoPrint.json
@@ -66,21 +58,13 @@ jobs:
           jq -e '(.versionCode|type) == "number" and .versionCode > 0 and (.versionName|length) > 0 and (.url|startswith("https://")) and (.notas|type) == "string"' LevoPrint.json > /dev/null || { echo "LevoPrint.json invalido: no se publica nada"; cat LevoPrint.json; exit 1; }
           cat LevoPrint.json
 
-      # [QA LP-F3 · ALTO 1] Solo desde main y con «publicar» marcado. Sube el APK y luego LevoPrint.json
-      # (ya validado en el paso anterior: si fallaba, este paso ni corre).
-      - name: Publicar al bucket de descargas (si hay service key)
-        if: github.ref == 'refs/heads/main' && inputs.publicar == true
-        env:
-          SB_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: |
-          if [ -z "$SB_KEY" ]; then echo "Sin SUPABASE_SERVICE_KEY: no publico al bucket (queda solo el artifact)."; exit 0; fi
-          [ -s LevoPrint.json ] || { echo "Falta LevoPrint.json validado: no se publica nada"; exit 1; }
-          echo "Publicando LevoPrint.apk al bucket descargas/levoprint ..."
-          code=$(curl -sS -o /tmp/r.txt -w "%{http_code}" -X POST "https://krfljsososdakbatevci.supabase.co/storage/v1/object/descargas/levoprint/LevoPrint.apk" -H "Authorization: Bearer $SB_KEY" -H "x-upsert: true" -H "Content-Type: application/vnd.android.package-archive" --data-binary @LevoPrint.apk)
-          echo "HTTP $code"; cat /tmp/r.txt; echo
-          [ "$code" = "200" ] || { echo "Fallo la publicacion al bucket"; exit 1; }
-          echo "APK publicado a descargas/levoprint/LevoPrint.apk"
-          code=$(curl -sS -o /tmp/r2.txt -w "%{http_code}" -X POST "https://krfljsososdakbatevci.supabase.co/storage/v1/object/descargas/levoprint/LevoPrint.json" -H "Authorization: Bearer $SB_KEY" -H "x-upsert: true" -H "Cache-Control: no-cache" -H "Content-Type: application/json" --data-binary @LevoPrint.json)
-          echo "HTTP $code"; cat /tmp/r2.txt; echo
-          [ "$code" = "200" ] || { echo "Fallo la publicacion de LevoPrint.json"; exit 1; }
-          echo "LevoPrint.json publicado"
+      # [RT-1] El artifact lleva el APK y su LevoPrint.json ya validado: es lo que publica
+      # tools/publicar_bucket.mjs desde la PC de Luis (el CI no toca el bucket).
+      - name: Subir APK y LevoPrint.json
+        uses: actions/upload-artifact@v4
+        with:
+          name: LevoPrint-apk
+          path: |
+            LevoPrint.apk
+            LevoPrint.json
+          if-no-files-found: error

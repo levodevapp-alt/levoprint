@@ -51,14 +51,19 @@ Cada estación (Cocina, Caja…) tiene **su** impresora, que puede ser de **red*
 - Servicio en primer plano (sigue imprimiendo con la pantalla apagada).
 - Impresora Bluetooth general (APK, de la 1.6): sigue como respaldo para estaciones de red sin IP; lo nuevo es elegir la Bluetooth **por estación**.
 
-## Publicar (QA LP-F3 · ALTO 1)
-Un merge o un push a `main` **ya no publica solo**. Los dos workflows (*build-apk* y *build-exe*) se lanzan a mano y siempre compilan y prueban; publican al bucket `descargas/levoprint/` solo si se cumplen las dos cosas: rama `main` **y** la casilla **publicar** marcada.
-0. Antes, lanza el mismo workflow **sin** marcar publicar (en `main` o en tu rama) y verifica que salga en **verde**.
-1. GitHub → *Actions* → *build-apk* (o *build-exe*) → **Run workflow** → rama **main** → marca **publicar** → (APK) escribe las **notas** de la versión → *Run*.
-   - *build-apk* arma y **valida** `LevoPrint.json` (`{versionCode, versionName, url, notas}`, versión leída de `app/build.gradle.kts`) en cada run; si es inválido no sube nada. Al publicar sube el APK y luego el JSON.
-   - *build-exe* sube `LevoPrint-Windows.zip`.
-2. Sin la casilla (o desde otra rama) solo quedan los *Artifacts* del run, para probar.
-3. **Publicación manual** (sin el secret `SUPABASE_SERVICE_KEY`, o si el CI falla): baja el artifact del run y súbelo al bucket con el script/procedimiento manual de siempre (Storage → `descargas/levoprint/`, con *upsert*), y sube a mano `LevoPrint.json` con la misma versión de `app/build.gradle.kts`.
+## Publicar (QA LP-F3 · ALTO 1 · RT-1)
+Un merge o un push a `main` **no publica**. Este repo es **público**: el CI **no tiene ni usa** llaves de Supabase (RT-1, 11-nov). **Nunca** cargues `SUPABASE_SERVICE_KEY` (ni otra llave de servicio) como secret de este repo.
+1. GitHub → *Actions* → *build-apk* (escribe las **notas** de la versión) y *build-exe* → **Run workflow** en `main` → verifica que salgan en **verde**.
+   - *build-apk* arma y **valida** `LevoPrint.json` (`{versionCode, versionName, url, notas}`, versión leída de `app/build.gradle.kts`); el artifact `LevoPrint-apk` trae el APK y ese JSON.
+   - *build-exe* deja el artifact `LevoPrint-exe` con el `.exe` y `LevoPrint-Windows.zip`.
+2. Publica **desde tu PC** (la llave se lee de un `.env` local, fuera de cualquier repo, y nunca se imprime):
+   ```
+   gh run download <run_build-apk> -n LevoPrint-apk -D out/apk
+   gh run download <run_build-exe> -n LevoPrint-exe -D out/exe
+   node tools/publicar_bucket.mjs out/apk out/exe --seco
+   node --env-file=<.env fuera del repo> tools/publicar_bucket.mjs out/apk out/exe
+   ```
+   El script valida `LevoPrint.json` contra `app/build.gradle.kts` (si no coincide no sube nada) y sube el APK, luego el JSON y luego el ZIP.
 
 ### Aviso de actualización (APK 1.7.0)
 El APK lee `descargas/levoprint/LevoPrint.json` (URL pública del bucket) al abrir la pantalla (como mucho cada 5 min) y cada 12 h desde el servicio. Si `versionCode` es mayor que el suyo (`Agent.VERSION_CODE`, igual al de `app/build.gradle.kts`; una prueba lo comprueba), muestra la tarjeta **«Hay una versión nueva de LevoPrint (X)» → Actualizar** y una notificación (una vez por versión). «Actualizar» abre la URL del APK en el navegador: se descarga y se instala encima, sin perder la vinculación. Solo acepta URLs de las descargas de LevoDev (bucket `descargas/levoprint/` o `archivos.levodev.app/descargas/levoprint/`). Sin internet o con un JSON inválido no avisa nada y nunca frena la impresión; no pide permisos nuevos.

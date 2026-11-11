@@ -1,13 +1,13 @@
 name: build-exe
 # [QA LP-F3 · ALTO 1] Un merge a main ya NO publica solo: el CI se lanza a mano (Actions -> Run workflow).
-# Compila y prueba siempre; publica al bucket solo desde main y con «publicar» marcado.
+# [RT-1 · 11-nov] Este repo es PUBLICO: el CI ya NO usa SUPABASE_SERVICE_KEY ni publica al bucket.
+# Solo prueba, compila y deja el artifact (LevoPrint-Windows.zip listo para el boton "Descargar (PC)").
+# La publicacion la hace Luis desde su PC con tools/publicar_bucket.mjs (la llave nunca sale de su .env).
 on:
   workflow_dispatch:
-    inputs:
-      publicar:
-        description: 'Publicar al bucket de descargas (solo desde main)'
-        type: boolean
-        default: false
+# [RT-1] GITHUB_TOKEN con el minimo: solo lectura del codigo.
+permissions:
+  contents: read
 jobs:
   exe:
     runs-on: windows-latest
@@ -29,27 +29,16 @@ jobs:
       - name: Compilar LevoPrint.exe (Node SEA)
         working-directory: agente
         run: node build-exe.mjs
-      - name: Subir .exe
+      # Empaqueta el .exe en el ZIP que espera el boton "Descargar (PC)" de la consola.
+      - name: Empaquetar LevoPrint-Windows.zip
+        shell: pwsh
+        working-directory: agente
+        run: Compress-Archive -Path dist/LevoPrint.exe -DestinationPath dist/LevoPrint-Windows.zip -Force
+      - name: Subir .exe y .zip
         uses: actions/upload-artifact@v4
         with:
           name: LevoPrint-exe
-          path: agente/dist/LevoPrint.exe
+          path: |
+            agente/dist/LevoPrint.exe
+            agente/dist/LevoPrint-Windows.zip
           if-no-files-found: error
-
-      # Empaqueta el .exe en el ZIP que espera el boton "Descargar (PC)" de
-      # la consola y lo publica a la URL estable. Sin service key: no falla,
-      # solo deja el artifact.
-      # [QA LP-F3 · ALTO 1] Solo desde main y con «publicar» marcado.
-      - name: Publicar al bucket de descargas (si hay service key)
-        if: github.ref == 'refs/heads/main' && inputs.publicar == true
-        shell: pwsh
-        working-directory: agente
-        env:
-          SB_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: |
-          if (-not $env:SB_KEY) { Write-Host "Sin SUPABASE_SERVICE_KEY: no publico al bucket (queda solo el artifact)."; exit 0 }
-          Compress-Archive -Path dist/LevoPrint.exe -DestinationPath LevoPrint-Windows.zip -Force
-          Write-Host "Publicando LevoPrint-Windows.zip al bucket descargas/levoprint ..."
-          curl.exe -sS -X POST "https://krfljsososdakbatevci.supabase.co/storage/v1/object/descargas/levoprint/LevoPrint-Windows.zip" -H "Authorization: Bearer $env:SB_KEY" -H "x-upsert: true" -H "Content-Type: application/zip" --data-binary "@LevoPrint-Windows.zip"
-          if ($LASTEXITCODE -ne 0) { throw "Fallo la publicacion al bucket" }
-          Write-Host "EXE publicado a descargas/levoprint/LevoPrint-Windows.zip"

@@ -76,12 +76,10 @@
 - **KOMO y KIPU comparten el mismo proyecto Supabase**, por eso la app prueba prefijos
   conocidos y no hace falta que el QR lleve la URL. Cuando exista otro proyecto, habrá que
   meter `&u=&a=&p=` en el QR (ya está preparado en `Emparejamiento.parseLink`).
-- **Publicación automática (opcional):** el CI ya tiene el paso de subir al bucket; solo
-  falta el secret `SUPABASE_SERVICE_KEY` en el repo. Mientras no esté, se publica a mano
-  (descargar artifact del CI → subir al bucket). Con el secret puesto, se publica con *Run workflow*
-  desde `main` y la casilla **publicar** (un push o merge ya no publica solo; ver README › Publicar).
-- **Antes de publicar, siempre:** lanza el run a mano **sin** marcar publicar y verifica que salga en **verde**
-  (pruebas, APK/.exe y `LevoPrint.json` válido). Solo entonces vuelve a lanzarlo desde `main` con **publicar** ✔.
+- **Publicación (RT-1):** el repo es público, así que el CI **no** publica ni usa llaves de Supabase.
+  **Nunca** cargar `SUPABASE_SERVICE_KEY` como secret de este repo. Se lanza el run a mano en `main`,
+  se verifica que salga en **verde** (pruebas, APK/.exe y `LevoPrint.json` válido) y se publica desde
+  la PC de Luis con `tools/publicar_bucket.mjs` (ver README › Publicar).
 - **Aviso de actualización (APK 1.7.0+):** tras publicar, abre LevoPrint en un equipo con una versión anterior
   (desde la 1.7.0): debe salir la tarjeta «Hay una versión nueva de LevoPrint (X) → Actualizar» y, en menos de
   12 h, la notificación. Sin internet no debe salir nada ni dejar de imprimir.

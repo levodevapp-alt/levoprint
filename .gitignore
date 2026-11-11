@@ -8,6 +8,10 @@
 /captures
 *.apk
 _art/
+# [RT-1] artifacts bajados para publicar y cualquier .env local: nunca al repo publico
+out/
+.env
+.env.*
 
 # Artefactos de build del agente (SEA)
 agente/dist/
