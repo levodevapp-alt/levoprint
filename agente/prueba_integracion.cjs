@@ -1,5 +1,5 @@
 // ============================================================
-// LevoPrint · prueba de integración del agente .exe 1.13 (sin Supabase ni impresoras reales)
+// LevoPrint · prueba de integración del agente .exe 1.14 (sin Supabase ni impresoras reales)
 // ------------------------------------------------------------
 //   node agente/prueba_integracion.cjs
 // Copia index.js a una carpeta temporal y lo corre como `node index.js` contra:
@@ -146,9 +146,9 @@ const DEV_OTRO = '44444444-4444-4444-8444-444444444444';
     const usbPos = (vistas || []).find((x) => x.ref === 'POS-80 USB');
     ok(!!(usbPos && usbPos.detalle && usbPos.detalle.probableTermica === true && usbPos.detalle.modelo === 'POS-80C'), 'POS-80 sale como probable térmica con su modelo', usbPos);
     const llamadaImp = mock.llamadas.filter((l) => l.prefijo === 'komo' && l.fn === 'agente_impresoras' && l.p && l.p.encontradas).pop();
-    ok(!!llamadaImp && llamadaImp.p.version === 'exe/1.13' && llamadaImp.p.capacidades.join(',') === 'red,usb' && llamadaImp.p.equipo === os.hostname().slice(0, 60), 'agente_impresoras lleva versión exe/1.13, capacidades red+usb y el equipo', llamadaImp && llamadaImp.p);
+    ok(!!llamadaImp && llamadaImp.p.version === 'exe/1.14' && llamadaImp.p.capacidades.join(',') === 'red,usb' && llamadaImp.p.equipo === os.hostname().slice(0, 60), 'agente_impresoras lleva versión exe/1.14, capacidades red+usb y el equipo', llamadaImp && llamadaImp.p);
     const cfgCall = mock.llamadas.find((l) => l.prefijo === 'komo' && l.fn === 'agente_config');
-    ok(!!cfgCall && cfgCall.p.version === 'exe/1.13', 'agente_config se sigue llamando (con la versión)');
+    ok(!!cfgCall && cfgCall.p.version === 'exe/1.14', 'agente_config se sigue llamando (con la versión)');
 
     // 2) KIPU sin las RPC: una sola llamada (modo 1.12 por 30 min), aunque pasen varios ciclos de config.
     await espera(6000);
