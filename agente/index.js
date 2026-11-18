@@ -367,6 +367,8 @@ function renderTicket(pl) {
     t += linea() + 'PROPINAS (aparte, no suman al total)\n';
     for (const p of pl.propinas) t += fila(('  ' + p.profesional + ' (' + p.medio + ')').slice(0, ANCHO - 12), money(p.monto));
   }
+  // [KCAP-PRINT · caja_captor_comun] reimpresión a ciegas de un papel ajeno: el servidor manda sin pagos ni propinas
+  if (pl.montosOcultos) t += 'Medios de pago: al contar la caja\n';
   t += linea('=') + CMD.centro + 'NO ES COMPROBANTE DE PAGO\n';
   t += firma(pl) + CMD.corte;
   return t;
@@ -429,6 +431,8 @@ function renderCpe(pl) {
   t += CMD.negritaOn + fila('TOTAL', money(pl.total)) + CMD.negritaOff;
   t += CMD.izq + 'SON: ' + numeroALetras(pl.total) + '\n';
   for (const p of pl.pagos || []) t += fila('  ' + p.medio, money(p.monto));
+  // [KCAP-PRINT · caja_captor_comun] reimpresión a ciegas de un comprobante ajeno: el servidor manda sin pagos
+  if (pl.montosOcultos) t += 'Medios de pago: al contar la caja\n';
   t += linea('=') + CMD.centro;
   if (pl.qr) t += qrEscPos(pl.qr) + '\n';
   if (pl.hash) t += 'Hash: ' + String(pl.hash).slice(0, 28) + '\n';
