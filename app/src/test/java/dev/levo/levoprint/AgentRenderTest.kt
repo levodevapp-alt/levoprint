@@ -219,7 +219,8 @@ class AgentRenderTest {
   @Test fun montosOcultosLeyenda() {
     val ley = "Medios de pago: al contar la caja"
     val casos = listOf(
-      job("TICKET", o("""{$base,"mesa":"5","mozo":"Ana","pagos":[]}""")),
+      // base ya trae "pagos": org.json rechaza claves repetidas, por eso se pisa con put (sin pagos, como manda el servidor)
+      job("TICKET", o("""{$base,"mesa":"5","mozo":"Ana"}""").put("pagos", JSONArray())),
       job("TICKET", o(kuti).put("pagos", JSONArray()).put("propinas", JSONArray())),
       job("CPE", o("""{"tipo":"BOLETA DE VENTA ELECTRONICA","serie":"B001","numero":7,"estado":"EMITIDO","empresa":{"razonSocial":"X SAC","ruc":"20123456789"},"cliente":{"nombre":"Juan","doc":"0"},"items":[{"cantidad":1,"nombre":"Lomo","total":28.5}],"totales":{"gravada":24.15,"igv":4.35},"total":28.5,"pagos":[]}"""))
     )
