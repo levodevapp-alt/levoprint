@@ -34,9 +34,9 @@ object Agent {
   // Va en <prefijo>_agente_config (p.version = "apk/1.7.0"): KUTI (kuti_turno_print) solo manda el papel TURNO a un
   // local cuyos agentes vivos lo saben dibujar. KOMO/KIPU la ignoran. [LP-F3] Tambien va en <prefijo>_agente_impresoras:
   // la consola avisa «Actualiza LevoPrint» a los equipos con menos de apk/1.7.0.
-  const val VERSION = "1.7.1"
+  const val VERSION = "1.7.2"
   // [Re-QA LP-F3] = versionCode de app/build.gradle.kts (AgentRenderTest lo comprueba): el aviso de actualizacion lo compara con LevoPrint.json.
-  const val VERSION_CODE = 13
+  const val VERSION_CODE = 14
   // ESC/POS con codigos de caracter (sin bytes de control crudos en el
   // fuente). Se construye TODO como String de chars 0..255 y se envia en
   // latin1 (ISO-8859-1), igual que el agente .exe (Buffer 'binary').
@@ -246,6 +246,9 @@ object Agent {
       val p = pg.getJSONObject(i)
       b.append(fila("  " + p.optString("medio"), money(p.optDouble("monto", 0.0)), ancho))
     }
+    // [KCAP-PRINT · caja_captor_comun] reimpresion a ciegas de un papel ajeno: el servidor manda sin pagos;
+    // payloads viejos no traen la marca y salen igual que antes (como agente/index.js y kuti-print/render.ts).
+    if (pl.optBoolean("montosOcultos", false)) b.append("Medios de pago: al contar la caja" + NL)
     b.append(linea(ancho, "=") + CENTRO + "NO ES COMPROBANTE DE PAGO" + NL + pie(app, ancho))
     return b.toString()
   }
@@ -307,6 +310,9 @@ object Agent {
         b.append(fila(("  " + txt(p, "profesional") + " (" + txt(p, "medio") + ")").take(ancho - 12), money(p.optDouble("monto", 0.0)), ancho))
       }
     }
+    // [KCAP-PRINT · caja_captor_comun] reimpresion a ciegas de un papel ajeno: el servidor manda sin pagos ni propinas;
+    // payloads viejos no traen la marca y salen igual que antes (como agente/index.js y kuti-print/render.ts).
+    if (pl.optBoolean("montosOcultos", false)) b.append("Medios de pago: al contar la caja" + NL)
     b.append(linea(ancho, "=") + CENTRO + "NO ES COMPROBANTE DE PAGO" + NL + pie(app, ancho))
     return b.toString()
   }
@@ -364,6 +370,9 @@ object Agent {
       val p = pg.getJSONObject(i)
       b.append(fila("  " + p.optString("medio"), money(p.optDouble("monto", 0.0)), ancho))
     }
+    // [KCAP-PRINT · caja_captor_comun] reimpresion a ciegas de un papel ajeno: el servidor manda sin pagos;
+    // payloads viejos no traen la marca y salen igual que antes (como agente/index.js y kuti-print/render.ts).
+    if (pl.optBoolean("montosOcultos", false)) b.append("Medios de pago: al contar la caja" + NL)
     b.append(linea(ancho, "=") + CENTRO)
     if (pl.optString("qr").isNotBlank()) b.append(qr(pl.optString("qr")) + NL)
     if (pl.optString("hash").isNotBlank()) b.append("Hash: " + pl.optString("hash").take(28) + NL)

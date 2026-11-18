@@ -172,6 +172,23 @@ R.setAncho(48)
   ok(!s.includes('ICBPER'), 'CPE sin bolsas: no aparece ICBPER', s)
 }
 
+// ---------- [KCAP-PRINT] reimpresión a ciegas: leyenda con montosOcultos; payloads viejos sin cambio ----------
+{
+  const ley = 'Medios de pago: al contar la caja'
+  const casos = [
+    { tipo: 'TICKET', payload: { negocio: 'Chifa X', mesa: '5', mozo: 'Ana', hora: '13:05', items: [{ cantidad: 1, nombre: 'Lomo', precio: 28.5 }], total: 28.5, pagos: [] } },
+    { tipo: 'TICKET', payload: { negocio: 'Bodega X', nota: 'NV-1', vendedor: 'Luis', items: [{ cantidad: 1, nombre: 'Arroz', precio: 5 }], total: 5, pagos: [] } },
+    { tipo: 'CPE', payload: { tipo: 'BOLETA', serie: 'B001', numero: 1, empresa: { razonSocial: 'X SAC', ruc: '20123456789' }, cliente: { nombre: 'CLIENTE VARIOS', doc: '0' },
+      items: [{ cantidad: 1, nombre: 'Lomo', total: 28.5 }], totales: { gravada: 24.15, igv: 4.35 }, total: 28.5, pagos: [] } },
+  ]
+  for (const c of casos) {
+    const sin = texto(R.render(c))
+    const con = texto(R.render({ tipo: c.tipo, payload: { ...c.payload, montosOcultos: true } }))
+    ok(!sin.includes(ley) && con.includes(ley + '\n') && con.indexOf(ley) > con.indexOf('TOTAL'),
+      c.tipo + (c.payload.mesa ? ' (mesa)' : '') + ': «' + ley + '» solo con montosOcultos, después del TOTAL', con)
+  }
+}
+
 // ---------- [QA MEDIO-2] la versión que el agente manda en agente_config ----------
 {
   const m = /const VERSION_AGENTE = '([0-9.]+)';/.exec(src)

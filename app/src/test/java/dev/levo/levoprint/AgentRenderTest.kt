@@ -198,7 +198,7 @@ class AgentRenderTest {
     val f = listOf(java.io.File("build.gradle.kts"), java.io.File("app/build.gradle.kts")).first { it.exists() }
     val m = Regex("versionName\\s*=\\s*\"([^\"]+)\"").find(f.readText())
     assertEquals(m?.groupValues?.get(1), Agent.VERSION)
-    assertEquals("1.7.1", Agent.VERSION)
+    assertEquals("1.7.2", Agent.VERSION)
     val vc = Regex("versionCode\\s*=\\s*(\\d+)").find(f.readText())
     assertEquals(vc?.groupValues?.get(1)?.toInt(), Agent.VERSION_CODE)
   }
@@ -212,6 +212,23 @@ class AgentRenderTest {
     assertTrue(t, Regex("ICBPER \\(bolsas\\)\\s+S/ 1\\.00").containsMatchIn(t))
     pl.put("totales", o("""{"gravada":21.19,"igv":3.81}"""))
     assertFalse(texto(Agent.render(job("CPE", pl), 48, "KIPU")).contains("ICBPER"))
+  }
+
+  // [KCAP-PRINT] Reimpresion a ciegas: con "montosOcultos" sale la leyenda antes del cierre (TICKET KOMO/KIPU, nota KUTI y CPE);
+  // sin la marca (payloads viejos) no aparece.
+  @Test fun montosOcultosLeyenda() {
+    val ley = "Medios de pago: al contar la caja"
+    val casos = listOf(
+      job("TICKET", o("""{$base,"mesa":"5","mozo":"Ana","pagos":[]}""")),
+      job("TICKET", o(kuti).put("pagos", JSONArray()).put("propinas", JSONArray())),
+      job("CPE", o("""{"tipo":"BOLETA DE VENTA ELECTRONICA","serie":"B001","numero":7,"estado":"EMITIDO","empresa":{"razonSocial":"X SAC","ruc":"20123456789"},"cliente":{"nombre":"Juan","doc":"0"},"items":[{"cantidad":1,"nombre":"Lomo","total":28.5}],"totales":{"gravada":24.15,"igv":4.35},"total":28.5,"pagos":[]}"""))
+    )
+    for (j in casos) {
+      assertFalse(texto(Agent.render(j, 48, "KOMO")).contains(ley))
+      j.getJSONObject("payload").put("montosOcultos", true)
+      val t = texto(Agent.render(j, 48, "KOMO"))
+      assertTrue(t, t.contains(ley + "\n") && t.indexOf(ley) > t.indexOf("TOTAL"))
+    }
   }
 
   @Test fun envolverPorPalabra() {
