@@ -111,3 +111,6 @@ Necesita el backend `levoprint_transporte` aplicado en la app (si no, LevoPrint 
 
 ## Paso extra: revisa el logo del pie (APK 1.7.0 / .exe 1.13)
 El papel de prueba trae el pie con el logo de LevoDev. Si en la impresora sale basura o signos raros (no imprime imágenes), apaga el logo: APK → Opciones avanzadas › «Pie con logo» apagado; .exe → botón «Pie con logo» de la ventana o `LEVO_IMAGEN=0` en `levoprint.txt`. El pie sale igual, solo en texto.
+
+## E. Imprimir sin internet (LP-O02 · .exe 1.15.0)
+Guion paso a paso (emparejar con PIN, PIN errado, comanda con el internet del router cortado, volver internet sin papel repetido, reinicio sin red, quitar y apagar) en [docs/LP_O02_IMPRESION_LAN.md](docs/LP_O02_IMPRESION_LAN.md) §6. Solo PC por ahora: el APK sigue por la nube.
