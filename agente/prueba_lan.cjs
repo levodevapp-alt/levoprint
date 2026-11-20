@@ -3,8 +3,9 @@
 // ------------------------------------------------------------
 //   node agente/prueba_lan.cjs        (va en `npm run prueba`)
 // Sin dependencias, sin Supabase ni impresoras reales:
-//   A) lib/diario.js      duplicado, ENVIANDO a medias, DUDOSO/FALLO, retención, archivo corrupto, candado
-//   B) lib/emparejar.js   PIN, fallos por IP, anulación, token vencido, quitar, archivo
+//   A) lib/diario.js      duplicado, ENVIANDO a medias, DUDOSO/FALLO, retención, archivo corrupto, candado,
+//                         registrado/rechazado por (clave, estación), orden y tope de envíos a agente_lan
+//   B) lib/emparejar.js   PIN, fallos por IP, anulación + bloqueo 10 min + «Otro PIN», token vencido, quitar, archivo
 //   C) lib/servidorLan.js IP pública/CGNAT, Host, Origin/CORS, preflight PNA, tope de cuerpo, 423, puertos
 //   D) agente completo    (index.js + lib en una carpeta temporal, mock_rpc.cjs, impresora TCP falsa en
 //                          127.0.0.1): ventana → PIN → emparejar → imprimir → YA_IMPRESO → OTRO_EQUIPO →
