@@ -1842,9 +1842,10 @@ function encenderLan() {
   const servidor = lanRed.crearServidorLan({
     emparejador, version: VERSION_AGENTE, origenesExtra: ORIGENES_EXTRA,
     // [QA BAJO-2] Sin el nombre del local (no exige token); servidorLan recorta el equipo a 15.
-    hola: () => ({ equipo: nombreEquipo(), emparejable: lan.activo && !emparejador.estadoBloqueo().bloqueado }),
+    // [QA MEDIO-1] emparejable solo mientras hay un PIN vivo (3 min tras «Emparejar equipo»).
+    hola: () => ({ equipo: nombreEquipo(), emparejable: lan.activo && !emparejador.estadoBloqueo().bloqueado && !!emparejador.pinVigente() }),
     bloqueado: () => vinculos.length > 0 && vinculos.every((v) => v.desactivado),
-    alEmparejar: (r) => { if (r.ok && lan.activo) emparejador.pinVigente(true); },
+    // [QA MEDIO-1] Tras emparejar NO se genera otro PIN: el siguiente equipo pide el suyo en la ventana.
     manejadores: manejadoresLan,
     log: (...a) => console.log(...a), error: (...a) => console.error(...a),
   });
@@ -1876,19 +1877,22 @@ async function cambiarLan(activo) {
   process.env.LEVO_LAN = activo ? '1' : '0';
   let persistido = true;
   try { editarTxt((txt) => ponerClave(txt, 'LEVO_LAN', activo ? '1' : '0')); } catch (_) { persistido = false; }
-  if (activo) { if (await encenderLan()) emparejador.pinVigente(true); } else apagarLan();
+  if (activo) await encenderLan(); else apagarLan();   // [QA MEDIO-1] encender no crea PIN
   for (const v of vinculos) latidoLan(v).catch(() => { /* sin red: va en el próximo latido */ });
   return persistido;
 }
 function estadoLan() {
-  const pin = lan.servidor && emparejador ? emparejador.pinVigente(true) : null;
-  const bloq = emparejador ? emparejador.estadoBloqueo() : { bloqueado: false, esperaS: 0 };
+  // [QA MEDIO-1] El PIN solo existe tras «Emparejar equipo» y dura 3 min (aquí nunca se crea).
+  const pin = lan.servidor && emparejador ? emparejador.pinVigente() : null;
+  const bloq = emparejador ? emparejador.estadoBloqueo() : { bloqueado: false, esperaS: 0, acumulado: false };
   return {
     activo: lan.activo, escuchando: !!lan.servidor, puerto: lan.puerto, error: lan.error,
     urls: lan.servidor ? lanRed.ipsLan().map((ip) => 'http://' + ip + ':' + lan.puerto) : [],
     pin: pin ? pin.valor : null, pinVence: pin ? pin.expira : null,
+    pinVenceS: pin ? Math.max(0, Math.ceil((pin.expira - Date.now()) / 1000)) : 0,
     // [QA MEDIO-3] Tras 50 PIN errados: bloqueado 10 min y luego «Otro PIN» a mano.
-    pinBloqueado: !!bloq.bloqueado, pinBloqueoS: bloq.esperaS || 0,
+    // [QA MEDIO-1] pinBloqueoAcumulado: muchos fallos entre PINs; solo «Otro PIN» lo levanta.
+    pinBloqueado: !!bloq.bloqueado, pinBloqueoS: bloq.esperaS || 0, pinBloqueoAcumulado: !!bloq.acumulado,
     equipos: emparejador ? emparejador.lista() : [],
   };
 }
@@ -1900,7 +1904,9 @@ async function manejarLan(req, res) {
 }
 async function manejarLanPin(req, res) {
   if (!lan.servidor) return responderJson(res, 400, { ok: false, error: 'LAN_APAGADO' });
-  const r = emparejador.pedirOtroPin();
+  // [QA MEDIO-1] {} = «Emparejar equipo» (se niega si hay bloqueo); {desbloquear:true} = «Otro PIN» (lo levanta).
+  const body = await leerBodyJson(req);
+  const r = body && body.desbloquear === true ? emparejador.pedirOtroPin() : emparejador.pedirPin();
   if (!r.ok) return responderJson(res, 423, { ok: false, error: r.error, mensaje: r.mensaje, esperaS: r.esperaS, lan: estadoLan() });
   return responderJson(res, 200, { ok: true, lan: estadoLan() });
 }
@@ -2060,11 +2066,11 @@ function paginaHtml() {
       </div>
       <div id="lanDetalle" style="display:none">
         <div class="fila">
-          <span>PIN para emparejar<br><span class="muted">Escríbelo en la app de la caja o del mozo. Sirve una vez y cambia cada 10 minutos.</span></span>
+          <span>PIN para emparejar<br><span id="lanPinAyuda" class="muted">Toca «Emparejar equipo»: sale un PIN que vale 3 minutos y sirve una vez.</span></span>
           <span id="lanPin" class="pin">------</span>
         </div>
         <div id="lanPinAviso" class="msg err" style="display:none"></div>
-        <div class="fila"><span id="lanUrls" class="muted"></span><button id="btnLanPin" class="secundario chico">Otro PIN</button></div>
+        <div class="fila"><span id="lanUrls" class="muted"></span><button id="btnLanPin" class="secundario chico">Emparejar equipo</button></div>
         <div id="lanEquipos"></div>
       </div>
       <div id="msgLan" class="msg"></div>
@@ -2201,14 +2207,23 @@ async function refrescar() {
     : l.escuchando ? 'Encendido: la caja y los mozos emparejados imprimen aunque se caiga el internet.'
     : (l.error || 'Abriendo...');
   document.getElementById('lanDetalle').style.display = l.escuchando ? 'block' : 'none';
+  // [QA MEDIO-1] El PIN solo existe tras «Emparejar equipo» y vale 3 minutos.
   document.getElementById('lanPin').textContent = l.pin || '------';
+  const seg = l.pinVenceS || 0;
+  document.getElementById('lanPinAyuda').textContent = l.pin
+    ? 'Escríbelo en la app de la caja o del mozo. Sirve una vez; vence en ' + Math.floor(seg / 60) + ':' + String(seg % 60).padStart(2, '0') + '.'
+    : 'Toca «Emparejar equipo»: sale un PIN que vale 3 minutos y sirve una vez.';
   // [QA MEDIO-3] 50 PIN errados desde la red: bloqueado 10 min y luego «Otro PIN» a mano.
+  // [QA MEDIO-1] Muchos PIN errados acumulados: bloqueado hasta «Otro PIN» (aviso rojo).
   const aviso = document.getElementById('lanPinAviso');
   aviso.style.display = l.pinBloqueado ? 'block' : 'none';
   aviso.textContent = !l.pinBloqueado ? ''
     : l.pinBloqueoS > 0 ? 'Alguien de la red probó muchos PIN errados. Emparejar está bloqueado; podrás pedir otro PIN en ' + Math.ceil(l.pinBloqueoS / 60) + ' min.'
+    : l.pinBloqueoAcumulado ? 'Alguien intentó muchos PIN. Emparejamiento bloqueado: toca «Otro PIN» si eres tú.'
     : 'Emparejar sigue bloqueado por los PIN errados. Toca «Otro PIN» cuando vayas a emparejar un equipo.';
-  document.getElementById('btnLanPin').disabled = !!(l.pinBloqueado && l.pinBloqueoS > 0);
+  const btnPin = document.getElementById('btnLanPin');
+  btnPin.textContent = (l.pinBloqueado || l.pin) ? 'Otro PIN' : 'Emparejar equipo';
+  btnPin.disabled = !!(l.pinBloqueado && l.pinBloqueoS > 0);
   document.getElementById('lanUrls').textContent = (l.urls || []).length ? 'Dirección en la red: ' + l.urls.join(' · ') : 'Esta PC no tiene red local.';
   document.getElementById('lanEquipos').innerHTML = (l.equipos || []).map(function (q) {
     return '<div class="fila"><span>' + esc(q.nombre) + '<br><span class="muted">Emparejado ' + esc(new Date(q.creado).toLocaleDateString()) + (q.ip ? ' · ' + esc(q.ip) : '') + '</span></span>'
@@ -2417,7 +2432,11 @@ document.getElementById('btnLan').addEventListener('click', function () {
   const activo = !!(ultimo && ultimo.lan && ultimo.lan.activo);
   lanPedir('/lan', { activo: !activo }, activo ? 'Apagado.' : 'Encendido. Si Windows pregunta, permite LevoPrint solo en «Redes privadas».');
 });
-document.getElementById('btnLanPin').addEventListener('click', function () { lanPedir('/lan/pin', {}, 'PIN nuevo.'); });
+document.getElementById('btnLanPin').addEventListener('click', function () {
+  // [QA MEDIO-1] Con el emparejamiento bloqueado, «Otro PIN» lo levanta a propósito (desbloquear:true).
+  const bloq = !!(ultimo && ultimo.lan && ultimo.lan.pinBloqueado);
+  lanPedir('/lan/pin', bloq ? { desbloquear: true } : {}, 'PIN nuevo: vale 3 minutos.');
+});
 document.getElementById('lanEquipos').addEventListener('click', function (ev) {
   const b = ev.target.closest('button[data-quitar-equipo]');
   if (b) lanPedir('/lan/quitar', { id: b.getAttribute('data-quitar-equipo') }, 'Equipo quitado: ya no puede imprimir aquí.');
@@ -2852,7 +2871,7 @@ async function arrancar() {
   // [LP-O02] Diario, equipos emparejados y última config de estaciones (imprime aunque arranque sin red).
   iniciarDatosLan();
   cargarRutas();
-  if (lan.activo) encenderLan().then((ok) => { if (ok) emparejador.pinVigente(true); });
+  if (lan.activo) encenderLan();   // [QA MEDIO-1] arrancar no crea PIN
   iniciarGui();
   // [LP-F3] Búsqueda de impresoras al arrancar y cada 15 min (además: tras vincular, cuando la
   // consola la pide con buscar:true y con «Buscar de nuevo» en la ventana).

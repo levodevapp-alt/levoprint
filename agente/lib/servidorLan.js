@@ -11,7 +11,9 @@
 //   GET  /v1/hola       -> { ok, app:'levoprint', version, equipo (15 car.), emparejable }
 //                          (sin nombre del local: no exige token)
 //   POST /v1/emparejar  { pin, nombre } -> { ok, token, vence }
-//                          | 401 PIN_INVALIDO/PIN_ANULADO/SIN_PIN | 429 ESPERA | 423 PIN_BLOQUEADO
+//                          | 401 PIN_INVALIDO/PIN_ANULADO/PIN_VENCIDO/SIN_PIN | 429 ESPERA
+//                          | 423 PIN_BLOQUEADO (acumulado:true = muchos fallos entre PINs)
+//                          emparejable:true solo con un PIN vivo (3 min tras «Emparejar equipo»)
 //   POST /v1/imprimir   tipo solo COMANDA | PRECUENTA | TICKET | PRUEBA (nada de CPE ni CIERRE)
 //   GET  /v1/estado     -> { ok, version, nube, estaciones:[{id,nombre,transporte,listo,app}] }
 //   POST /v1/imprimir   { jobId, estacion, tipo, payload, reimpresion? }

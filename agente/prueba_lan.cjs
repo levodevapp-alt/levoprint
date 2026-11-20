@@ -5,7 +5,9 @@
 // Sin dependencias, sin Supabase ni impresoras reales:
 //   A) lib/diario.js      duplicado, ENVIANDO a medias, DUDOSO/FALLO, retención, archivo corrupto, candado,
 //                         registrado/rechazado por (clave, estación), orden y tope de envíos a agente_lan
-//   B) lib/emparejar.js   PIN, fallos por IP, anulación + bloqueo 10 min + «Otro PIN», token vencido, quitar, archivo
+//   B) lib/emparejar.js   PIN de 3 min solo tras «Emparejar equipo», PIN_VENCIDO, fallos por IP, anulación + bloqueo
+//                         10 min + «Otro PIN», goteo de 7 días con reloj simulado → BLOQUEADO acumulado (en disco,
+//                         sobrevive a reiniciar), token vencido, quitar, archivo
 //   C) lib/servidorLan.js IP pública/CGNAT, Host, Origin/CORS, preflight PNA, tope de cuerpo, 423, puertos
 //   D) agente completo    (index.js + lib en una carpeta temporal, mock_rpc.cjs, impresora TCP falsa en
 //                          127.0.0.1): ventana → PIN → emparejar → imprimir → YA_IMPRESO → OTRO_EQUIPO →
@@ -205,10 +207,10 @@ function pruebaEmparejar() {
   const archivo = path.join(tmp('emparejar'), 'equipos.json');
   let reloj = Date.parse('2026-11-20T12:00:00Z');
   const em = new Emparejador(archivo, { ahora: () => reloj });
-  ok(em.pinVigente(false) === null, 'sin interruptor no hay PIN');
+  ok(em.pinVigente() === null, 'sin pulsar «Emparejar equipo» no hay PIN');
   let r = em.intentar('123456', 'Caja', '192.168.1.20');
   ok(r.ok === false && r.error === 'SIN_PIN', 'sin PIN: SIN_PIN', r);
-  const pin = em.pinVigente(true).valor;
+  const pin = em.pedirPin().pin.valor;
   ok(/^\d{6}$/.test(pin), 'PIN de 6 dígitos', pin);
   const malo = pin === '000000' ? '111111' : '000000';
   r = em.intentar(malo, 'Caja', '192.168.1.20');
@@ -228,40 +230,117 @@ function pruebaEmparejar() {
   const em2 = new Emparejador(archivo, { ahora: () => reloj });
   ok(!!em2.validar(token), 'tras reiniciar el agente el equipo sigue emparejado');
 
-  // Rotación: el PIN vence a los 10 min y el interruptor genera otro.
-  const p1 = em.pinVigente(true).valor;
-  reloj += PIN_MS + 1000;
-  ok(em.pinVigente(false) === null, 'a los 10 min el PIN vence');
-  ok(/^\d{6}$/.test(em.pinVigente(true).valor), 'con el interruptor encendido se genera otro PIN (rota)', p1);
+  // [QA MEDIO-1] El PIN vale 3 min y no se regenera solo.
+  ok(PIN_MS === 3 * 60000, 'el PIN vale 3 minutos', PIN_MS);
+  const p1 = em.pedirPin().pin.valor;
+  reloj += PIN_MS - 5000;
+  ok(em.pinVigente() !== null && em.pinVigente().valor === p1, 'a los 2:55 el PIN sigue vivo');
+  reloj += 6000;
+  ok(em.pinVigente() === null && em.pinVigente() === null, 'a los 3 min el PIN vence y NO se genera otro solo');
+  r = em.intentar(p1, 'Caja', '192.168.1.30');
+  ok(r.ok === false && r.error === 'PIN_VENCIDO', 'PIN vencido: PIN_VENCIDO (ni el bueno sirve)', r);
+  const pa = em.pedirPin().pin.valor, pb = em.pedirPin().pin.valor;
+  ok(em.pinVigente().valor === pb && (pa === pb || em.intentar(pa, 'x', '192.168.1.31').error === 'PIN_INVALIDO'), 'uno a la vez: pedir otro reemplaza al anterior');
+  em.anularPin();
+  ok(em.intentar(pb, 'x', '192.168.1.32').error === 'SIN_PIN', 'apagar el interruptor mata el PIN (SIN_PIN)');
+  em.fallos = []; em.porIp.clear(); em.guardar();   // limpio para lo que sigue
 
   // Anulación tras N fallos acumulados (de muchas IP, respetando el tope por minuto).
-  const p2 = em.pinVigente(true).valor;
+  const p2 = em.pedirPin().pin.valor;
   const otro = p2 === '999999' ? '888888' : '999999';
   let ult = null;
   for (let i = 0; i < FALLOS_POR_PIN; i++) {
     if (i && i % 25 === 0) reloj += 61000;
     ult = em.intentar(otro, 'x', '10.0.' + Math.floor(i / 4) + '.' + (i % 4 + 1));
   }
-  ok(ult && ult.error === 'PIN_ANULADO' && em.pinVigente(false) === null, FALLOS_POR_PIN + ' fallos acumulados anulan el PIN', ult);
+  ok(ult && ult.error === 'PIN_ANULADO' && em.pinVigente() === null, FALLOS_POR_PIN + ' fallos acumulados anulan el PIN', ult);
   // [QA MEDIO-3] Bloqueo de 10 min y luego «Otro PIN» a mano (no se regenera solo).
-  ok(em.pinVigente(true) === null && em.estadoBloqueo().bloqueado === true, 'tras PIN_ANULADO el interruptor NO genera otro PIN solo', em.estadoBloqueo());
+  ok(em.pinVigente() === null && em.estadoBloqueo().bloqueado === true, 'tras PIN_ANULADO no hay PIN', em.estadoBloqueo());
+  r = em.pedirPin();
+  ok(r.ok === false && r.error === 'PIN_BLOQUEADO' && em.pinVigente() === null, '«Emparejar equipo» con el bloqueo puesto: se niega (solo «Otro PIN» lo levanta)', r);
   r = em.intentar(p2, 'x', '192.168.7.7');
   ok(r.ok === false && r.error === 'PIN_BLOQUEADO' && r.esperaS > 0, 'bloqueado: ni el PIN viejo ni otro sirven (PIN_BLOQUEADO)', r);
   r = em.pedirOtroPin();
   ok(r.ok === false && r.error === 'PIN_BLOQUEADO' && r.esperaS > 0 && r.esperaS <= BLOQUEO_PIN_MS / 1000, '«Otro PIN» durante los 10 min: se niega', r);
   em.anularPin();   // apagar y encender el interruptor tampoco lo destraba
-  ok(em.pinVigente(true) === null, 'apagar/encender el interruptor no destraba el bloqueo');
+  ok(em.pinVigente() === null && em.estadoBloqueo().bloqueado === true, 'apagar/encender el interruptor no destraba el bloqueo');
+  const emR = new Emparejador(archivo, { ahora: () => reloj });
+  ok(emR.estadoBloqueo().bloqueado === true && emR.estadoBloqueo().esperaS > 0, 'el bloqueo de 10 min sobrevive a reiniciar LevoPrint (disco)', emR.estadoBloqueo());
   reloj += BLOQUEO_PIN_MS + 1000;
-  ok(em.pinVigente(true) === null && em.estadoBloqueo().requiereOtroPin === true && em.estadoBloqueo().esperaS === 0, 'pasados 10 min sigue sin PIN hasta pulsar «Otro PIN»', em.estadoBloqueo());
+  ok(em.pinVigente() === null && em.estadoBloqueo().requiereOtroPin === true && em.estadoBloqueo().esperaS === 0, 'pasados 10 min sigue sin PIN hasta pulsar «Otro PIN»', em.estadoBloqueo());
   r = em.intentar('123456', 'x', '192.168.7.8');
   ok(r.error === 'PIN_BLOQUEADO', 'pasados 10 min, emparejar sigue bloqueado sin «Otro PIN»', r);
   r = em.pedirOtroPin();
-  ok(r.ok === true && /^\d{6}$/.test(r.pin.valor) && em.estadoBloqueo().bloqueado === false && em.pinVigente(false) === r.pin, '«Otro PIN» tras los 10 min: PIN nuevo y desbloqueado', r);
+  ok(r.ok === true && /^\d{6}$/.test(r.pin.valor) && em.estadoBloqueo().bloqueado === false && em.pinVigente() === r.pin, '«Otro PIN» tras los 10 min: PIN nuevo y desbloqueado', r);
   // Tope global por minuto: no anula, frena.
-  em.pinVigente(true);
   let tope = null;
   for (let i = 0; i < 31; i++) tope = em.intentar('12345x', 'x', '10.9.' + i + '.1');
-  ok(tope.error === 'ESPERA' && em.pinVigente(false) !== null, 'tope global de 30 fallos/min: frena sin anular el PIN', tope);
+  ok(tope.error === 'ESPERA' && em.pinVigente() !== null, 'tope global de 30 fallos/min: frena sin anular el PIN', tope);
+
+  // [QA MEDIO-1] Goteo: pocos intentos por PIN, muchos PIN, durante 7 días.
+  const goteo = (cadaMin, porPin, etiqueta) => {
+    const arch = path.join(tmp('goteo-' + etiqueta), 'eq.json');
+    let rel = Date.parse('2026-11-20T12:00:00Z');
+    const reloj7 = () => rel;
+    let g = new Emparejador(arch, { ahora: reloj7 });
+    const fin = rel + 7 * 86400000;
+    let intentos = 0, pines = 0, bloqueadoEn = null, ultimo = null, reinicios = 0;
+    let n = 0;
+    while (rel < fin) {
+      // La persona de la PC toca «Emparejar equipo» (si ve el aviso rojo, no: se entera del ataque).
+      if (!g.estadoBloqueo().bloqueado) {
+        const pp = g.pedirPin();
+        if (pp.ok) pines++;
+        const bueno = pp.ok ? pp.pin.valor : '000000';
+        for (let k = 0; k < porPin; k++) {
+          rel += 20000;                                         // dentro de los 3 min del PIN
+          const malo = String((Number(bueno) + 1 + k) % 1000000).padStart(6, '0');
+          ultimo = g.intentar(malo, 'x', '192.168.50.' + ((n++ % 200) + 1));
+          intentos++;
+          if (ultimo.error === 'PIN_BLOQUEADO' && bloqueadoEn === null) bloqueadoEn = { intentos, pines, horas: Math.round((rel - Date.parse('2026-11-20T12:00:00Z')) / 3600000) };
+        }
+      } else {
+        ultimo = g.intentar('123456', 'x', '192.168.51.' + ((n++ % 200) + 1));   // el atacante sigue probando
+      }
+      rel += cadaMin * 60000;
+      // Reinicio diario de LevoPrint (corte de luz): el contador y el bloqueo siguen.
+      if (Math.floor((rel - 1) / 86400000) !== Math.floor((rel - cadaMin * 60000 - 1) / 86400000)) { g = new Emparejador(arch, { ahora: reloj7 }); reinicios++; }
+    }
+    return { g, arch, reloj7, intentos, pines, bloqueadoEn, ultimo, reinicios };
+  };
+  // 4 intentos por PIN, un PIN cada 10 min (24 fallos/h): nunca toca los topes por PIN ni por hora.
+  const g1 = goteo(10, 4, 'rapido');
+  ok(!!g1.bloqueadoEn && g1.bloqueadoEn.intentos <= 200 && g1.g.estadoBloqueo().bloqueado === true && g1.g.estadoBloqueo().acumulado === true && g1.ultimo.error === 'PIN_BLOQUEADO',
+    'goteo 7 días (4 por PIN, PIN cada 10 min): termina BLOQUEADO por el acumulado de 24 h', { b: g1.bloqueadoEn, ult: g1.ultimo });
+  // 4 intentos por PIN, un PIN cada 30 min (192 fallos/día, bajo el tope de 24 h): lo corta el de 7 días.
+  const g2 = goteo(30, 4, 'lento');
+  ok(!!g2.bloqueadoEn && g2.bloqueadoEn.intentos <= 500 && g2.reinicios >= 6 && g2.g.estadoBloqueo().acumulado === true,
+    'goteo lento 7 días (192/día) con reinicio diario: lo corta el tope de 7 días', { b: g2.bloqueadoEn, reinicios: g2.reinicios });
+  const g3 = new Emparejador(g1.arch, { ahora: g1.reloj7 });
+  ok(g3.estadoBloqueo().bloqueado === true && g3.estadoBloqueo().acumulado === true && g3.pinVigente() === null && g3.intentar('123456', 'x', '192.168.60.1').error === 'PIN_BLOQUEADO',
+    'el bloqueo por acumulado sobrevive a reiniciar LevoPrint', g3.estadoBloqueo());
+  r = g3.pedirPin();
+  ok(r.ok === false && r.error === 'PIN_BLOQUEADO' && r.acumulado === true && /Alguien intentó muchos PIN/.test(r.mensaje), '«Emparejar equipo» no lo levanta; aviso «Alguien intentó muchos PIN»', r);
+  r = g3.pedirOtroPin();
+  ok(r.ok === true && g3.estadoBloqueo().bloqueado === false && g3.fallosAcumulados().semana === 0 && /^\d{6}$/.test(r.pin.valor), '«Otro PIN» levanta el bloqueo y limpia el contador', g3.fallosAcumulados());
+  const g4 = new Emparejador(g1.arch, { ahora: g1.reloj7 });
+  ok(g4.estadoBloqueo().bloqueado === false && g4.fallosAcumulados().semana === 0, 'el desbloqueo también queda en disco');
+  // Ráfaga: 100 fallos en 1 h (rotando IPs y PIN, respetando 30/min y 50 por PIN) → bloqueado.
+  const archH = path.join(tmp('goteo-hora'), 'eq.json');
+  let relH = Date.parse('2026-11-21T08:00:00Z');
+  const gh = new Emparejador(archH, { ahora: () => relH });
+  let rh = null;
+  for (let i = 0; i < 100 && !(rh && rh.error === 'PIN_BLOQUEADO'); i++) {
+    if (i % 20 === 0) { relH += 61000; gh.pedirPin(); }
+    rh = gh.intentar('000000', 'x', '172.16.' + i + '.1');
+    if (rh.ok) rh = gh.intentar('000001', 'x', '172.16.' + i + '.2');
+  }
+  ok(rh && rh.error === 'PIN_BLOQUEADO' && rh.acumulado === true && gh.fallosAcumulados().hora >= 100, '100 fallos en 1 h entre varios PIN: BLOQUEADO acumulado', { rh, f: gh.fallosAcumulados() });
+  // Archivo de equipos viejo (sin fallos ni bloqueo) o con basura: arranca sin bloqueo.
+  const archV = path.join(tmp('emparejar-viejo'), 'eq.json');
+  fs.writeFileSync(archV, JSON.stringify({ equipos: [], fallos: ['x', null, 1e99], bloqueo: { hasta: 'mañana' } }));
+  const gv = new Emparejador(archV, { ahora: () => relH });
+  ok(gv.estadoBloqueo().bloqueado === false && gv.fallosAcumulados().semana === 0, 'archivo con fallos/bloqueo basura: se ignoran', gv.fallos);
 
   // Vencido: 90 días sin uso.
   reloj += VIDA_TOKEN_MS + 3600000;
@@ -270,7 +349,7 @@ function pruebaEmparejar() {
 
   // Quitar desde la ventana.
   const em4 = new Emparejador(path.join(tmp('emparejar2'), 'eq.json'));
-  const t4 = em4.intentar(em4.pinVigente(true).valor, 'Mozo 1', '192.168.0.9');
+  const t4 = em4.intentar(em4.pedirPin().pin.valor, 'Mozo 1', '192.168.0.9');
   ok(t4.ok && em4.quitar(t4.equipo.id) && em4.validar(t4.token) === null, 'quitar el equipo lo deja fuera al toque');
 
   // Archivo dañado.
@@ -293,7 +372,7 @@ async function pruebaServidor() {
   'ipsLan: solo IPv4 privadas, máximo 4');
 
   const em = new Emparejador(path.join(tmp('srv'), 'eq.json'));
-  const token = em.intentar(em.pinVigente(true).valor, 'Caja', '192.168.1.2').token;
+  const token = em.intentar(em.pedirPin().pin.valor, 'Caja', '192.168.1.2').token;
   let ipFalsa = '192.168.1.50', bloqueado = false;
   const servidor = lanRed.crearServidorLan({
     emparejador: em, version: '9.9.9', origenesExtra: ['http://localhost:5173'],
@@ -351,6 +430,9 @@ async function pruebaServidor() {
   ok(r.status === 200 && r.json.eco === 'job-12345678', 'imprimir con token llega al manejador');
   r = await pedir(B, '/v1/emparejar', { headers: H, body: { pin: '12', nombre: 'x' } });
   ok(r.status === 401 && (r.json.error === 'SIN_PIN' || r.json.error === 'PIN_INVALIDO'), 'emparejar con PIN errado → 401', r.json);
+  const pv = em.pedirPin().pin; pv.expira = Date.now() - 1;
+  r = await pedir(B, '/v1/emparejar', { headers: H, body: { pin: pv.valor, nombre: 'x' } });
+  ok(r.status === 401 && r.json.error === 'PIN_VENCIDO', '[QA MEDIO-1] PIN vencido → 401 PIN_VENCIDO', r.json);
   em.bloqueo = { hasta: Date.now() + BLOQUEO_PIN_MS };
   r = await pedir(B, '/v1/emparejar', { headers: H, body: { pin: '123456', nombre: 'x' } });
   ok(r.status === 423 && r.json.error === 'PIN_BLOQUEADO' && r.json.esperaS > 0, 'emparejar con el PIN bloqueado → 423 PIN_BLOQUEADO', r.json);
@@ -421,9 +503,16 @@ async function pruebaAgente() {
     ok(mock.estado.komo.lan.length === 1, 'apagado y ya informado: no repite el latido', mock.estado.komo.lan.length);
     ok((await pedir(W, '/lan', { headers: Object.assign({ Origin: 'https://evil.com' }, HW), body: { activo: true } })).status === 403, 'una página ajena no puede encender el interruptor (403)');
     let r = await pedir(W, '/lan', { headers: HW, body: { activo: true } });
-    ok(r.status === 200 && r.json.ok === true && r.json.lan.escuchando === true && /^\d{6}$/.test(r.json.lan.pin || '') && r.json.persistido === true, 'interruptor encendido: escucha y muestra PIN de 6 dígitos', r.json);
+    ok(r.status === 200 && r.json.ok === true && r.json.lan.escuchando === true && r.json.lan.pin === null && r.json.persistido === true, '[QA MEDIO-1] interruptor encendido: escucha y SIN PIN (hasta «Emparejar equipo»)', r.json);
     ok(/^LEVO_LAN=1\r?$/m.test(fs.readFileSync(path.join(dir, 'levoprint.txt'), 'utf8')), 'el interruptor queda guardado en levoprint.txt (LEVO_LAN=1)');
     const L = 'http://127.0.0.1:' + r.json.lan.puerto, HL = { Host: '127.0.0.1:' + r.json.lan.puerto, Origin: 'https://komo.levodev.app' };
+    r = await pedir(L, '/v1/hola', { headers: HL });
+    ok(r.status === 200 && r.json.emparejable === false, '[QA MEDIO-1] sin pulsar «Emparejar equipo»: /v1/hola emparejable:false', r.json);
+    r = await pedir(L, '/v1/emparejar', { headers: HL, body: { pin: '123456', nombre: 'Tablet mozo' } });
+    ok(r.status === 401 && r.json.error === 'SIN_PIN', '[QA MEDIO-1] sin pulsar «Emparejar equipo»: SIN_PIN', r.json);
+    ok((await pedir(W, '/lan/pin', { headers: Object.assign({ Origin: 'https://evil.com' }, HW), body: {} })).status === 403, 'una página ajena no puede pedir PIN (403)');
+    r = await pedir(W, '/lan/pin', { headers: HW, body: {} });
+    ok(r.status === 200 && r.json.ok === true && /^\d{6}$/.test(r.json.lan.pin || '') && r.json.lan.pinVenceS > 170 && r.json.lan.pinVenceS <= 180, '«Emparejar equipo» en la ventana: PIN de 6 dígitos por 3 min', r.json);
     const pin = r.json.lan.pin;
 
     r = await pedir(L, '/v1/hola', { headers: HL });
@@ -434,7 +523,8 @@ async function pruebaAgente() {
     ok(r.status === 200 && r.json.ok && typeof r.json.token === 'string' && r.json.vence, 'PIN bueno → token y vence', r.json);
     const token = r.json.token;
     const e1 = (await pedir(W, '/estado', { headers: HW })).json;
-    ok(e1.lan.pin && e1.lan.pin !== pin && e1.lan.equipos.length === 1 && e1.lan.equipos[0].nombre === 'Tablet mozo', 'tras emparejar: PIN nuevo y el equipo en la lista', e1.lan);
+    ok(e1.lan.pin === null && e1.lan.equipos.length === 1 && e1.lan.equipos[0].nombre === 'Tablet mozo', '[QA MEDIO-1] tras emparejar: sin PIN (no se crea otro solo) y el equipo en la lista', e1.lan);
+    ok((await pedir(L, '/v1/hola', { headers: HL })).json.emparejable === false, 'tras emparejar: emparejable:false');
 
     r = await pedir(L, '/v1/estado', { headers: HL, token });
     const ests = (r.json && r.json.estaciones) || [];
