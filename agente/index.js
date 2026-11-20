@@ -128,7 +128,7 @@ function nuevoVinculo(prefijo, device, nombre) {
     destinos: new Map(), transporte: null, sinTransporteHasta: 0, estacionVinculo: null,
     md5Informado: '', informadoTs: 0, buscadoPendiente: false, preguntar: false,
     // [LP-O02] latido <prefijo>_agente_lan: lo último informado (ips+puerto) y pausa si falta la RPC.
-    lanInformado: '', lanInformadoTs: 0, lanAusenteHasta: 0,
+    lanInformado: '', lanInformadoTs: 0, lanAusenteHasta: 0, lanEnCurso: null,
   };
 }
 const esDeviceValido = (d) => /^[0-9a-f-]{20,}$/i.test(String(d || '')) && !/PEGA-AQUI/.test(String(d));
@@ -1693,7 +1693,13 @@ function cargarRutas() {
 }
 
 // --- Latido LAN a la nube: <prefijo>_agente_lan (IPs + puerto + impresos por la LAN) ---
-async function latidoLan(v) {
+// Uno a la vez por vínculo: el del interruptor y el del ciclo no se pisan (ni mandan dos veces lo mismo).
+function latidoLan(v) {
+  if (v.lanEnCurso) return v.lanEnCurso;
+  v.lanEnCurso = latidoLanUno(v).finally(() => { v.lanEnCurso = null; });
+  return v.lanEnCurso;
+}
+async function latidoLanUno(v) {
   if (!diario || v.lanAusenteHasta > Date.now()) return null;
   const impresos = diario.sinReportar(v.prefijo, 100);
   const info = { ips: lan.servidor ? lanRed.ipsLan() : [], puerto: lan.servidor ? lan.puerto : null };

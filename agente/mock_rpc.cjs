@@ -29,6 +29,8 @@ function nuevoEstado(apps) {
       buscar: false,
       estacionVinculo: a.estacionVinculo || null,
       elegidos: [],            // cuerpos recibidos en agente_estacion_elegir
+      sinLan: !!a.sinLan,
+      lan: [],                 // [LP-O02] cuerpos recibidos en agente_lan
     };
   }
   return est;
@@ -66,6 +68,12 @@ function crearMock(opts) {
       if (Array.isArray(p.encontradas)) a.vistas.set(p.device, p.encontradas.slice(0, 64));
       if (p.buscado) a.buscar = false;
       return [200, { ok: true, buscar: a.buscar, estacionVinculo: a.estacionVinculo, destinos: a.estaciones.map((e) => destinoPublico(a, e, p.device)) }];
+    }
+    // [LP-O02] Latido LAN: guarda lo recibido y registra todos los impresos (sinLan = backend sin el módulo).
+    if (fn === 'agente_lan') {
+      if (a.ausente || a.sinLan) return [404, ausente(pfx + '_' + fn)];
+      a.lan.push(p);
+      return [200, { ok: true, registrados: (p.impresos || []).map((x) => x.clave) }];
     }
     if (fn === 'agente_estacion_elegir') {
       if (a.ausente) return [404, ausente(pfx + '_' + fn)];
