@@ -1,12 +1,13 @@
 {
   "name": "levoprint-agente",
-  "version": "1.14.1",
+  "version": "1.15.0",
   "description": "LevoPrint · agente de impresión genérico — Realtime/polling → ESC/POS a impresoras IP. LevoDev",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
     "start": "node index.js",
-    "prueba": "node prueba_render.cjs && node prueba_integracion.cjs"
+    "prueba": "node prueba_render.cjs && node prueba_integracion.cjs && node prueba_lan.cjs",
+    "empaquetar": "node empaquetar.mjs"
   },
   "engines": { "node": ">=18" }
 }
