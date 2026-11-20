@@ -31,6 +31,12 @@ function nuevoEstado(apps) {
       elegidos: [],            // cuerpos recibidos en agente_estacion_elegir
       sinLan: !!a.sinLan,
       lan: [],                 // [LP-O02] cuerpos recibidos en agente_lan
+      // [QA MEDIO-1] Respuesta de agente_lan:
+      //   lanRechazar: Set de 'clave|estacion' que la nube rechaza
+      //   lanModo: 'det' (registrados/rechazados + *_det por estación), 'lista' (solo claves, forma vieja),
+      //            'nada' (ok sin registrar ni rechazar: prueba el tope de envíos), 'error' (ok:false)
+      lanRechazar: new Set(a.lanRechazar || []),
+      lanModo: a.lanModo || 'det',
     };
   }
   return est;
@@ -73,7 +79,17 @@ function crearMock(opts) {
     if (fn === 'agente_lan') {
       if (a.ausente || a.sinLan) return [404, ausente(pfx + '_' + fn)];
       a.lan.push(p);
-      return [200, { ok: true, registrados: (p.impresos || []).map((x) => x.clave) }];
+      if (a.lanModo === 'error') return [200, { ok: false, error: 'PARAMETRO_INVALIDO' }];
+      if (a.lanModo === 'nada') return [200, { ok: true, registrados: [], rechazados: [] }];
+      const imp = p.impresos || [];
+      const esRech = (x) => a.lanRechazar.has(x.clave + '|' + x.estacion);
+      const reg = imp.filter((x) => !esRech(x)), rech = imp.filter(esRech);
+      const r = { ok: true, registrados: [...new Set(reg.map((x) => x.clave))], rechazados: [...new Set(rech.map((x) => x.clave))] };
+      if (a.lanModo === 'det') {
+        r.registrados_det = reg.map((x) => ({ clave: x.clave, estacion: x.estacion }));
+        r.rechazados_det = rech.map((x) => ({ clave: x.clave, estacion: x.estacion, motivo: 'ESTACION_AJENA' }));
+      }
+      return [200, r];
     }
     if (fn === 'agente_estacion_elegir') {
       if (a.ausente) return [404, ausente(pfx + '_' + fn)];

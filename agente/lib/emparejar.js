@@ -18,9 +18,16 @@
 //   · 5 fallos desde una IP -> esa IP espera 60 s;
 //   · tope GLOBAL de 30 fallos por minuto (todas las IP): se responde
 //     "espera" sin anular el PIN (nadie de la red impide emparejar);
-//   · 50 fallos ACUMULADOS contra el mismo PIN lo anulan y se genera otro
-//     (adivinarlo antes: 50 / 1 000 000);
+//   · 50 fallos ACUMULADOS contra el mismo PIN lo anulan (adivinarlo antes:
+//     50 / 1 000 000) y el emparejamiento queda BLOQUEADO 10 min; pasado ese
+//     tiempo NO se genera otro solo: hay que pulsar «Otro PIN» en la ventana
+//     local (alguien en la PC se entera de que lo estan atacando). El bloqueo
+//     vive en memoria: reiniciar LevoPrint exige estar en la PC.
 //   · el mapa de IPs tiene tope (1000).
+// DoS MENOR ACEPTADO: el tope global (30/min) y el bloqueo por anulacion los
+// puede provocar cualquier equipo de la red del local rotando IPs: impide
+// EMPAREJAR equipos nuevos un rato, pero no imprimir (los ya emparejados
+// siguen con su token). Preferimos eso a dejar adivinar el PIN.
 // Por que PIN local y no un secreto de la nube: funciona sin internet (que
 // es justo cuando importa) y no deja un secreto de la empresa en la BD.
 // ============================================================
@@ -33,6 +40,7 @@ const FALLOS_IP = 5, ESPERA_IP_MS = 60000;
 const FALLOS_MINUTO = 30;
 const MAX_IPS = 1000;
 const FALLOS_POR_PIN = 50;
+const BLOQUEO_PIN_MS = 10 * 60000;
 const VIDA_TOKEN_MS = 90 * 86400000;
 const MAX_EQUIPOS = 50;
 
@@ -45,6 +53,7 @@ class Emparejador {
     this.ahora = o.ahora || (() => Date.now());
     this.equipos = [];
     this.pin = null;               // { valor, expira, fallos }
+    this.bloqueo = null;           // { hasta } tras PIN_ANULADO: sin PIN hasta «Otro PIN» (y no antes de hasta)
     this.porIp = new Map();        // ip -> { fallos, hasta }
     this.fallosGlobal = [];        // ts de fallos del ultimo minuto
     try {
@@ -82,16 +91,41 @@ class Emparejador {
   }
 
   // PIN vigente; con rotar=true genera uno nuevo si no hay (el interruptor esta encendido).
+  // Bloqueado tras PIN_ANULADO: nunca se regenera solo (ni al apagar/encender el interruptor).
   pinVigente(rotar) {
     if (this.pin && this.pin.expira > this.ahora()) return this.pin;
     this.pin = null;
+    if (this.bloqueo) return null;
     return rotar ? this.nuevoPin() : null;
   }
 
   anularPin() { this.pin = null; }
 
+  // { bloqueado, hasta, esperaS, requiereOtroPin }: para la ventana local y /v1/hola.
+  estadoBloqueo() {
+    if (!this.bloqueo) return { bloqueado: false, hasta: null, esperaS: 0, requiereOtroPin: false };
+    const falta = this.bloqueo.hasta - this.ahora();
+    return { bloqueado: true, hasta: this.bloqueo.hasta, esperaS: falta > 0 ? Math.ceil(falta / 1000) : 0, requiereOtroPin: true };
+  }
+
+  // Boton «Otro PIN» de la ventana local (127.0.0.1). Durante el bloqueo de 10 min se niega.
+  pedirOtroPin() {
+    const b = this.estadoBloqueo();
+    if (b.bloqueado && b.esperaS > 0) {
+      return { ok: false, error: 'PIN_BLOQUEADO', esperaS: b.esperaS,
+        mensaje: 'Hubo demasiados intentos con PIN errado desde la red. Podrás pedir otro PIN en ' + Math.ceil(b.esperaS / 60) + ' min.' };
+    }
+    this.bloqueo = null;
+    return { ok: true, pin: this.nuevoPin() };
+  }
+
   intentar(pin, nombre, ip) {
     const ahora = this.ahora();
+    if (this.bloqueo) {
+      const b = this.estadoBloqueo();
+      return { ok: false, error: 'PIN_BLOQUEADO', esperaS: b.esperaS,
+        mensaje: 'Emparejar está bloqueado por demasiados intentos. Pide en la PC de LevoPrint «Otro PIN»' + (b.esperaS > 0 ? ' (en ' + Math.ceil(b.esperaS / 60) + ' min).' : '.') };
+    }
     this.fallosGlobal = this.fallosGlobal.filter((t) => t > ahora - 60000);
     if (this.fallosGlobal.length >= FALLOS_MINUTO) return { ok: false, error: 'ESPERA', mensaje: 'Demasiados intentos en la red. Espera un minuto.', esperaS: 60 };
     const reg = this.porIp.get(ip) || { fallos: 0, hasta: 0 };
@@ -112,7 +146,9 @@ class Emparejador {
       vigente.fallos += 1;
       if (vigente.fallos >= FALLOS_POR_PIN) {
         this.pin = null;
-        return { ok: false, error: 'PIN_ANULADO', mensaje: 'Demasiados intentos: el PIN se anuló. Usa el nuevo que muestra LevoPrint.' };
+        this.bloqueo = { hasta: ahora + BLOQUEO_PIN_MS };
+        return { ok: false, error: 'PIN_ANULADO', esperaS: Math.ceil(BLOQUEO_PIN_MS / 1000),
+          mensaje: 'Demasiados intentos: el PIN se anuló y emparejar queda bloqueado 10 minutos. Luego pide en la PC de LevoPrint «Otro PIN».' };
       }
       return { ok: false, error: 'PIN_INVALIDO', mensaje: 'PIN incorrecto o vencido. Revisa el que muestra LevoPrint.' };
     }
@@ -160,4 +196,4 @@ class Emparejador {
   }
 }
 
-module.exports = { Emparejador, sha, VIDA_TOKEN_MS, PIN_MS, FALLOS_POR_PIN };
+module.exports = { Emparejador, sha, VIDA_TOKEN_MS, PIN_MS, FALLOS_POR_PIN, BLOQUEO_PIN_MS };

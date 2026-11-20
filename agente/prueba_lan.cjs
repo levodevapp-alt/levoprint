@@ -19,8 +19,8 @@ const path = require('path');
 const net = require('net');
 const http = require('http');
 const { spawn, execFileSync } = require('child_process');
-const { Diario, claveDe, claveDeNube, jobIdValido } = require('./lib/diario');
-const { Emparejador, VIDA_TOKEN_MS, PIN_MS, FALLOS_POR_PIN } = require('./lib/emparejar');
+const { Diario, claveDe, claveDeNube, jobIdValido, MAX_ENVIOS_LAN } = require('./lib/diario');
+const { Emparejador, VIDA_TOKEN_MS, PIN_MS, FALLOS_POR_PIN, BLOQUEO_PIN_MS } = require('./lib/emparejar');
 const lanRed = require('./lib/servidorLan');
 const { crearMock } = require('./mock_rpc.cjs');
 
@@ -136,6 +136,40 @@ async function pruebaDiario() {
   const marcados = d2.marcarReportados(pend, [pend[0].clave]);
   ok(marcados >= 1 && d2.sinReportar('komo').length === pend.length - marcados, 'marcarReportados quita de la lista lo que la nube registró', { marcados, antes: pend.length });
 
+  // [QA MEDIO-1] Registrado / rechazado POR (clave, estación), orden y tope de envíos.
+  let relojR = reloj;
+  const dr = new Diario(path.join(dir, 'rech.jsonl'), { ahora: () => relojR });
+  const imprLan = (j, est) => { relojR += 1000; dr.poner(claveDe(j, est), { j, est, p: 'komo', o: 'LAN', e: 'IMPRESO' }); };
+  imprLan('job-viejo-1', 'e1'); imprLan('job-dual-1', 'e1'); imprLan('job-dual-1', 'e2'); imprLan('job-nuevo-1', 'e1');
+  let lote = dr.sinReportar('komo', 2);
+  ok(lote.length === 2 && lote[0].clave === 'job-nuevo-1' && lote[1].clave === 'job-dual-1' && lote[1].estacion === 'e2', 'sinReportar: lo más reciente primero (la basura vieja no tapa lo nuevo)', lote.map((x) => x.clave + '|' + x.estacion));
+  lote = dr.sinReportar('komo');
+  let c = dr.marcarRespuesta(lote, {
+    registrados: ['job-dual-1', 'job-nuevo-1'], rechazados: ['job-dual-1'],
+    registrados_det: [{ clave: 'job-dual-1', estacion: 'e1' }, ['job-nuevo-1', 'e1']],
+    rechazados_det: [{ clave: 'job-dual-1', estacion: 'e2', motivo: 'ESTACION_AJENA' }],
+  });
+  ok(c.registrados === 2 && c.rechazados === 1 && dr.get(claveDe('job-dual-1', 'e1')).r === true && dr.get(claveDe('job-dual-1', 'e2')).r === 'rechazado',
+    'detalle por estación: el mismo jobId queda registrado en e1 y rechazado en e2', c);
+  ok(JSON.stringify(dr.sinReportar('komo').map((x) => x.clave)) === '["job-viejo-1"]', 'lo registrado y lo rechazado salen de sinReportar (lo rechazado no se reenvía)', dr.sinReportar('komo'));
+  const drB = new Diario(path.join(dir, 'rech.jsonl'), { ahora: () => relojR });
+  ok(drB.get(claveDe('job-dual-1', 'e2')).r === 'rechazado' && drB.sinReportar('komo').length === 1, 'la marca «rechazado» sobrevive al reinicio');
+
+  // Forma compatible (solo claves): aplica a todas las filas de ESE lote con la clave, no a las de fuera.
+  imprLan('job-lista-1', 'e1'); imprLan('job-lista-1', 'e2');
+  const loteL = dr.sinReportar('komo').filter((x) => x.clave === 'job-lista-1' && x.estacion === 'e1');
+  c = dr.marcarRespuesta(loteL, { registrados: [], rechazados: ['job-lista-1'] });
+  ok(c.rechazados === 1 && dr.get(claveDe('job-lista-1', 'e1')).r === 'rechazado' && !dr.get(claveDe('job-lista-1', 'e2')).r,
+    'solo claves: marca las filas del lote con esa clave; la misma clave fuera del lote sigue pendiente', c);
+
+  // Tope de envíos sin respuesta útil.
+  imprLan('job-tope-1', 'e1');
+  const unoTope = () => dr.sinReportar('komo').filter((x) => x.clave === 'job-tope-1');
+  for (let i = 0; i < MAX_ENVIOS_LAN - 1; i++) dr.marcarRespuesta(unoTope(), {});
+  ok(unoTope().length === 1, (MAX_ENVIOS_LAN - 1) + ' envíos sin respuesta: aún se manda');
+  c = dr.marcarRespuesta(unoTope(), { ok: true, registrados: ['otro'] });
+  ok(c.agotados === 1 && unoTope().length === 0 && !dr.get(claveDe('job-tope-1', 'e1')).r, 'al envío ' + MAX_ENVIOS_LAN + ' sin respuesta útil deja de mandarse (sin marcarlo registrado)', c);
+
   // Retención 7 días.
   const d3 = new Diario(archivo, { ahora: () => reloj + 6 * 86400000 });
   ok(d3.estado(claveDe('job-aaaa-1', 'e1')) === 'IMPRESO', 'a los 6 días el papel sigue en el diario');
@@ -155,9 +189,12 @@ async function pruebaDiario() {
   ok(!!d6 && d6.mapa.size === 0, 'archivo binario ilegible: diario vacío, el agente no se cae');
 
   // Claves de la nube.
-  const c1 = claveDeNube('komo', { id: 55, estacion: 'e1', payload: { jobId: 'ck-1234:e1' } });
-  const c2 = claveDeNube('komo', { id: 55, estacion: 'e1', payload: {} });
-  ok(c1.clave === 'ck-1234:e1|e1' && c2.clave === 'nube:komo:55|e1', 'clave de la nube: payload.jobId|estación o nube:<app>:<id>', [c1, c2]);
+  const c1 = claveDeNube('komo', { id: 55, estacion: 'e1', tipo: 'COMANDA', payload: { jobId: 'ck-1234:e1' } });
+  const c2 = claveDeNube('komo', { id: 55, estacion: 'e1', tipo: 'COMANDA', payload: {} });
+  const c1b = claveDeNube('komo', { id: 56, estacion: 'e1', tipo: 'PRECUENTA', payload: { jobId: 'ck-1234:e1' } });
+  ok(c1.clave === 'ck-1234:e1|e1' && c1b.clave === 'ck-1234:e1|e1' && c2.clave === 'nube:komo:55|e1', 'clave de la nube: payload.jobId|estación (COMANDA/PRECUENTA) o nube:<app>:<id>', [c1, c1b, c2]);
+  const cT = ['TICKET', 'CPE', 'CIERRE', 'TURNO', undefined].map((tipo) => claveDeNube('komo', { id: 57, estacion: 'e1', tipo, payload: { jobId: 'ck-1234:e1' } }).clave);
+  ok(cT.every((k) => k === 'nube:komo:57|e1'), '[QA MEDIO-2] TICKET/CPE/CIERRE/TURNO de la nube no se cruzan por payload.jobId (clave = id de la nube)', cT);
   ok(jobIdValido('5b0c8a1e-3f9e-4b4e-9b0a-0f6d4c1e2a77:2a1b0c8a-3f9e-4b4e-9b0a-0f6d4c1e2a77') && !jobIdValido('nube:komo:1') && !jobIdValido('corto') && !jobIdValido('con espacio 123'), 'jobIdValido acepta clienteKey:estación y rechaza lo raro');
 }
 
@@ -205,6 +242,20 @@ function pruebaEmparejar() {
     ult = em.intentar(otro, 'x', '10.0.' + Math.floor(i / 4) + '.' + (i % 4 + 1));
   }
   ok(ult && ult.error === 'PIN_ANULADO' && em.pinVigente(false) === null, FALLOS_POR_PIN + ' fallos acumulados anulan el PIN', ult);
+  // [QA MEDIO-3] Bloqueo de 10 min y luego «Otro PIN» a mano (no se regenera solo).
+  ok(em.pinVigente(true) === null && em.estadoBloqueo().bloqueado === true, 'tras PIN_ANULADO el interruptor NO genera otro PIN solo', em.estadoBloqueo());
+  r = em.intentar(p2, 'x', '192.168.7.7');
+  ok(r.ok === false && r.error === 'PIN_BLOQUEADO' && r.esperaS > 0, 'bloqueado: ni el PIN viejo ni otro sirven (PIN_BLOQUEADO)', r);
+  r = em.pedirOtroPin();
+  ok(r.ok === false && r.error === 'PIN_BLOQUEADO' && r.esperaS > 0 && r.esperaS <= BLOQUEO_PIN_MS / 1000, '«Otro PIN» durante los 10 min: se niega', r);
+  em.anularPin();   // apagar y encender el interruptor tampoco lo destraba
+  ok(em.pinVigente(true) === null, 'apagar/encender el interruptor no destraba el bloqueo');
+  reloj += BLOQUEO_PIN_MS + 1000;
+  ok(em.pinVigente(true) === null && em.estadoBloqueo().requiereOtroPin === true && em.estadoBloqueo().esperaS === 0, 'pasados 10 min sigue sin PIN hasta pulsar «Otro PIN»', em.estadoBloqueo());
+  r = em.intentar('123456', 'x', '192.168.7.8');
+  ok(r.error === 'PIN_BLOQUEADO', 'pasados 10 min, emparejar sigue bloqueado sin «Otro PIN»', r);
+  r = em.pedirOtroPin();
+  ok(r.ok === true && /^\d{6}$/.test(r.pin.valor) && em.estadoBloqueo().bloqueado === false && em.pinVigente(false) === r.pin, '«Otro PIN» tras los 10 min: PIN nuevo y desbloqueado', r);
   // Tope global por minuto: no anula, frena.
   em.pinVigente(true);
   let tope = null;
@@ -246,7 +297,7 @@ async function pruebaServidor() {
   const servidor = lanRed.crearServidorLan({
     emparejador: em, version: '9.9.9', origenesExtra: ['http://localhost:5173'],
     ipDe: () => ipFalsa, bloqueado: () => bloqueado,
-    hola: () => ({ equipo: 'PC-CAJA', nombre: 'Local', emparejable: true }),
+    hola: () => ({ equipo: 'PC-CAJA-DEL-SEGUNDO-PISO', nombre: 'Cevichería Secreta', emparejable: true }),
     manejadores: {
       estado: async () => ({ ok: true, version: '9.9.9', nube: false, estaciones: [] }),
       diario: async () => ({ ok: true, recientes: [] }),
@@ -262,7 +313,8 @@ async function pruebaServidor() {
   const B = 'http://127.0.0.1:' + puerto, H = { Host: '192.168.1.10:' + puerto };
 
   let r = await pedir(B, '/v1/hola', { headers: H });
-  ok(r.status === 200 && r.json.app === 'levoprint' && r.json.version === '9.9.9' && r.json.equipo === 'PC-CAJA' && r.json.emparejable === true && r.headers.connection === 'close', 'hola sin token: app, version, equipo, nombre, emparejable; Connection: close', r.json);
+  ok(r.status === 200 && r.json.app === 'levoprint' && r.json.version === '9.9.9' && r.json.equipo === 'PC-CAJA-DEL-SEG' && r.json.emparejable === true && r.headers.connection === 'close', 'hola sin token: app, version, equipo corto (15), emparejable; Connection: close', r.json);
+  ok(JSON.stringify(Object.keys(r.json).sort()) === JSON.stringify(['app', 'emparejable', 'equipo', 'ok', 'version']) && !JSON.stringify(r.json).includes('Secreta'), '[QA BAJO-2] hola sin token no revela el nombre del local', r.json);
   ipFalsa = '8.8.8.8';
   r = await pedir(B, '/v1/hola', { headers: H });
   ok(r.status === 403 && !r.json, 'IP pública → 403 sin cuerpo', r.status);
@@ -298,6 +350,10 @@ async function pruebaServidor() {
   ok(r.status === 200 && r.json.eco === 'job-12345678', 'imprimir con token llega al manejador');
   r = await pedir(B, '/v1/emparejar', { headers: H, body: { pin: '12', nombre: 'x' } });
   ok(r.status === 401 && (r.json.error === 'SIN_PIN' || r.json.error === 'PIN_INVALIDO'), 'emparejar con PIN errado → 401', r.json);
+  em.bloqueo = { hasta: Date.now() + BLOQUEO_PIN_MS };
+  r = await pedir(B, '/v1/emparejar', { headers: H, body: { pin: '123456', nombre: 'x' } });
+  ok(r.status === 423 && r.json.error === 'PIN_BLOQUEADO' && r.json.esperaS > 0, 'emparejar con el PIN bloqueado → 423 PIN_BLOQUEADO', r.json);
+  em.bloqueo = null;
   bloqueado = true;
   ok((await pedir(B, '/v1/estado', { headers: H, token })).status === 423 && (await pedir(B, '/v1/hola', { headers: H })).status === 200, 'agente desactivado en la consola: 423 (menos /v1/hola)');
   ok((await pedir(B, '/no-existe', { headers: H })).status === 423, 'desactivado: tampoco rutas sueltas');
@@ -358,6 +414,10 @@ async function pruebaAgente() {
     const e0 = await hasta(async () => { const e = (await pedir(W, '/estado', { headers: HW })).json; return e && e.lan && e.vinculos && e.vinculos[0].estaciones.length === 3 ? e : null; }, 15000);
     ok(!!e0 && e0.version === VERSION && e0.lan.activo === false && e0.lan.escuchando === false && e0.lan.pin === null, 'la ventana muestra «Imprimir sin internet» APAGADO por defecto y sin PIN', e0 && e0.lan);
     ok((await pedir('http://127.0.0.1:' + lanBase, '/v1/hola', { headers: { Host: '127.0.0.1' } })).status === 0, 'apagado: el puerto LAN no escucha');
+    const lan0 = await hasta(() => mock.estado.komo.lan[0], 8000);
+    ok(!!lan0 && Array.isArray(lan0.lan.ips) && lan0.lan.ips.length === 0 && lan0.lan.puerto === null, 'arranque con el interruptor apagado: un latido lan:{ips:[],puerto:null} (limpia una IP vieja en la nube)', lan0);
+    await espera(2500);
+    ok(mock.estado.komo.lan.length === 1, 'apagado y ya informado: no repite el latido', mock.estado.komo.lan.length);
     ok((await pedir(W, '/lan', { headers: Object.assign({ Origin: 'https://evil.com' }, HW), body: { activo: true } })).status === 403, 'una página ajena no puede encender el interruptor (403)');
     let r = await pedir(W, '/lan', { headers: HW, body: { activo: true } });
     ok(r.status === 200 && r.json.ok === true && r.json.lan.escuchando === true && /^\d{6}$/.test(r.json.lan.pin || '') && r.json.persistido === true, 'interruptor encendido: escucha y muestra PIN de 6 dígitos', r.json);
@@ -366,7 +426,7 @@ async function pruebaAgente() {
     const pin = r.json.lan.pin;
 
     r = await pedir(L, '/v1/hola', { headers: HL });
-    ok(r.status === 200 && r.json.app === 'levoprint' && r.json.version === VERSION && r.json.emparejable === true && typeof r.json.equipo === 'string', 'GET /v1/hola', r.json);
+    ok(r.status === 200 && r.json.app === 'levoprint' && r.json.version === VERSION && r.json.emparejable === true && typeof r.json.equipo === 'string' && r.json.equipo.length <= 15 && !('nombre' in r.json), 'GET /v1/hola (sin nombre del local)', r.json);
     r = await pedir(L, '/v1/emparejar', { headers: HL, body: { pin: pin === '000000' ? '111111' : '000000', nombre: 'Tablet mozo' } });
     ok(r.status === 401 && r.json.error === 'PIN_INVALIDO', 'PIN errado → 401 PIN_INVALIDO', r.json);
     r = await pedir(L, '/v1/emparejar', { headers: HL, body: { pin, nombre: 'Tablet mozo' } });
@@ -396,6 +456,16 @@ async function pruebaAgente() {
     ok(r.status === 404 && r.json.error === 'ESTACION_DESCONOCIDA', 'estación desconocida → 404');
     r = await pedir(L, '/v1/imprimir', { headers: HL, token, body: { jobId: 'ck-5555:e1', estacion: 'e1', tipo: 'RAW', payload: {} } });
     ok(r.status === 400 && r.json.error === 'TIPO_INVALIDO', 'tipo desconocido → 400 (no imprime JSON crudo)');
+    const nDinero = imp.recibido.length;
+    for (const tipo of ['CPE', 'CIERRE', 'TURNO', 'CARTA_QR']) {
+      r = await pedir(L, '/v1/imprimir', { headers: HL, token, body: { jobId: 'ck-din-' + tipo + ':e1', estacion: 'e1', tipo, payload: { total: 1 } } });
+      ok(r.status === 400 && r.json.error === 'TIPO_INVALIDO', '[QA MEDIO-2] ' + tipo + ' por la LAN → 400 TIPO_INVALIDO', r.json);
+    }
+    ok(imp.recibido.length === nDinero, 'ningún papel de dinero salió por la LAN');
+    r = await pedir(L, '/v1/imprimir', { headers: HL, token, body: { jobId: 'ck-prec-1:e1', estacion: 'e1', tipo: 'PRECUENTA', payload: { mesa: '21', items: [{ cantidad: 1, nombre: 'Causa', precio: 12 }], total: 12 } } });
+    ok(r.status === 200 && r.json.estado === 'IMPRESO', 'PRECUENTA por la LAN → IMPRESO', r.json);
+    r = await pedir(L, '/v1/imprimir', { headers: HL, token, body: { jobId: 'ck-prueba-1:e1', estacion: 'e1', tipo: 'PRUEBA', payload: {} } });
+    ok(r.status === 200 && r.json.estado === 'IMPRESO', 'PRUEBA por /v1/imprimir → IMPRESO', r.json);
     r = await pedir(L, '/v1/prueba', { headers: HL, token, body: { estacion: 'e1' } });
     ok(r.status === 200 && r.json.ok && (await hasta(() => imp.recibido.some((t) => t.includes('PRUEBA LEVOPRINT OK')), 3000)), 'POST /v1/prueba saca el papel de prueba');
     r = await pedir(L, '/v1/diario', { headers: HL, token });
@@ -420,6 +490,20 @@ async function pruebaAgente() {
     await hasta(() => mock.estado.komo.marcados.filter((x) => x.id === 103).length >= 2, 8000);
     await espera(300);
     ok(imp.recibido.slice(nAntes2).filter((t) => t.includes('MESA 11')).length === 1, 'trabajo de la nube reentregado (marcar perdido) → un solo papel');
+    // [QA MEDIO-2] Un TICKET de la nube con un jobId que ya salió por la LAN SÍ se imprime.
+    const nAntesT = imp.recibido.length;
+    mock.estado.komo.jobs.push({ id: 104, estacion: 'e1', tipo: 'TICKET', payload: { jobId: J1, mesa: '77', items: [{ cantidad: 1, nombre: 'Lomo', precio: 30 }], total: 30 } });
+    const m104 = await hasta(() => mock.estado.komo.marcados.find((x) => x.id === 104), 8000);
+    ok(!!m104 && m104.ok === true && !!(await hasta(() => imp.recibido.slice(nAntesT).some((t) => t.includes('MESA 77') && t.includes('Lomo')), 3000)), 'TICKET de la nube con un jobId ya impreso por la LAN → se imprime igual', m104);
+
+    // [QA MEDIO-1] Lo que la nube rechaza no se reenvía.
+    mock.estado.komo.lanRechazar.add('ck-rech-1:e1|e1');
+    r = await pedir(L, '/v1/imprimir', { headers: HL, token, body: { jobId: 'ck-rech-1:e1', estacion: 'e1', tipo: 'COMANDA', payload: { mesa: '31', items: [] } } });
+    ok(r.json && r.json.estado === 'IMPRESO', 'comanda por la LAN que la nube va a rechazar', r.json);
+    const conRech = () => mock.estado.komo.lan.filter((p) => (p.impresos || []).some((x) => x.clave === 'ck-rech-1:e1'));
+    ok(!!(await hasta(() => conRech().length >= 1, 10000)), 'el rechazado llega una vez a agente_lan');
+    await espera(4000);
+    ok(conRech().length === 1, 'lo rechazado por la nube (rechazados_det por estación) no se vuelve a mandar', conRech().length);
 
     // agente_lan: IPs + puerto + impresos por la LAN; la nube los registra.
     const lanCall = await hasta(() => mock.estado.komo.lan.find((p) => (p.impresos || []).some((x) => x.clave === J1)), 10000);
@@ -432,6 +516,16 @@ async function pruebaAgente() {
     const kipuLan = mock.llamadas.filter((l) => l.prefijo === 'kipu' && l.fn === 'agente_lan').length;
     ok(kipuLan === 1, 'KIPU sin el módulo (404): una llamada y pausa de 10 min', kipuLan);
     ok(fs.existsSync(path.join(datos, 'levoprint-estaciones.json')) && !fs.readFileSync(path.join(datos, 'levoprint-estaciones.json'), 'utf8').includes(DEV_KOMO), 'las rutas quedan en disco (sin el token del equipo)');
+
+    // Apagar con red: el latido avisa lan:{ips:[],puerto:null} para que la nube borre la IP.
+    const nLan = mock.estado.komo.lan.length;
+    r = await pedir(W, '/lan', { headers: HW, body: { activo: false } });
+    const apag = await hasta(() => mock.estado.komo.lan.slice(nLan).find((p) => p.lan && p.lan.puerto === null), 8000);
+    ok(r.json && r.json.lan.escuchando === false && !!apag && Array.isArray(apag.lan.ips) && apag.lan.ips.length === 0, 'apagar el interruptor: agente_lan con lan:{ips:[],puerto:null}', apag);
+    const nLan2 = mock.estado.komo.lan.length;
+    r = await pedir(W, '/lan', { headers: HW, body: { activo: true } });
+    const encendido = await hasta(() => mock.estado.komo.lan.slice(nLan2).find((p) => p.lan && typeof p.lan.puerto === 'number'), 8000);
+    ok(r.json && r.json.lan.escuchando === true && !!encendido, 'volver a encender: agente_lan con el puerto otra vez', encendido);
 
     // Reinicio SIN red: el servidor (mock) no existe; el agente imprime con las rutas del disco.
     await A.cerrar();

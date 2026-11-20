@@ -33,7 +33,7 @@ const crypto = require('crypto');
 const { exec, execFile, spawn } = require('child_process');
 // [LP-O02] Impresión sin internet por la red del local (:9120). En el .exe, build-exe.mjs junta
 // index.js + lib/*.js en un solo archivo (empaquetar.mjs): Node SEA no carga archivos sueltos.
-const { Diario, claveDe, claveDeNube, jobIdValido } = require('./lib/diario');
+const { Diario, claveDe, claveDeNube, jobIdValido, MAX_ENVIOS_LAN } = require('./lib/diario');
 const { Emparejador } = require('./lib/emparejar');
 const lanRed = require('./lib/servidorLan');
 
@@ -128,7 +128,8 @@ function nuevoVinculo(prefijo, device, nombre) {
     destinos: new Map(), transporte: null, sinTransporteHasta: 0, estacionVinculo: null,
     md5Informado: '', informadoTs: 0, buscadoPendiente: false, preguntar: false,
     // [LP-O02] latido <prefijo>_agente_lan: lo último informado (ips+puerto) y pausa si falta la RPC.
-    lanInformado: '', lanInformadoTs: 0, lanAusenteHasta: 0, lanEnCurso: null,
+    // lanInformado null = aún nada en este arranque: el primer latido va siempre (apagado limpia una IP vieja).
+    lanInformado: null, lanInformadoTs: 0, lanAusenteHasta: 0, lanEnCurso: null,
   };
 }
 const esDeviceValido = (d) => /^[0-9a-f-]{20,}$/i.test(String(d || '')) && !/PEGA-AQUI/.test(String(d));
@@ -1277,7 +1278,8 @@ async function cicloVinculo(v) {
       try {
         // [LP-O02] Diario anti-duplicado: el mismo papel (payload.jobId|estación, o el id del trabajo)
         // que ya salió por la LAN o en una vuelta anterior se marca hecho sin imprimir; uno que quedó
-        // a medias (DUDOSO) sale con sello REIMPRESION.
+        // a medias (DUDOSO) sale con sello REIMPRESION. [QA MEDIO-2] El cruce por payload.jobId es
+        // solo para COMANDA/PRECUENTA: TICKET/CPE/CIERRE de la nube salen siempre (clave = id de la nube).
         const { clave, jobId } = claveDeNube(pfx, job);
         const r = await diario.procesar({
           clave, jobId, estacion: job.estacion, prefijo: pfx, origen: 'NUBE', tipo: job.tipo,
@@ -1648,7 +1650,10 @@ const DIR_DATOS = AJUSTE_PRUEBA('LEVO_DATOS_DIR') || DIR_RESPALDO || DIR_TXT;
 const PUERTO_LAN_BASE = parseInt(AJUSTE_PRUEBA('LEVO_PUERTO_LAN') || String(lanRed.PUERTO_LAN), 10) || lanRed.PUERTO_LAN;
 const ORIGENES_EXTRA = lanRed.leerOrigenesExtra(AJUSTE_PRUEBA('LEVO_ORIGENES')); // el .exe lo ignora
 const LAN_CADA_MS = 10 * 60000;   // latido <prefijo>_agente_lan sin novedades / reintento si falta la RPC
-const TIPOS_LAN = ['COMANDA', 'PRECUENTA', 'TICKET', 'CPE', 'CIERRE', 'TURNO', 'CARTA_QR'];
+// [QA MEDIO-2] Por la LAN solo papeles sin valor fiscal ni de caja. Nada de CPE, CIERRE ni otros
+// papeles de dinero: un equipo emparejado podría imprimir un comprobante con un payload inventado.
+// Esos salen solo por la nube (los arma el servidor).
+const TIPOS_LAN = ['COMANDA', 'PRECUENTA', 'TICKET', 'PRUEBA'];
 const lan = { activo: /^(1|si|sí|true)$/i.test(String(process.env.LEVO_LAN || '').trim()), servidor: null, puerto: null, error: null, abriendo: null };
 // Se crean en arrancar(), recién con el candado de una instancia: un segundo LevoPrint que se abre
 // y se cierra no debe compactar el diario del que imprime.
@@ -1701,11 +1706,13 @@ function latidoLan(v) {
 }
 async function latidoLanUno(v) {
   if (!diario || v.lanAusenteHasta > Date.now()) return null;
+  // Más recientes primero, sin lo registrado/rechazado ni lo agotado (diario.MAX_ENVIOS_LAN).
   const impresos = diario.sinReportar(v.prefijo, 100);
+  // Apagado: lan:{ips:[],puerto:null} -> la nube borra la IP (la app deja de intentar la LAN).
   const info = { ips: lan.servidor ? lanRed.ipsLan() : [], puerto: lan.servidor ? lan.puerto : null };
   const huella = JSON.stringify(info);
   if (!impresos.length) {
-    if (!lan.servidor && (v.lanInformado === '' || v.lanInformado === huella)) return null;   // apagado y ya dicho
+    if (!lan.servidor && v.lanInformado === huella) return null;   // apagado y ya dicho
     if (huella === v.lanInformado && Date.now() - v.lanInformadoTs < LAN_CADA_MS) return null;
   }
   let r;
@@ -1723,10 +1730,19 @@ async function latidoLanUno(v) {
     throw e;
   }
   v.lanAusenteHasta = 0;
-  if (!r || r.ok === false) { console.error(`[lan ${v.prefijo}] agente_lan respondio ${(r && r.error) || 'vacio'}`); return null; }
+  if (!r || r.ok === false) {
+    console.error(`[lan ${v.prefijo}] agente_lan respondio ${(r && r.error) || 'vacio'}`);
+    // [QA MEDIO-1] Respuesta sin nada útil: cuenta un envío por fila (tope diario.MAX_ENVIOS_LAN).
+    if (impresos.length) diario.marcarRespuesta(impresos, {});
+    return null;
+  }
   v.lanInformado = huella; v.lanInformadoTs = Date.now();
-  const n = diario.marcarReportados(impresos, r.registrados);
-  if (n) console.log(`[lan ${v.prefijo}] ${n} papeles impresos sin internet avisados a la nube.`);
+  // [QA MEDIO-1] registrados / rechazados por (clave, estación) si viene el detalle; si no, por clave
+  // dentro de ESTE lote. Lo rechazado no se reenvía nunca.
+  const c = impresos.length ? diario.marcarRespuesta(impresos, r) : { registrados: 0, rechazados: 0, agotados: 0 };
+  if (c.registrados) console.log(`[lan ${v.prefijo}] ${c.registrados} papeles impresos sin internet avisados a la nube.`);
+  if (c.rechazados) console.error(`[lan ${v.prefijo}] la nube rechazó ${c.rechazados} papeles impresos sin internet: no se vuelven a mandar.`);
+  if (c.agotados) console.error(`[lan ${v.prefijo}] ${c.agotados} papeles sin respuesta de la nube tras ${MAX_ENVIOS_LAN} envíos: se dejan de mandar.`);
   return r;
 }
 
@@ -1825,7 +1841,8 @@ function encenderLan() {
   if (lan.abriendo) return lan.abriendo;
   const servidor = lanRed.crearServidorLan({
     emparejador, version: VERSION_AGENTE, origenesExtra: ORIGENES_EXTRA,
-    hola: () => ({ equipo: nombreEquipo(), nombre: (vinculos.find((v) => v.nombre) || {}).nombre || 'LevoPrint', emparejable: lan.activo }),
+    // [QA BAJO-2] Sin el nombre del local (no exige token); servidorLan recorta el equipo a 15.
+    hola: () => ({ equipo: nombreEquipo(), emparejable: lan.activo && !emparejador.estadoBloqueo().bloqueado }),
     bloqueado: () => vinculos.length > 0 && vinculos.every((v) => v.desactivado),
     alEmparejar: (r) => { if (r.ok && lan.activo) emparejador.pinVigente(true); },
     manejadores: manejadoresLan,
@@ -1865,10 +1882,13 @@ async function cambiarLan(activo) {
 }
 function estadoLan() {
   const pin = lan.servidor && emparejador ? emparejador.pinVigente(true) : null;
+  const bloq = emparejador ? emparejador.estadoBloqueo() : { bloqueado: false, esperaS: 0 };
   return {
     activo: lan.activo, escuchando: !!lan.servidor, puerto: lan.puerto, error: lan.error,
     urls: lan.servidor ? lanRed.ipsLan().map((ip) => 'http://' + ip + ':' + lan.puerto) : [],
     pin: pin ? pin.valor : null, pinVence: pin ? pin.expira : null,
+    // [QA MEDIO-3] Tras 50 PIN errados: bloqueado 10 min y luego «Otro PIN» a mano.
+    pinBloqueado: !!bloq.bloqueado, pinBloqueoS: bloq.esperaS || 0,
     equipos: emparejador ? emparejador.lista() : [],
   };
 }
@@ -1880,7 +1900,8 @@ async function manejarLan(req, res) {
 }
 async function manejarLanPin(req, res) {
   if (!lan.servidor) return responderJson(res, 400, { ok: false, error: 'LAN_APAGADO' });
-  emparejador.nuevoPin();
+  const r = emparejador.pedirOtroPin();
+  if (!r.ok) return responderJson(res, 423, { ok: false, error: r.error, mensaje: r.mensaje, esperaS: r.esperaS, lan: estadoLan() });
   return responderJson(res, 200, { ok: true, lan: estadoLan() });
 }
 async function manejarLanQuitar(req, res) {
@@ -2042,6 +2063,7 @@ function paginaHtml() {
           <span>PIN para emparejar<br><span class="muted">Escríbelo en la app de la caja o del mozo. Sirve una vez y cambia cada 10 minutos.</span></span>
           <span id="lanPin" class="pin">------</span>
         </div>
+        <div id="lanPinAviso" class="msg err" style="display:none"></div>
         <div class="fila"><span id="lanUrls" class="muted"></span><button id="btnLanPin" class="secundario chico">Otro PIN</button></div>
         <div id="lanEquipos"></div>
       </div>
@@ -2180,6 +2202,13 @@ async function refrescar() {
     : (l.error || 'Abriendo...');
   document.getElementById('lanDetalle').style.display = l.escuchando ? 'block' : 'none';
   document.getElementById('lanPin').textContent = l.pin || '------';
+  // [QA MEDIO-3] 50 PIN errados desde la red: bloqueado 10 min y luego «Otro PIN» a mano.
+  const aviso = document.getElementById('lanPinAviso');
+  aviso.style.display = l.pinBloqueado ? 'block' : 'none';
+  aviso.textContent = !l.pinBloqueado ? ''
+    : l.pinBloqueoS > 0 ? 'Alguien de la red probó muchos PIN errados. Emparejar está bloqueado; podrás pedir otro PIN en ' + Math.ceil(l.pinBloqueoS / 60) + ' min.'
+    : 'Emparejar sigue bloqueado por los PIN errados. Toca «Otro PIN» cuando vayas a emparejar un equipo.';
+  document.getElementById('btnLanPin').disabled = !!(l.pinBloqueado && l.pinBloqueoS > 0);
   document.getElementById('lanUrls').textContent = (l.urls || []).length ? 'Dirección en la red: ' + l.urls.join(' · ') : 'Esta PC no tiene red local.';
   document.getElementById('lanEquipos').innerHTML = (l.equipos || []).map(function (q) {
     return '<div class="fila"><span>' + esc(q.nombre) + '<br><span class="muted">Emparejado ' + esc(new Date(q.creado).toLocaleDateString()) + (q.ip ? ' · ' + esc(q.ip) : '') + '</span></span>'
@@ -2379,7 +2408,7 @@ function lanPedir(ruta, cuerpo, ok) {
   const msg = document.getElementById('msgLan');
   return j(ruta, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cuerpo || {}) })
     .then(function (r) {
-      msg.textContent = (r && r.ok) ? (ok || '') : ((r && r.lan && r.lan.error) || 'No se pudo cambiar.');
+      msg.textContent = (r && r.ok) ? (ok || '') : ((r && (r.mensaje || (r.lan && r.lan.error))) || 'No se pudo cambiar.');
       msg.className = 'msg ' + ((r && r.ok) ? 'ok' : 'err');
       refrescar();
     });

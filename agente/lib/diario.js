@@ -10,8 +10,9 @@
 //
 // Clave = "<jobId>|<estacion>". Regla del contrato: UN jobId POR PAPEL Y
 // ESTACION (offline_komo: jobId = clienteKey:estacion_id). Un trabajo de la
-// nube sin payload.jobId usa "nube:<prefijo>:<id>" (solo cubre el marcar
-// fallido; nunca se reporta a <prefijo>_agente_lan).
+// nube sin payload.jobId, o que no es COMANDA/PRECUENTA, usa
+// "nube:<prefijo>:<id>" (solo cubre el marcar fallido; nunca se reporta a
+// <prefijo>_agente_lan).
 //
 // Estados:
 //   ENVIANDO  bytes en camino (se escribe ANTES de enviar, con fsync: si se
@@ -28,13 +29,23 @@
 // agente). Se compacta al arrancar, cada dia y si pasa de 1 MB: escritura
 // atomica (tmp + fsync + rename). Retencion 7 dias.
 // Campos: k clave, j jobId, est estacion, p prefijo, o origen (LAN|NUBE),
-// e estado, t tipo, ts, r = ya reportado a la nube (<prefijo>_agente_lan).
+// e estado, t tipo, ts, r = respuesta de la nube (<prefijo>_agente_lan):
+//   false/ausente  aun no avisado
+//   true           la nube lo registro
+//   'rechazado'    la nube lo rechazo (jobId ajeno, estacion de otro local,
+//                  papel que no existe...): NO se reenvia nunca
+// n = veces que se mando en un latido con respuesta de la nube. Tope
+// MAX_ENVIOS_LAN: una fila que la nube nunca registra ni rechaza deja de
+// mandarse (no ocupa el lote para siempre).
+// La marca es POR FILA = (jobId, estacion): un mismo jobId puede quedar
+// registrado en una estacion y rechazado en otra.
 // ============================================================
 'use strict';
 const fs = require('fs');
 
 const DIA_MS = 86400000;
 const ESTADOS = ['ENVIANDO', 'IMPRESO', 'FALLO', 'DUDOSO'];
+const MAX_ENVIOS_LAN = 20;
 
 function claveDe(jobId, estacion) {
   return String(jobId) + '|' + String(estacion || '-');
@@ -45,10 +56,19 @@ function jobIdValido(id) {
   return typeof id === 'string' && /^[A-Za-z0-9:_\-.]{8,80}$/.test(id) && !id.startsWith('nube:');
 }
 
-// Clave de un trabajo de la nube: payload.jobId|estacion o nube:<prefijo>:<id>|estacion.
+// [QA MEDIO-2] Solo estos papeles de la nube se cruzan con la LAN por payload.jobId.
+// Un TICKET / CPE / CIERRE / TURNO de la nube SIEMPRE se imprime aunque traiga un
+// jobId que ya salio por la LAN: la LAN no imprime papeles de dinero, y un equipo
+// emparejado no debe poder "tapar" un comprobante adelantando su jobId.
+const TIPOS_DEDUPE_LAN = ['COMANDA', 'PRECUENTA'];
+
+// Clave de un trabajo de la nube: payload.jobId|estacion (solo COMANDA/PRECUENTA) o
+// nube:<prefijo>:<id>|estacion (el id del trabajo en la nube: cubre solo el
+// print_marcar perdido, que reentrega el MISMO trabajo; no lo controla la LAN).
 function claveDeNube(prefijo, job) {
   const pl = (job && job.payload) || {};
-  const j = jobIdValido(pl.jobId) ? pl.jobId : 'nube:' + String(prefijo || '') + ':' + String(job && job.id);
+  const cruza = TIPOS_DEDUPE_LAN.includes(job && job.tipo) && jobIdValido(pl.jobId);
+  const j = cruza ? pl.jobId : 'nube:' + String(prefijo || '') + ':' + String(job && job.id);
   return { clave: claveDe(j, job && job.estacion), jobId: j };
 }
 
@@ -156,27 +176,63 @@ class Diario {
   }
 
   // Impresos por la LAN de una app que la nube aun no sabe (para <prefijo>_agente_lan).
+  // Lo MAS RECIENTE primero: basura vieja que la nube no acepta no tapa lo nuevo.
+  // Fuera: lo registrado (r true), lo rechazado (r 'rechazado') y lo que ya se
+  // mando MAX_ENVIOS_LAN veces sin respuesta util.
   sinReportar(prefijo, max) {
-    const out = [];
+    const cand = [];
     for (const e of this.mapa.values()) {
-      if (out.length >= (max || 100)) break;
-      if (e.e === 'IMPRESO' && e.o === 'LAN' && !e.r && e.p === prefijo && e.j && !String(e.j).startsWith('nube:')) {
-        out.push({ k: e.k, clave: e.j, estacion: e.est, ts: new Date(e.ts).toISOString() });
-      }
+      if (e.e === 'IMPRESO' && e.o === 'LAN' && !e.r && e.p === prefijo && e.j && !String(e.j).startsWith('nube:')
+        && !((e.n || 0) >= MAX_ENVIOS_LAN)) cand.push(e);
     }
-    return out;
+    cand.sort((a, b) => b.ts - a.ts);
+    return cand.slice(0, max || 100).map((e) => ({ k: e.k, clave: e.j, estacion: e.est, ts: new Date(e.ts).toISOString() }));
   }
 
-  // La nube respondio registrados:[jobId]: se marcan las entradas enviadas con ese jobId.
-  marcarReportados(enviados, registrados) {
-    const ok = new Set((registrados || []).map(String));
-    let n = 0;
+  // Respuesta de <prefijo>_agente_lan a un lote. Acepta las dos formas:
+  //   detallada (por estacion): registrados_det / rechazados_det = [{clave, estacion, motivo?}] o [[clave, estacion]]
+  //   compatible (solo claves): registrados / rechazados = [jobId] -> aplica a TODAS las filas
+  //                              de ESTE lote con esa clave.
+  // Si viene el detalle de una lista, se usa el detalle y se ignora la lista de claves de ese tipo.
+  // Toda fila del lote suma un envio (n); al llegar a MAX_ENVIOS_LAN sin marca deja de mandarse.
+  // Devuelve { registrados, rechazados, agotados } (cuantas filas cambiaron).
+  marcarRespuesta(enviados, resp) {
+    const r = resp || {};
+    const pares = (lista) => {
+      if (!Array.isArray(lista)) return null;
+      const s = new Set();
+      for (const x of lista) {
+        if (Array.isArray(x) && x.length >= 2) s.add(claveDe(x[0], x[1]));
+        else if (x && typeof x === 'object' && x.clave != null) s.add(claveDe(x.clave, x.estacion));
+      }
+      return s;
+    };
+    const claves = (lista) => new Set((Array.isArray(lista) ? lista : []).filter((x) => typeof x === 'string' || typeof x === 'number').map(String));
+    const regDet = pares(r.registrados_det), rechDet = pares(r.rechazados_det);
+    const regCl = claves(r.registrados), rechCl = claves(r.rechazados);
+    const cuenta = { registrados: 0, rechazados: 0, agotados: 0 };
+    let cambio = false;
     for (const x of enviados || []) {
       const e = this.mapa.get(x.k);
-      if (e && !e.r && ok.has(String(x.clave))) { this.mapa.set(x.k, Object.assign({}, e, { r: true })); n++; }
+      if (!e || e.r) continue;
+      const par = claveDe(x.clave, x.estacion);
+      const reg = regDet ? regDet.has(par) : regCl.has(String(x.clave));
+      const rech = rechDet ? rechDet.has(par) : rechCl.has(String(x.clave));
+      const n = (e.n || 0) + 1;
+      let marca = false;
+      if (reg) { marca = true; cuenta.registrados++; }              // registrado gana si la nube lo pone en las dos
+      else if (rech) { marca = 'rechazado'; cuenta.rechazados++; }
+      else if (n >= MAX_ENVIOS_LAN) cuenta.agotados++;
+      this.mapa.set(x.k, Object.assign({}, e, { r: marca, n }));
+      cambio = true;
     }
-    if (n) this.compactar();   // r no cambia la dedupe: basta con reescribir una vez
-    return n;
+    if (cambio) this.compactar();   // r y n no cambian la dedupe: basta con reescribir una vez
+    return cuenta;
+  }
+
+  // Forma vieja (solo registrados:[jobId]). Devuelve cuantas filas quedaron registradas.
+  marcarReportados(enviados, registrados) {
+    return this.marcarRespuesta(enviados, { registrados }).registrados;
   }
 
   recientes(n) {
@@ -185,4 +241,4 @@ class Diario {
   }
 }
 
-module.exports = { Diario, claveDe, claveDeNube, jobIdValido };
+module.exports = { Diario, claveDe, claveDeNube, jobIdValido, MAX_ENVIOS_LAN, TIPOS_DEDUPE_LAN };

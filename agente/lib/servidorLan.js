@@ -8,8 +8,11 @@
 // la ventana local (127.0.0.1:9110).
 //
 // Contrato (JSON; todo menos /v1/hola y /v1/emparejar exige token):
-//   GET  /v1/hola       -> { ok, app:'levoprint', version, equipo, nombre, emparejable }
+//   GET  /v1/hola       -> { ok, app:'levoprint', version, equipo (15 car.), emparejable }
+//                          (sin nombre del local: no exige token)
 //   POST /v1/emparejar  { pin, nombre } -> { ok, token, vence }
+//                          | 401 PIN_INVALIDO/PIN_ANULADO/SIN_PIN | 429 ESPERA | 423 PIN_BLOQUEADO
+//   POST /v1/imprimir   tipo solo COMANDA | PRECUENTA | TICKET | PRUEBA (nada de CPE ni CIERRE)
 //   GET  /v1/estado     -> { ok, version, nube, estaciones:[{id,nombre,transporte,listo,app}] }
 //   POST /v1/imprimir   { jobId, estacion, tipo, payload, reimpresion? }
 //                       -> { ok, via:'LAN', estado:'IMPRESO'|'YA_IMPRESO' } |
@@ -172,7 +175,13 @@ function crearServidorLan(op) {
     }
     try {
       if (req.method === 'GET' && url === '/v1/hola') {
-        return responder(req, res, 200, Object.assign({ ok: true, app: 'levoprint', version: op.version }, op.hola ? op.hola() : {}));
+        // [QA BAJO-2] Sin token: nada del negocio (ni el nombre del local). Solo lo que
+        // necesita la app para saber que aqui hay un LevoPrint y si acepta emparejar.
+        const h = op.hola ? op.hola() || {} : {};
+        return responder(req, res, 200, {
+          ok: true, app: 'levoprint', version: op.version,
+          equipo: String(h.equipo || 'PC').slice(0, 15), emparejable: !!h.emparejable,
+        });
       }
       if (op.bloqueado && op.bloqueado()) {
         return responder(req, res, 423, { ok: false, error: 'AGENTE_DESACTIVADO', mensaje: 'Este LevoPrint está desactivado en la consola de la app.' });
@@ -184,7 +193,7 @@ function crearServidorLan(op) {
         if (r.ok) log('[lan] equipo emparejado: ' + r.equipo.nombre + ' (' + ip + ')');
         else log('[lan] PIN rechazado desde ' + ip + ': ' + r.error);
         if (op.alEmparejar) op.alEmparejar(r);
-        return responder(req, res, r.ok ? 200 : (r.error === 'ESPERA' ? 429 : 401), r);
+        return responder(req, res, r.ok ? 200 : (r.error === 'ESPERA' ? 429 : r.error === 'PIN_BLOQUEADO' ? 423 : 401), r);
       }
 
       const equipo = emparejador.validar(tokenDe(req));

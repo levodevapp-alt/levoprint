@@ -25,8 +25,8 @@ JSON. Todo menos `hola` y `emparejar` exige `Authorization: Bearer <token>`. Los
 
 | Ruta | Cuerpo | Respuesta |
 |---|---|---|
-| `GET /v1/hola` | — | `{ok, app:'levoprint', version, equipo, nombre, emparejable}` (`equipo` = nombre de la PC; `nombre` = nombre del vínculo; `emparejable` = interruptor encendido) |
-| `POST /v1/emparejar` | `{pin, nombre}` | `200 {ok, token, vence (ISO), equipo:{id,nombre}}` · `401 {error:'PIN_INVALIDO'|'SIN_PIN'|'PIN_ANULADO'}` · `429 {error:'ESPERA', esperaS}` |
+| `GET /v1/hola` | — | `{ok, app:'levoprint', version, equipo, emparejable}` — exactamente esas claves. `equipo` = nombre de la PC recortado a 15 caracteres; `emparejable` = interruptor encendido y sin bloqueo de PIN. **No** devuelve el nombre del local (no exige token: QA BAJO-2) |
+| `POST /v1/emparejar` | `{pin, nombre}` | `200 {ok, token, vence (ISO), equipo:{id,nombre}}` · `401 {error:'PIN_INVALIDO'|'SIN_PIN'|'PIN_ANULADO', esperaS?}` · `429 {error:'ESPERA', esperaS}` · `423 {error:'PIN_BLOQUEADO', esperaS, mensaje}` (tras 50 PIN errados; ver §3) |
 | `GET /v1/estado` | — | `{ok, version, nube:boolean, equipo, estaciones:[{id, nombre, app, transporte, listo}]}` |
 | `POST /v1/imprimir` | `{jobId, estacion, tipo, payload, reimpresion?, app?}` | ver abajo |
 | `POST /v1/prueba` | `{estacion, app?}` | `{ok, via:'LAN'}` o error como en imprimir |
@@ -43,17 +43,21 @@ JSON. Todo menos `hola` y `emparejar` exige `Authorization: Bearer <token>`. Los
 
 Reglas del contrato:
 - `jobId`: 8–80 caracteres `[A-Za-z0-9:_\-.]`, sin prefijo `nube:`. **Un jobId por papel y estación** (KOMO offline: `clienteKey:estacion_id`, igual que `offline_komo`). La dedupe es por `jobId|estacion`.
-- `tipo`: `COMANDA | PRECUENTA | TICKET | CPE | CIERRE | TURNO | CARTA_QR` (otro tipo → 400; no se imprime JSON crudo).
+- `tipo`: **solo** `COMANDA | PRECUENTA | TICKET | PRUEBA` (QA MEDIO-2). `CPE`, `CIERRE`, `TURNO`, `CARTA_QR` o cualquier otro → `400 TIPO_INVALIDO`. Motivo: un equipo emparejado podría imprimir un comprobante o un cierre de caja con un payload inventado; esos papeles salen **solo por la nube** (los arma el servidor). El front debe mandar por la LAN solo esos cuatro tipos y todo lo demás por la nube.
 - `reimpresion: true` solo **pone el sello**; la dedupe sigue valiendo. Una reimpresión pedida a propósito lleva **jobId nuevo** (como `print_reimprimir`, que quita el jobId del original).
 - `app` (opcional, `komo|kipu|kuti`) desambigua si dos apps vinculadas tuvieran el mismo id de estación (son uuid: no debería pasar).
-- Ruta de la nube: cuando `print_tomar` trae un trabajo con `payload.jobId` que el diario tiene IMPRESO para esa estación, se llama `print_marcar {ok:true}` **sin imprimir**. Un trabajo sin `payload.jobId` usa la clave `nube:<app>:<id>` (cubre el `print_marcar` perdido: el servidor lo reentrega y no se repite).
+- Ruta de la nube: cuando `print_tomar` trae una **COMANDA o PRECUENTA** con `payload.jobId` que el diario tiene IMPRESO para esa estación, se llama `print_marcar {ok:true}` **sin imprimir**. Cualquier otro tipo (`TICKET`, `CPE`, `CIERRE`, `TURNO`…) **se imprime siempre** aunque traiga un `jobId` conocido (QA MEDIO-2: la LAN no puede "tapar" un papel de dinero adelantando su jobId); para esos, y para los trabajos sin `payload.jobId`, la clave es `nube:<app>:<id>` (el id del trabajo en la nube, que la LAN no controla: cubre solo el `print_marcar` perdido, en que el servidor reentrega el **mismo** trabajo).
 - Render: con internet se usa el de la nube (`<app>-print`, 3 s); sin internet, el render local del agente (el mismo que el respaldo de siempre).
 
 ### Latido a la nube: `<prefijo>_agente_lan`
 En el refresco de config que ya existe (cada 60 s por app), **solo si hay algo que decir**: impresos por la LAN sin reportar, cambio de IP/puerto/interruptor, o 10 min desde el último aviso con el interruptor encendido.
-- Pedido: `{device, version:'exe/1.15.0', lan:{ips:[…máx 4 IPv4 privadas], puerto}, impresos:[{clave:<jobId>, estacion, ts ISO}]}`. **Con el interruptor apagado:** `lan:{ips:[], puerto:null}` (se manda una vez al apagar).
-- Respuesta esperada: `{ok:true, registrados:[<jobId>…]}` → esos quedan marcados como reportados y no se vuelven a mandar.
-- Si la RPC no existe (404 / PGRST202: módulo SQL sin aplicar) se ignora y se reintenta cada 10 min. Lo impreso por la nube no se reporta.
+- Pedido: `{device, version:'exe/1.15.0', lan:{ips:[…máx 4 IPv4 privadas], puerto}, impresos:[{clave:<jobId>, estacion, ts ISO}]}` (máx. 100, **los más recientes primero**). **Con el interruptor apagado:** `lan:{ips:[], puerto:null}` — se manda una vez al apagar y una vez en cada arranque con el interruptor apagado (limpia una IP vieja que haya quedado en la nube); el SQL lo acepta y borra la IP del dispositivo.
+- Respuesta (QA MEDIO-1), se aceptan las dos formas:
+  - **Detallada por estación** (preferida): `registrados_det` / `rechazados_det` = `[{clave, estacion, motivo?}]` (o pares `[clave, estacion]`). La marca es **por fila (clave, estación)**: un mismo jobId puede quedar registrado en una estación y rechazado en otra.
+  - **Compatible**: `registrados` / `rechazados` = `[<jobId>…]`. Si de un tipo solo viene la lista de claves, se marcan **todas las filas de ese lote** con esa clave (no las que no se mandaron). Si una clave viene en las dos listas, gana registrado.
+  - Registrado → `r:true` en el diario; rechazado → `r:'rechazado'`: **ninguno de los dos se vuelve a mandar nunca**.
+  - Tope: cada fila cuenta un envío por latido con respuesta (incluida `ok:false`); a los **20 envíos** sin quedar registrada ni rechazada deja de mandarse (sin marcarse registrada). La basura vieja no tapa lo nuevo (orden por más reciente y tope).
+- Si la RPC no existe (404 / PGRST202: módulo SQL sin aplicar) se ignora y se reintenta cada 10 min (no cuenta envíos). Lo impreso por la nube no se reporta.
 
 ## 3. Seguridad
 
@@ -62,7 +66,8 @@ En el refresco de config que ya existe (cada 60 s por app), **solo si hay algo q
 - **Host**: IP literal, `localhost` o `<nombre>.local`. Un dominio (DNS rebinding) → 421.
 - **CORS**: solo `https://levodev.app` y `https://*.levodev.app`, con el origen exacto y `Vary: Origin`; **nunca `*`**. `http://` o `levodev.app.evil.com` → 403. `LEVO_ORIGENES` (p. ej. `http://localhost:5173`) solo con `node index.js`: **el `.exe` lo ignora**.
 - **Preflight**: `OPTIONS` responde 204 con `Access-Control-Allow-Private-Network: true` (Chrome PNA/LNA) solo a orígenes permitidos.
-- **PIN**: 6 dígitos al azar (`crypto.randomInt`), vence a los 10 min, **un solo uso** y rota solo mientras el interruptor está encendido. Freno: 5 fallos por IP → 60 s; tope global 30 fallos/min (frena sin anular: nadie de la red impide emparejar); **50 fallos acumulados anulan el PIN** (se muestra otro). Comparación en tiempo constante.
+- **PIN**: 6 dígitos al azar (`crypto.randomInt`), vence a los 10 min, **un solo uso** y rota solo mientras el interruptor está encendido. Freno: 5 fallos por IP → 60 s; tope global 30 fallos/min (frena sin anular el PIN); **50 fallos acumulados anulan el PIN y bloquean el emparejamiento** (QA MEDIO-3): durante **10 min** no hay PIN (`/v1/emparejar` → `423 PIN_BLOQUEADO`, «Otro PIN» de la ventana se niega); pasados los 10 min **no se genera otro solo** (ni apagando y encendiendo el interruptor): alguien en la PC tiene que pulsar **«Otro PIN»**, y así se entera de que hubo un ataque (la ventana lo avisa en rojo). El bloqueo vive en memoria: reiniciar LevoPrint exige estar en la PC. Comparación en tiempo constante.
+- **DoS menor aceptado**: el tope global (30/min) y el bloqueo por anulación los puede provocar cualquier equipo de la red del local rotando IPs. Solo impiden **emparejar equipos nuevos** un rato; los ya emparejados siguen imprimiendo con su token. Lo preferimos a dejar adivinar el PIN; con Wi-Fi de invitados separada (ver abajo) el riesgo baja.
 - **Token**: 32 bytes al azar por equipo, en disco solo su sha256, **vence a los 90 días sin uso** (cada uso lo renueva), se **quita** desde la ventana (efecto inmediato). Máximo 50 equipos.
 - **Cuerpo** máx. 64 KB; cabeceras 10 s, pedido 30 s; `Connection: close` (sin keep-alive colgadas; al apagar se cierran todas).
 - **Errores sin detalle crudo** (IPs, `ECONNREFUSED`, mensajes de Windows): eso va solo a `levoprint.log`.
@@ -73,7 +78,7 @@ En el refresco de config que ya existe (cada 60 s por app), **solo si hay algo q
 Un equipo conectado a la misma Wi-Fi podría leer un papel o un token en tránsito. Mitigación: solo red privada, token por equipo que vence y se quita, PIN de un uso, y los papeles no llevan secretos (el CPE ya es público en SUNAT). HTTPS local exigiría instalar un certificado a mano en cada navegador de cada equipo. **Recomendación al cliente:** Wi-Fi del local con clave WPA2/WPA3 y red de invitados separada para los clientes.
 
 ### Riesgo aceptado: un equipo emparejado es de confianza
-Un equipo emparejado puede imprimir en las estaciones de la PC y, si adivina el `jobId` de otro papel (`clienteKey:estación`), hacer que ese papel se dé por impreso (YA_IMPRESO, y se reporta en `agente_lan`). Por eso el PIN solo se ve en la PC del local y cada equipo se puede quitar. **Para el SQL de `agente_lan`:** no usar `registrados` para anular dinero ni CPE; solo para no reencolar papel.
+Un equipo emparejado puede imprimir comandas, precuentas, tickets y la prueba en las estaciones de la PC y, si adivina el `jobId` de otra **comanda o precuenta** (`clienteKey:estación`), hacer que ese papel se dé por impreso (YA_IMPRESO, y se reporta en `agente_lan`). No puede imprimir CPE ni cierres por la LAN, ni tapar un TICKET/CPE/CIERRE de la nube (QA MEDIO-2). Por eso el PIN solo se ve en la PC del local y cada equipo se puede quitar. **Para el SQL de `agente_lan`:** no usar `registrados` para anular dinero ni CPE; solo para no reencolar papel.
 
 ## 4. Firewall de Windows
 
@@ -107,12 +112,18 @@ La primera vez que se enciende el interruptor, Windows pregunta si LevoPrint pue
 **B. PIN errado**
 1. Desde una segunda pestaña o equipo, intenta emparejar con un PIN **equivocado** 5 veces seguidas.
 2. Esperado: «PIN incorrecto» las primeras veces y luego «Demasiados intentos. Espera un minuto.». El PIN de la PC sigue sirviendo para el equipo correcto.
+3. (No hace falta reproducir a mano el bloqueo de 10 min tras 50 PIN errados: lo cubren las pruebas automáticas. Si alguna vez la ventana muestra en rojo «Alguien de la red probó muchos PIN errados…», es eso: espera los 10 min y pulsa **Otro PIN** cuando vayas a emparejar.)
+
+**B2. Equipo nuevo sin datos del local**
+1. Desde el navegador de la PC abre `http://127.0.0.1:9120/v1/hola`.
+2. Esperado: solo `ok`, `app`, `version`, `equipo` (nombre corto de la PC) y `emparejable`. **No** aparece el nombre del local.
 
 **C. Comanda sin internet**
 1. **Desconecta el internet del router** (cable de la calle o el del módem) **dejando la Wi-Fi encendida**. Comprueba en el celular que no abre una web.
 2. En KOMO (mozo), toma una comanda para Cocina y envíala.
 3. Esperado: sale **un** papel en la ticketera de Cocina en pocos segundos. En la ventana de LevoPrint no aparece error.
 4. Repite con una segunda comanda (otra mesa). Debe salir una vez cada una.
+5. Intenta **cobrar y emitir una boleta** sin internet. Esperado: la boleta **no** sale por la red del local (la app la deja para cuando vuelva internet; por la LAN solo salen comanda, precuenta, ticket y prueba).
 
 **D. Vuelve internet: no se repite**
 1. **Reconecta el internet** del router. Espera 2 minutos con KOMO abierto (la bandeja del mozo sube las comandas).
@@ -128,7 +139,7 @@ La primera vez que se enciende el interruptor, Windows pregunta si LevoPrint pue
 
 **F. Quitar y apagar**
 1. En la ventana, **Quitar** el equipo del celular. Manda una comanda sin internet: la app debe decir que no está emparejado (no sale papel).
-2. Pulsa **Apagar** en «Imprimir sin internet». La dirección y el PIN desaparecen.
+2. Pulsa **Apagar** en «Imprimir sin internet». La dirección y el PIN desaparecen. Con internet, en un minuto la app deja de ofrecer la impresión por la red (la nube borró la IP).
 
 **Qué anotar si algo falla:** paso y hora, versión de Chrome del celular, si Windows mostró el aviso del firewall y qué se eligió, y manda `levoprint.log` (junto al `.exe` o en `%LOCALAPPDATA%\LevoPrint`).
 
