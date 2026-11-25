@@ -13,7 +13,7 @@
 //                          127.0.0.1): ventana → PIN → emparejar → imprimir → YA_IMPRESO → OTRO_EQUIPO →
 //                          trabajo de la nube con el mismo jobId no se repite → agente_lan → reinicio SIN
 //                          red imprime con las rutas del disco → quitar equipo → apagar el interruptor
-//   E) paquete del .exe   empaquetar.mjs junta index.js + lib y el paquete arranca (versión 1.15.0)
+//   E) paquete del .exe   empaquetar.mjs junta index.js + lib y el paquete arranca (versión de package.json)
 // ============================================================
 'use strict';
 const fs = require('fs');

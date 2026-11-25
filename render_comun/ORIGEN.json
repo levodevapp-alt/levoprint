@@ -1,0 +1,11 @@
+{
+  "fuente": "levodev-modules/core/print/render.mjs",
+  "commit": "922754f6dc85702b604be6663dfdc95538e35645",
+  "ref": "922754f6",
+  "sha256_render": "f061ee1942aa21d1e5f6718d21d36eb3122c695def0f766cf2ffa1e33cb23374",
+  "sha256_fixtures": "19ab915e9fcbb3f9ea6c469701666b0e174a02d9d19725a1c8f8af75c01ec280",
+  "fixtures": 124,
+  "fixtures_edges_vivas": 90,
+  "fixtures_propios": 34,
+  "sincronizado": "2026-11-25"
+}

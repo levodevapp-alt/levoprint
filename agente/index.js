@@ -1,6 +1,7 @@
 // ============================================================
-// LevoPrint · Agente de impresión v1.15.0 (impresora por estación: red o USB, búsqueda sola; ICBPER en el CPE;
-// [LP-O02] imprimir sin internet por la red del local :9120 con PIN y diario anti-duplicado) · LevoDev
+// LevoPrint · Agente de impresión v1.16.0 (impresora por estación: red o USB, búsqueda sola; ICBPER en el CPE;
+// [LP-O02] imprimir sin internet por la red del local :9120 con PIN y diario anti-duplicado;
+// [RCA] render local = render común de las Edges, verificado por hash) · LevoDev
 // Corre en la PC del local. Poll cada 2-6 s a <prefijo>_print_tomar de CADA app
 // vinculada (KOMO, KIPU, KUTI...), renderiza ESC/POS y lo manda a la impresora
 // de cada estación: por red (IP:puerto) o por una impresora instalada en esta
@@ -189,7 +190,7 @@ const INTERVALO_MAX_MS = 6000;  // sin trabajo: se espacia de a poco hasta 6 s
 const CONFIG_CADA_MS = (!esExe && parseInt(process.env.LEVO_PRUEBA_CONFIG_MS || '', 10)) || 60000;
 // [O-23 · QA MEDIO-2] Versión de este agente: va en <prefijo>_agente_config (p.version = 'exe/1.13'). KUTI
 // (kuti_turno_print) solo manda el papel TURNO a un local cuyos agentes vivos lo saben dibujar; KOMO/KIPU la ignoran.
-const VERSION_AGENTE = '1.15.0';
+const VERSION_AGENTE = '1.16.0';
 let ANCHO = Math.min(100, Math.max(20, parseInt(process.env.LEVO_ANCHO || '48', 10) || 48)); // [Re-QA] 20–100 como la ventana // columnas típicas de térmica 58mm (48) u 80mm (64/72)
 // [ventana] LEVO_SINVENTANA=1 (o corriendo como servicio de Windows): no abrir
 // navegador, pero la mini-GUI web se sigue sirviendo igual (soporte remoto).
@@ -242,100 +243,22 @@ const esAgenteInvalido = (e) => !!(e && e.pg === 'AGENTE_INVALIDO');
 const esRpcAusente = (e) => !!(e && (e.codigo === 'PGRST202' || e.http === 404 || /could not find the function/i.test(e.pg || '')));
 
 // --- ESC/POS ---
+// [RCA · 25-nov] El papel del agente es el MISMO que el de la Edge <prefijo>-print. lib/render_comun.js es la
+// conversión a CommonJS (render_comun/convertir.cjs) de levodev-modules core/print/render.mjs, verificada por hash:
+// empaquetar.mjs no arma el .exe si no cuadra y prueba_render.cjs compara los fixtures de las Edges vivas byte a
+// byte. Antes este render era una copia a mano y, al caer al render local (sin red o con la Edge caída), difería en
+// 27 fixtures (ticket de turno de KIPU, sello COPIA de KUTI, recorte de ítems del CPE de KUTI…). Aquí solo queda lo
+// que la Edge no dibuja: el papel de VINCULADO (con su pie de marca) y paraConsola.
+const RENDER_COMUN = require('./lib/render_comun');
 const ESC = '\x1b', GS = '\x1d';
 const CMD = {
   init: ESC + '@',
   centro: ESC + 'a\x01', izq: ESC + 'a\x00',
   negritaOn: ESC + 'E\x01', negritaOff: ESC + 'E\x00',
   grande: GS + '!\x11', normal: GS + '!\x00',
-  // [O-23] triple de ancho y alto: el número del turno sin cita se lee desde lejos
-  enorme: GS + '!\x22',
   corte: '\n\n\n' + GS + 'V\x00',
 };
 const linea = (c = '-') => c.repeat(ANCHO) + '\n';
-const fila = (izq, der) => {
-  izq = String(izq); der = String(der);
-  const esp = Math.max(1, ANCHO - izq.length - der.length);
-  return izq + ' '.repeat(esp) + der + '\n';
-};
-const money = (n) => 'S/ ' + Number(n).toFixed(2);
-
-// [MM3-01 · 4-nov] Comanda de cocina: jerarquía para leerla de pie y de lejos, y SIN marca. Título chico, la
-// MESA enorme (GS ! 0x22), mozo y hora en negrita, cada ítem en doble alto y negrita (el nombre largo baja con
-// sangría) y su nota en negrita debajo. Mismo papel que komo-print / kipu-print, el agente de KOMO y el APK.
-const alto = GS + '!\x01';
-function renderComanda(pl) {
-  let t = CMD.init + CMD.centro;
-  t += pl.correccion ? CMD.negritaOn + CMD.grande + '*** CORRECCION ***\n' + CMD.normal + CMD.negritaOff : CMD.negritaOn + 'COMANDA\n' + CMD.negritaOff;
-  const mesa = 'MESA ' + (pl.mesa || '-');
-  t += CMD.negritaOn + (mesa.length * 3 <= ANCHO ? GS + '!\x22' : mesa.length * 2 <= ANCHO ? CMD.grande : '') + mesa + '\n' + CMD.normal + CMD.negritaOff;
-  t += CMD.izq + linea('=');
-  t += CMD.negritaOn + fila('Mozo: ' + (pl.mozo || '-'), pl.hora || '') + CMD.negritaOff;
-  if (pl.ronda) t += fila('Ronda ' + pl.ronda, '');
-  t += linea('=');
-  if (pl.mensaje) t += CMD.negritaOn + CMD.grande + pl.mensaje + '\n' + CMD.normal + CMD.negritaOff + linea();
-  for (const it of pl.items || []) {
-    const cab = fmtCant(it.cantidad) + ' x ';
-    (envolver(it.nombre, Math.max(8, ANCHO - cab.length)).length ? envolver(it.nombre, Math.max(8, ANCHO - cab.length)) : ['(sin nombre)']).forEach((l, i) => {
-      t += CMD.negritaOn + alto + (i === 0 ? cab : ' '.repeat(cab.length)) + l + '\n' + CMD.normal + CMD.negritaOff;
-    });
-    if (it.nota) for (const l of envolver(it.nota, ANCHO - 6)) t += CMD.negritaOn + '   >> ' + l + CMD.negritaOff + '\n';
-  }
-  if (pl.nota) { t += linea(); for (const l of envolver('NOTA: ' + pl.nota, ANCHO)) t += CMD.negritaOn + l + CMD.negritaOff + '\n'; }
-  // [MM4-09 · P6 · 3-nov] La comanda no lleva pie: al cliente nunca le llega y eran líneas de rollo
-  // por ronda que se botan. Solo el corte (el pie sigue en precuenta, ticket, CPE y carta QR).
-  t += linea('=') + CMD.corte;
-  return t;
-}
-
-function renderPrecuenta(pl) {
-  let t = CMD.init + CMD.centro + CMD.grande + 'PRECUENTA\n' + CMD.normal;
-  t += `MESA ${pl.mesa}\n`;
-  if (pl.cuenta && pl.cuenta.de) t += CMD.negritaOn + `CUENTA ${pl.cuenta.n} de ${pl.cuenta.de}\n` + CMD.negritaOff;
-  t += CMD.izq + linea('=');
-  t += fila(`Mozo: ${pl.mozo || '-'}`, pl.hora || '');
-  t += linea();
-  for (const it of pl.items || []) {
-    t += fila(`${fmtCant(it.cantidad)} ${it.nombre}`.slice(0, ANCHO - 9), money(it.cantidad * it.precio));
-  }
-  t += linea('=');
-  t += CMD.negritaOn + fila('TOTAL', money(pl.total)) + CMD.negritaOff;
-  t += linea('=') + CMD.centro;
-  t += `[QR] ${pl.qr}\n`; // v1: texto; QR gráfico ESC/POS en F2 (el cajero escanea desde su celular)
-  t += 'NO ES COMPROBANTE DE PAGO\n';
-  t += firma(pl) + CMD.corte;
-  return t;
-}
-
-const fmtCant = (n) => (Number(n) % 1 === 0 ? String(Number(n)) : Number(n).toFixed(3));
-
-// --- QR gráfico ESC/POS (GS ( k, modelo 2). Soportado por la mayoría de térmicas 58/80mm. ---
-function qrEscPos(texto, tam = 5) {
-  const data = Buffer.from(String(texto || ''), 'utf8');
-  const len = data.length + 3;
-  const pL = String.fromCharCode(len & 0xff), pH = String.fromCharCode((len >> 8) & 0xff);
-  return GS + '(k\x04\x00\x31\x41\x32\x00'                    // modelo 2
-       + GS + '(k\x03\x00\x31\x43' + String.fromCharCode(tam)   // tamaño de módulo
-       + GS + '(k\x03\x00\x31\x45\x31'                         // corrección M
-       + GS + '(k' + pL + pH + '\x31\x50\x30' + data.toString('binary') // almacenar
-       + GS + '(k\x03\x00\x31\x51\x30';                        // imprimir
-}
-
-// [QA M2 · 4-nov] El nombre del negocio va en doble ancho (cabe la mitad de las columnas): se parte por palabras en varios
-// renglones dobles; una palabra que sola no cabe baja a tamaño normal en negrita (partida al ancho si hace falta). Nunca se pierde un carácter.
-// [Re-QA B4] Mayúsculas sin salir de latin1: lo que no cabe en un byte sale «?» (igual en los 6 render; la impresora no lo entiende).
-const mayus = (s) => s.toUpperCase().replace(/[^\x00-\xff]/g, '?');
-function negocioGrande(nombre) {
-  const mitad = Math.floor(ANCHO / 2);
-  let out = '', l = '';
-  const sale = (s) => { out += CMD.negritaOn + (s.length <= mitad ? CMD.grande : '') + s + '\n' + CMD.normal + CMD.negritaOff; };
-  for (const w of mayus(String(nombre == null ? '' : nombre)).split(/\s+/).filter(Boolean)) {
-    if (w.length > mitad) { if (l) { sale(l); l = ''; } for (let i = 0; i < w.length; i += Math.max(1, ANCHO)) sale(w.slice(i, i + ANCHO)); continue; }
-    if (l && l.length + 1 + w.length <= mitad) l += ' ' + w; else { if (l) sale(l); l = w; }
-  }
-  if (l) sale(l);
-  return out;
-}
 
 // [QA B3] En modo consola el logo (GS v 0 + mapa de bits) no se vuelca como basura: sale «[logo]».
 function paraConsola(t, sep) {
@@ -346,119 +269,6 @@ function paraConsola(t, sep) {
     t = t.slice(0, i) + '[logo]' + t.slice(i + 8 + xl * yl);
   }
   return t.replace(/[\x00-\x1f]/g, sep || '').trim();
-}
-
-// [F2] Ticket interno de cobro (no es comprobante)
-function renderTicket(pl) {
-  // Retail (KIPU) no manda mesa; restaurante (KOMO) sí. Un solo template
-  // sirve a ambos: con negocio + nota para la tienda, con mesa/mozo para el resto.
-  const retail = !pl.mesa;
-  let t = CMD.init + CMD.centro;
-  if (pl.negocio) t += negocioGrande(pl.negocio);
-  // [kuti] local (si el negocio tiene varios) y titulo del alquiler de silla; KOMO/KIPU no mandan local ni refTipo.
-  if (pl.local) t += String(pl.local) + '\n';
-  t += CMD.grande + (retail ? (pl.refTipo === 'ALQUILER' ? 'ALQUILER DE SILLA\n' : 'VENTA\n') : 'COBRADO\n') + CMD.normal;
-  if (!retail) t += CMD.grande + 'MESA ' + (pl.mesa || '-') + '\n' + CMD.normal;
-  t += CMD.izq + linea('=');
-  if (pl.nota) t += 'Nota: ' + pl.nota + '\n';
-  const quien = pl.vendedor || pl.mozo || '';
-  t += fila(quien ? ((retail ? 'Atendio: ' : 'Mozo: ') + quien) : '', pl.hora || '');
-  // [kuti] cliente (en alquiler, el profesional) y el profesional de cada servicio en su propia linea.
-  if (pl.cliente) t += 'Cliente: ' + pl.cliente + '\n';
-  t += linea();
-  for (const it of pl.items || []) {
-    t += fila((fmtCant(it.cantidad) + ' ' + it.nombre).slice(0, ANCHO - 9), money(it.cantidad * it.precio));
-    if (it.profesional) t += '   - ' + it.profesional + '\n';
-  }
-  t += linea('=') + CMD.negritaOn + fila('TOTAL', money(pl.total)) + CMD.negritaOff;
-  for (const p of pl.pagos || []) t += fila('  ' + p.medio, money(p.monto));
-  // [kuti] Propinas APARTE (no suman al total). KOMO/KIPU no mandan "propinas".
-  if (Array.isArray(pl.propinas) && pl.propinas.length) {
-    t += linea() + 'PROPINAS (aparte, no suman al total)\n';
-    for (const p of pl.propinas) t += fila(('  ' + p.profesional + ' (' + p.medio + ')').slice(0, ANCHO - 12), money(p.monto));
-  }
-  // [KCAP-PRINT · caja_captor_comun] reimpresión a ciegas de un papel ajeno: el servidor manda sin pagos ni propinas
-  if (pl.montosOcultos) t += 'Medios de pago: al contar la caja\n';
-  t += linea('=') + CMD.centro + 'NO ES COMPROBANTE DE PAGO\n';
-  t += firma(pl) + CMD.corte;
-  return t;
-}
-
-// [F4] Comprobante electrónico (boleta/factura) con QR SUNAT
-
-// --- Monto en letras (exigido por SUNAT en la representacion impresa) ---
-function numeroALetras(num){
-  const U=['','UNO','DOS','TRES','CUATRO','CINCO','SEIS','SIETE','OCHO','NUEVE','DIEZ','ONCE','DOCE','TRECE','CATORCE','QUINCE','DIECISEIS','DIECISIETE','DIECIOCHO','DIECINUEVE','VEINTE'];
-  const D=['','','','TREINTA','CUARENTA','CINCUENTA','SESENTA','SETENTA','OCHENTA','NOVENTA'];
-  const C=['','CIENTO','DOSCIENTOS','TRESCIENTOS','CUATROCIENTOS','QUINIENTOS','SEISCIENTOS','SETECIENTOS','OCHOCIENTOS','NOVECIENTOS'];
-  function centenas(n){ if(n===100) return 'CIEN'; let t='';
-    const c=Math.floor(n/100), r=n%100; if(c) t+=C[c]+' ';
-    if(r<=20) t+=U[r]; else { const d=Math.floor(r/10), u=r%10;
-      if(d===2) t+= (u? 'VEINTI'+U[u] : 'VEINTE');
-      else t+= D[d] + (u? ' Y '+U[u] : ''); }
-    return t.trim(); }
-  function seccion(n){ let t='';
-    const mill=Math.floor(n/1000000); n%=1000000;
-    if(mill) t+= (mill===1? 'UN MILLON ' : centenas(mill)+' MILLONES ');
-    const mil=Math.floor(n/1000); n%=1000;
-    if(mil) t+= (mil===1? 'MIL ' : centenas(mil)+' MIL ');
-    if(n) t+= centenas(n);
-    return t.trim() || 'CERO'; }
-  const e=Math.floor(Number(num||0)); const cent=Math.round((Number(num||0)-e)*100);
-  return seccion(e)+' CON '+String(cent).padStart(2,'0')+'/100 SOLES';
-}
-function denomCpe(tipo){ const t=String(tipo||'').toUpperCase();
-  if(t.includes('FACTURA')) return 'FACTURA ELECTRONICA';
-  if(t.includes('BOLETA')) return 'BOLETA DE VENTA ELECTRONICA';
-  if(t.includes('CREDITO')) return 'NOTA DE CREDITO ELECTRONICA';
-  if(t.includes('DEBITO')) return 'NOTA DE DEBITO ELECTRONICA';
-  return t || 'COMPROBANTE'; }
-
-function renderCpe(pl) {
-  const e = pl.empresa || {}, c = pl.cliente || {}, tot = pl.totales || {};
-  const numero = pl.serie + '-' + String(pl.numero).padStart(8, '0');
-  let t = CMD.init + CMD.centro + CMD.negritaOn + (e.razonSocial || e.nombre || '') + '\n' + CMD.negritaOff;
-  if (e.ruc) t += 'RUC ' + e.ruc + '\n';
-  if (e.direccion) t += e.direccion + '\n';
-  t += linea('=') + CMD.negritaOn + denomCpe(pl.tipo) + '\n' + CMD.grande + numero + '\n' + CMD.normal + CMD.negritaOff;
-  if (pl.estado === 'STUB') t += '*** MODO PRACTICA - SIN VALOR ***\n';
-  t += CMD.izq + linea('=');
-  t += fila('Fecha: ' + (pl.fecha || ''), '');
-  // retail: el CPE no lleva mesa/mozo
-  t += 'Cliente: ' + (c.nombre || 'CLIENTE VARIOS') + '\n';
-  if (c.doc && c.doc !== '0') t += (c.tipoDoc || 'DOC') + ': ' + c.doc + '\n';
-  if (c.direccion) t += c.direccion + '\n';
-  t += linea();
-  for (const it of pl.items || []) t += fila((fmtCant(it.cantidad) + ' ' + it.nombre).slice(0, ANCHO - 10), money(it.total));
-  t += linea();
-  const n = (x) => Number(x || 0);
-  if (n(tot.gravada) > 0) t += fila('OP. GRAVADA', money(tot.gravada));
-  if (n(tot.exonerada) > 0) t += fila('OP. EXONERADA', money(tot.exonerada));
-  if (n(tot.inafecta) > 0) t += fila('OP. INAFECTA', money(tot.inafecta));
-  if (n(tot.igv) > 0) t += fila('IGV 18%', money(tot.igv));
-  // [KS-09 ICBPER] Bolsas de plastico: el impuesto va aparte del IGV (RS 150-2019/SUNAT). Solo si viene.
-  if (n(tot.icbper) > 0) t += fila('ICBPER (bolsas)', money(tot.icbper));
-  t += CMD.negritaOn + fila('TOTAL', money(pl.total)) + CMD.negritaOff;
-  t += CMD.izq + 'SON: ' + numeroALetras(pl.total) + '\n';
-  for (const p of pl.pagos || []) t += fila('  ' + p.medio, money(p.monto));
-  // [KCAP-PRINT · caja_captor_comun] reimpresión a ciegas de un comprobante ajeno: el servidor manda sin pagos
-  if (pl.montosOcultos) t += 'Medios de pago: al contar la caja\n';
-  t += linea('=') + CMD.centro;
-  if (pl.qr) t += qrEscPos(pl.qr) + '\n';
-  if (pl.hash) t += 'Hash: ' + String(pl.hash).slice(0, 28) + '\n';
-  t += 'Representacion impresa del\ncomprobante electronico.\nConsulte en sunat.gob.pe\n';
-  t += firma(pl) + CMD.corte;
-  return t;
-}
-
-// [F-carta] QR de la carta virtual: título + QR grande + pie.
-function renderCartaQr(pl) {
-  let t = CMD.init + CMD.centro + CMD.negritaOn + CMD.grande + (pl.titulo || '') + '\n' + CMD.normal + CMD.negritaOff;
-  t += '\x1b\x21\x00' + (pl.sub || 'Escanea nuestra carta') + '\n\n';
-  if (pl.url) t += qrEscPos(pl.url, 8) + '\n';
-  t += '\x1b\x21\x00' + (pl.url || '') + '\n';
-  t += firma(pl) + CMD.corte;
-  return t;
 }
 
 // [MM3-01 · MM3-P1 · 4-nov] Pie de marca del ticket térmico (IDENTIDAD_VISUAL §12.12). El ticket es del
@@ -535,109 +345,27 @@ async function imprimirVinculado(v, nombre){
   }
 }
 
-function firma(pl){
-  const app=APPS_PIE[String(PREFIJO||'').toLowerCase()]||(pl&&pl.app)||process.env.LEVO_APP||"";
-  return CMD.centro+"\x1b\x21\x00"+pieMarca(app, ANCHO, CON_IMAGEN&&!(pl&&pl.sinImagen));
+// [RCA · 25-nov] Render local = render común (el de la Edge). La app del papel (pie «Hecho con <APP>», familia pos o
+// kuti) sale del prefijo del vínculo en curso (conPrefijo): komo → KOMO, kuti → KUTI, kama → KAMA…; si el prefijo no
+// sirve, la del payload o LEVO_APP; si tampoco, «LEVODEV» (familia pos). El ancho se acota igual que en la Edge (24–80)
+// y lo que no cabe en latin1 sale «?» carácter a carácter (como renderBase64 de la Edge; antes el Buffer 'binary' lo
+// truncaba al byte bajo). Los sellos COPIA / REIMPRESION / ATRASADA son los del render común.
+const APP_VALIDA = /^[A-Z]{2,12}$/;
+const rendersComunes = new Map();
+function appDelRender(pl) {
+  const pfx = String(PREFIJO || '').trim().toUpperCase();
+  if (APP_VALIDA.test(pfx)) return pfx;
+  const otra = String((pl && pl.app) || process.env.LEVO_APP || '').trim().toUpperCase();
+  return APP_VALIDA.test(otra) ? otra : 'LEVODEV';
 }
-
-// Copia de un papel que SI salio: sello arriba (cocina no lo toma por pedido nuevo).
 function render(job) {
-  const t = renderBase(job);
-  const pl = job.payload || {};
-  if ((!pl.reimpresion && !pl.atrasada) || !t.startsWith(CMD.init)) return t;
-  let sello = CMD.centro;
-  // [kuti] KUTI marca toda reimpresion con "copia": el sello dice COPIA.
-  if (pl.copia) return CMD.init + sello + CMD.negritaOn + CMD.grande + '*** COPIA ***\n' + CMD.normal + CMD.negritaOff + CMD.izq + t.slice(CMD.init.length);
-  if (pl.atrasada) sello += CMD.negritaOn + CMD.grande + '*** ATRASADA ***\n' + CMD.normal + 'Pedido de las ' + (pl.hora || '?') + '\n' + CMD.negritaOff;
-  if (pl.reimpresion) sello += CMD.negritaOn + '*** REIMPRESION ***\n' + CMD.negritaOff;
-  return CMD.init + sello + CMD.izq + t.slice(CMD.init.length);
+  const pl = (job && job.payload) || {};
+  const app = appDelRender(pl);
+  let r = rendersComunes.get(app);
+  if (!r) { r = RENDER_COMUN.crearRender({ app }); rendersComunes.set(app, r); }
+  return r.render(String((job && job.tipo) || ''), job && job.payload, ANCHO, CON_IMAGEN).replace(/[^\x00-\xff]/g, '?');
 }
-
-function renderCierre(pl) {
-  let t = CMD.init + CMD.centro;
-  if (pl.negocio) t += CMD.negritaOn + String(pl.negocio).toUpperCase() + '\n' + CMD.negritaOff;
-  t += CMD.grande + 'CORTE DE CAJA\n' + CMD.normal + CMD.izq + linea('=');
-  for (const l of pl.lineas) {
-    if (l && l.sep) { t += linea(String(l.sep).slice(0, 1) || '-'); continue; }
-    const der = String((l && l.der) || '');
-    const f = fila(String((l && l.izq) || '').slice(0, Math.max(1, ANCHO - der.length - 1)), der);
-    t += l && l.negrita ? CMD.negritaOn + f + CMD.negritaOff : f;
-  }
-  t += linea('=') + CMD.centro + firma(pl) + CMD.corte;
-  return t;
-}
-
-// [O-23 · 04-nov] Ticket del cliente SIN CITA de KUTI (tipo TURNO). Mismo papel que kuti-print
-// (render.ts) y que el APK (Agent.kt): negocio, local, «TURNO SIN CITA», el número de la cola
-// (definitivo) o el provisional del equipo (sin red) en triple alto, nombre, con quién, hora y las
-// notas de la hoja de KUTI en ASCII PURO (la página de códigos de la térmica varía), partidas por
-// palabra al ancho. Payload: negocio, local, definitivo, numero, provisional, nombre, con, fecha,
-// delante (n.º o null).
-function envolver(texto, ancho) {
-  ancho = Math.max(1, ancho);
-  const out = [];
-  let l = '';
-  for (let w of String(texto == null ? '' : texto).split(/\s+/).filter(Boolean)) {
-    while (w.length > ancho) { if (l) { out.push(l); l = ''; } out.push(w.slice(0, ancho)); w = w.slice(ancho); }
-    if (!w) continue;
-    if (!l) l = w;
-    else if (l.length + 1 + w.length <= ancho) l += ' ' + w;
-    else { out.push(l); l = w; }
-  }
-  if (l) out.push(l);
-  return out;
-}
-function numeroTurno(pl) {
-  const v = pl.definitivo ? pl.numero : (pl.provisional || pl.numero);
-  return String(v == null ? '' : v).replace(/[^\x21-\x7e]/g, '').slice(0, Math.max(1, Math.floor(ANCHO / 3)));
-}
-function notasTurno(pl) {
-  const n = [];
-  if (pl.definitivo) {
-    const d = pl.delante == null || pl.delante === '' ? NaN : Number(pl.delante);
-    if (d === 0) n.push('Es el siguiente en la cola.');
-    else if (d === 1) n.push('Hay 1 persona delante.');
-    else if (Number.isFinite(d) && d > 1) n.push('Hay ' + Math.floor(d) + ' personas delante.');
-    n.push('Mira la pantalla de la sala: ahi sale tu numero cuando te toque.');
-  } else {
-    n.push('Numero provisional: se tomo sin internet.');
-    n.push('Cuando vuelva la red recibes tu numero de la cola. En la pantalla de la sala lo veras junto a este, por ejemplo:');
-    n.push('15 - ' + numeroTurno(pl) + ' (el 15 es un ejemplo)');
-    n.push('No pierdes tu lugar: la cola va por la hora en que llegaste.');
-  }
-  return n;
-}
-function renderTurno(pl) {
-  pl = pl || {};
-  let t = CMD.init + CMD.centro;
-  const neg = String(pl.negocio || ''), loc = String(pl.local || '');
-  // [QA M2] el negocio va en doble ancho, partido en varios renglones (nunca se corta)
-  if (neg) t += negocioGrande(neg);
-  if (loc && loc !== neg) t += loc + '\n';
-  t += CMD.negritaOn + 'TURNO SIN CITA\n' + CMD.negritaOff + linea('=');
-  t += (pl.definitivo ? 'Tu numero' : 'Tu numero provisional') + '\n';
-  t += CMD.negritaOn + CMD.enorme + numeroTurno(pl) + '\n' + CMD.normal + CMD.negritaOff;
-  if (pl.nombre) t += String(pl.nombre).slice(0, ANCHO) + '\n';
-  if (pl.con) t += ('Con ' + pl.con).slice(0, ANCHO) + '\n';
-  if (pl.fecha || pl.hora) t += String(pl.fecha || pl.hora) + '\n';
-  t += CMD.izq + linea();
-  for (const nota of notasTurno(pl)) for (const l of envolver(nota, ANCHO)) t += l + '\n';
-  t += linea('=') + firma(pl) + CMD.corte;
-  return t;
-}
-
-function renderBase(job) {
-  if (job.tipo === 'CARTA_QR') return renderCartaQr(job.payload);
-  if (job.tipo === 'TURNO') return renderTurno(job.payload);
-  if (job.tipo === 'COMANDA') return renderComanda(job.payload);
-  if (job.tipo === 'PRECUENTA') return renderPrecuenta(job.payload);
-  if (job.tipo === 'TICKET') return renderTicket(job.payload);
-  if (job.tipo === 'CPE') return renderCpe(job.payload);
-  // [kuti] Corte con lineas ya formateadas por la base (KOMO/KIPU: JSON como antes).
-  if (job.tipo === 'CIERRE' && Array.isArray((job.payload || {}).lineas)) return renderCierre(job.payload);
-  if (job.tipo === 'PRUEBA') return CMD.init + CMD.centro + 'PRUEBA LEVOPRINT OK\n' + firma(job.payload) + CMD.corte; // [MM3-01] la prueba lleva el pie: se ve si la impresora imprime el logo (si no, LEVO_IMAGEN=0)
-  return CMD.init + JSON.stringify(job.payload, null, 1) + CMD.corte;
-}
+const RENDER_SHA = RENDER_COMUN.RENDER_SHA256;
 
 function imprimirRaw(ip, puerto, datos) {
   return new Promise((resolve, reject) => {
@@ -1969,6 +1697,7 @@ function estadoActual() {
     ok: true,
     levoprint: true,          // [LP-U1] la otra copia de LevoPrint se reconoce por esto (buscarOtraInstancia)
     version: VERSION_AGENTE,
+    render: RENDER_SHA.slice(0, 12), // [RCA] sha256 del render común que trae este .exe (render_comun/ORIGEN.json)
     modoConsola: MODO_CONSOLA,
     ancho: ANCHO,
     imagen: CON_IMAGEN,
@@ -2863,6 +2592,7 @@ async function arrancar() {
     console.error('Falta LEVO_URL/LEVO_ANON: revisa levoprint.txt (o borra esas lineas para usar las de LevoPrint).');
   }
   console.log('LevoPrint agente de impresion v' + VERSION_AGENTE + ' (vincular con el codigo + varias apps + impresora por estacion) - LevoDev');
+  console.log('Render local = render comun de las Edges (sha256 ' + RENDER_SHA.slice(0, 12) + ')');
   console.log(MODO_CONSOLA ? 'MODO CONSOLA (sin impresoras reales)' : 'Modo impresión real');
   migrarConfigVieja();
   // [LP-F3] komo-agente.txt en la misma carpeta: se adopta su vínculo (mismo token, sin código).
