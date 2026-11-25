@@ -23,6 +23,9 @@ jobs:
       # [LP-F3] Busqueda, destino por estacion, modo 1.12, guardas y USB (con un doble de PowerShell).
       - name: Prueba de integracion del agente
         run: node agente/prueba_integracion.cjs
+      # [LP-O02] Imprimir sin internet: diario, PIN, servidor LAN :9120, reinicio sin red y el paquete SEA.
+      - name: Prueba de impresion sin internet (LAN)
+        run: node agente/prueba_lan.cjs
       - name: Instalar postject
         working-directory: agente
         run: npm install --no-save postject@1.0.0-alpha.6

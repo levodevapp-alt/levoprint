@@ -29,6 +29,14 @@ function nuevoEstado(apps) {
       buscar: false,
       estacionVinculo: a.estacionVinculo || null,
       elegidos: [],            // cuerpos recibidos en agente_estacion_elegir
+      sinLan: !!a.sinLan,
+      lan: [],                 // [LP-O02] cuerpos recibidos en agente_lan
+      // [QA MEDIO-1] Respuesta de agente_lan:
+      //   lanRechazar: Set de 'clave|estacion' que la nube rechaza
+      //   lanModo: 'det' (registrados/rechazados + *_det por estación), 'lista' (solo claves, forma vieja),
+      //            'nada' (ok sin registrar ni rechazar: prueba el tope de envíos), 'error' (ok:false)
+      lanRechazar: new Set(a.lanRechazar || []),
+      lanModo: a.lanModo || 'det',
     };
   }
   return est;
@@ -66,6 +74,22 @@ function crearMock(opts) {
       if (Array.isArray(p.encontradas)) a.vistas.set(p.device, p.encontradas.slice(0, 64));
       if (p.buscado) a.buscar = false;
       return [200, { ok: true, buscar: a.buscar, estacionVinculo: a.estacionVinculo, destinos: a.estaciones.map((e) => destinoPublico(a, e, p.device)) }];
+    }
+    // [LP-O02] Latido LAN: guarda lo recibido y registra todos los impresos (sinLan = backend sin el módulo).
+    if (fn === 'agente_lan') {
+      if (a.ausente || a.sinLan) return [404, ausente(pfx + '_' + fn)];
+      a.lan.push(p);
+      if (a.lanModo === 'error') return [200, { ok: false, error: 'PARAMETRO_INVALIDO' }];
+      if (a.lanModo === 'nada') return [200, { ok: true, registrados: [], rechazados: [] }];
+      const imp = p.impresos || [];
+      const esRech = (x) => a.lanRechazar.has(x.clave + '|' + x.estacion);
+      const reg = imp.filter((x) => !esRech(x)), rech = imp.filter(esRech);
+      const r = { ok: true, registrados: [...new Set(reg.map((x) => x.clave))], rechazados: [...new Set(rech.map((x) => x.clave))] };
+      if (a.lanModo === 'det') {
+        r.registrados_det = reg.map((x) => ({ clave: x.clave, estacion: x.estacion }));
+        r.rechazados_det = rech.map((x) => ({ clave: x.clave, estacion: x.estacion, motivo: 'ESTACION_AJENA' }));
+      }
+      return [200, r];
     }
     if (fn === 'agente_estacion_elegir') {
       if (a.ausente) return [404, ausente(pfx + '_' + fn)];

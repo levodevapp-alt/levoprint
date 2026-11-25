@@ -35,7 +35,12 @@ Cada estación (Cocina, Caja…) tiene **su** impresora, que puede ser de **red*
 - **USB en Windows bloqueado** (PowerShell restringido por la empresa o el antivirus): la ventana lo avisa y quedan las de red.
 - **KOMO Agente (programa antiguo):** si `komo-agente.txt` está en la misma carpeta, LevoPrint toma su vínculo solo. Si KOMO Agente sigue abierto o se abre al encender la PC, la ventana ofrece **Cerrar y quitar KOMO Agente** (solo con KOMO ya vinculado en LevoPrint).
 
+### Imprimir sin internet (LP-O02 · `.exe` 1.15.0)
+Con el internet del local caído, la caja y los mozos imprimen **por la red del local** en la PC con LevoPrint (puerto `9120`; si está ocupado, 9121–9124). **Apagado por defecto**: se enciende en la ventana con **Imprimir sin internet**, y cada equipo se empareja tocando **Emparejar equipo**, que muestra un **PIN de 6 dígitos** (vale 3 minutos y sirve una vez; no hay PIN permanente y muchos PIN errados bloquean el emparejamiento hasta pulsar «Otro PIN»). Un **diario** en disco evita que el mismo papel salga dos veces al volver internet, y las estaciones quedan guardadas para imprimir aunque la PC arranque sin red. Contrato, seguridad, firewall y **guion de prueba física**: [docs/LP_O02_IMPRESION_LAN.md](docs/LP_O02_IMPRESION_LAN.md). El APK todavía no lo tiene (sigue por la nube).
+
 ### Pruebas (sin Supabase ni impresoras)
+- `cd agente && npm run prueba` — las tres de abajo, en orden.
+- `node agente/prueba_lan.cjs` — LP-O02: diario, PIN, servidor LAN (IP, Host, CORS, preflight PNA, tope de cuerpo), agente completo con impresora falsa (YA_IMPRESO, OTRO_EQUIPO, nube que no repite, `agente_lan`, reinicio sin red) y el paquete del `.exe`.
 - `node agente/prueba_render.cjs` — render local del `.exe`.
 - `node agente/prueba_integracion.cjs` — el agente contra `agente/mock_rpc.cjs` (PostgREST falso), dos impresoras falsas en 127.0.0.1/127.0.0.2 y `agente/doble_powershell.cjs` en vez de PowerShell: búsqueda, elegir, impresión por transporte, modo 1.12, guardas 403, USB colgado/restringido, `komo-agente.txt`. Los ajustes de prueba (`LEVO_BUSCAR_SUBRED`, `LEVO_BUSCAR_PUERTO`, `LEVO_PRUEBA_PS`, `LEVO_PRUEBA_PS_TIEMPO`, `LEVO_PRUEBA_CONFIG_MS`) solo valen con `node index.js`; el `.exe` los ignora.
 - APK: `gradle testReleaseUnitTest` (render y `BusquedaLogicaTest`). El CI los corre antes de compilar.
