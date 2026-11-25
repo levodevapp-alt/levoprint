@@ -13,9 +13,25 @@
 import { readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, posix } from 'node:path';
+import { createRequire } from 'node:module';
 
 const AQUI = dirname(fileURLToPath(import.meta.url));
-const archivos = ['index.js', ...readdirSync(join(AQUI, 'lib')).filter((f) => f.endsWith('.js')).sort().map((f) => 'lib/' + f)];
+
+// [RCA · 25-nov] Candado del render común: lib/render_comun.js tiene que ser la conversión EXACTA de
+// render_comun/render.mjs y ese archivo el de render_comun/ORIGEN.json (sha256 de levodev-modules
+// core/print/render.mjs). Si algo no cuadra, NO se arma el paquete (ni el .exe): un render tocado a mano
+// volvería a imprimir distinto de la Edge.
+{
+  const { verificar } = createRequire(import.meta.url)('../render_comun/convertir.cjs');
+  const v = verificar();
+  if (!v.ok) {
+    for (const e of v.errores) console.error('render común: ' + e);
+    throw new Error('empaquetado detenido: el render común no cuadra con su hash (render_comun/ORIGEN.json)');
+  }
+  console.log('render común verificado: sha256 ' + v.origen.sha256_render.slice(0, 12) + ' (' + v.origen.fixtures + ' fixtures)');
+}
+
+const archivos =['index.js', ...readdirSync(join(AQUI, 'lib')).filter((f) => f.endsWith('.js')).sort().map((f) => 'lib/' + f)];
 
 // Comprobacion barata de que las rutas relativas existen (antes de escribir nada).
 for (const rel of archivos) {

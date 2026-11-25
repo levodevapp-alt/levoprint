@@ -97,6 +97,8 @@ class MainActivity : AppCompatActivity() {
     // [MM4-07] Tarjeta del ahorro de bateria (ver refrescarBateria).
     findViewById<Button>(R.id.btnBateria).setOnClickListener { pedirSinAhorroBateria() }
 
+    // [RCA] quien tenia 20-23 columnas pasa a 24 (minimo del papel comun) y se le dice
+    Prefs.migrarAnchoMinimo(this)?.let { android.widget.Toast.makeText(this, it, android.widget.Toast.LENGTH_LONG).show() }
     // leerSinDevice: muestra lo guardado aunque la config este a medias.
     Prefs.leerSinDevice(this).let {
       inUrl.setText(it.url); inAnon.setText(it.anon); inDevice.setText(it.device)
@@ -259,7 +261,9 @@ class MainActivity : AppCompatActivity() {
       if (PrintService.activo) {
         stopService(Intent(this, PrintService::class.java))
       } else {
-        val ancho = Agent.anchoValido(inAncho.text.toString().toIntOrNull() ?: 48) // [Re-QA BAJO-1] 20-100
+        val pedido = inAncho.text.toString().toIntOrNull() ?: 48
+        val ancho = Agent.anchoValido(pedido) // [Re-QA BAJO-1 · RCA] 24-100
+        Agent.avisoAncho(pedido)?.let { android.widget.Toast.makeText(this, it, android.widget.Toast.LENGTH_LONG).show() }
         inAncho.setText(ancho.toString())
         val manual = Cfg(
           inUrl.text.toString().trim(), inAnon.text.toString().trim(),

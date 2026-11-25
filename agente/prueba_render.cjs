@@ -21,7 +21,8 @@ const b = src.indexOf('function imprimirRaw(')
 if (a < 0 || b < 0 || b < a) { console.error('FALLA: no se encontraron las anclas del render en index.js'); process.exit(1) }
 
 function cargar (prefijo) {
-  const ctx = { PREFIJO: prefijo, ANCHO: 48, CON_IMAGEN: true, process: { env: {} }, Buffer, console }
+  // [RCA] el bloque hace require('./lib/render_comun'): se resuelve desde agente/ (lo mismo que hace empaquetar.mjs en el .exe)
+  const ctx = { PREFIJO: prefijo, ANCHO: 48, CON_IMAGEN: true, process: { env: {} }, Buffer, console, require: (p) => require(p.startsWith('.') ? path.join(__dirname, p) : p) }
   vm.createContext(ctx)
   vm.runInContext('var PREFIJO = this.PREFIJO, ANCHO = this.ANCHO, CON_IMAGEN = this.CON_IMAGEN;\n' + src.slice(a, b).replace(/^const /gm, 'var ') +
     '\nthis.render = render; this.pieMarca = pieMarca; this.setAncho = (n) => { ANCHO = n }; this.setImagen = (v) => { CON_IMAGEN = v };', ctx)
@@ -106,7 +107,9 @@ const nv = { app: 'KUTI', refTipo: 'DIRECTO', nota: 'NV01-00000042', negocio: 'B
 const tn = texto(R.render({ tipo: 'TICKET', payload: nv }))
 ok(tn.includes('VENTA') && tn.includes('NV01-00000042') && tn.includes('S/ 13.00') && tn.includes('NO ES COMPROBANTE DE PAGO') && !tn.includes('COPIA'), 'TICKET KUTI: nota de venta con total y sin COPIA', tn)
 ok(texto(R.render({ tipo: 'TICKET', payload: { ...nv, copia: true, reimpresion: true } })).startsWith('*** COPIA ***'), 'TICKET KUTI: reimpresión con COPIA')
-ok(texto(R.render({ tipo: 'COMANDA', payload: { mesa: '3', mozo: 'Ana', items: [], atrasada: true, hora: '12:00' } })).startsWith('*** ATRASADA ***'), 'COMANDA atrasada con su sello')
+// [RCA] ATRASADA / REIMPRESION son de la familia pos (KOMO/KIPU/KAMA/KAWA), como en la Edge; KUTI sella COPIA.
+ok(texto(cargar('komo').render({ tipo: 'COMANDA', payload: { mesa: '3', mozo: 'Ana', items: [], atrasada: true, hora: '12:00' } })).startsWith('*** ATRASADA ***'), 'COMANDA atrasada con su sello (KOMO)')
+ok(texto(R.render({ tipo: 'COMANDA', payload: { mesa: '3', mozo: 'Ana', items: [], atrasada: true, reimpresion: true, hora: '12:00' } })).startsWith('*** COPIA ***'), 'KUTI: una reimpresión sale con COPIA (no REIMPRESION)')
 ok(texto(R.render({ tipo: 'PRUEBA', payload: {} })).includes('PRUEBA LEVOPRINT OK'), 'PRUEBA')
 
 
@@ -141,16 +144,21 @@ for (const ancho of [48, 32]) {
 }
 
 // [Re-QA MEDIO-1 · B4] anchos absurdos no cuelgan, el pie cabe a 24 y a 20 columnas y las mayúsculas fuera de latin1 salen «?»
-for (const an of [20, 24, 100]) {
-  R.setAncho(an)
-  const t = R.render({ tipo: 'TICKET', payload: { negocio: 'Pollería Don Lucho SAC ' + 'X'.repeat(60), mesa: '3', items: [], total: 0, pagos: [] } })
-  ok(t.includes('COBRADO') && R.render({ tipo: 'COMANDA', payload: { mesa: '3', items: [{ cantidad: 1, nombre: 'Y'.repeat(90) }] } }).includes('1 x Y'), 'ancho ' + an + ': el render termina (negocio y nombre larguísimos)')
+{
+  const K = cargar('komo')
+  for (const an of [20, 24, 100]) {
+    K.setAncho(an)
+    const t = K.render({ tipo: 'TICKET', payload: { negocio: 'Pollería Don Lucho SAC ' + 'X'.repeat(60), mesa: '3', items: [], total: 0, pagos: [] } })
+    ok(t.includes('COBRADO') && K.render({ tipo: 'COMANDA', payload: { mesa: '3', items: [{ cantidad: 1, nombre: 'Y'.repeat(90) }] } }).includes('1 x Y'), 'ancho ' + an + ': el render termina (negocio y nombre larguísimos)')
+  }
 }
+// [RCA] El render común acota el ancho a 24–80 columnas como la Edge: con 20 en la ventana el papel sale a 24, igual
+// que cuando lo arma la Edge (antes el local y la nube daban papeles distintos).
 for (const an of [24, 20]) {
   R.setAncho(an)
   const sinImg = texto(R.render({ tipo: 'PRUEBA', payload: { app: 'KOMO' } }))
-  const pie = sinImg.slice(sinImg.indexOf('Hecho con ')).split('\n').slice(0, an === 24 ? 4 : 5)
-  ok(sinImg.includes('Hecho con KUTI\nlevodev.app\n') && pie.every((l) => l.length <= an), 'ancho ' + an + ': el pie cabe en las columnas (la dirección baja a su renglón)', pie)
+  const pie = sinImg.slice(sinImg.indexOf('Hecho con ')).split('\n').slice(0, 4)
+  ok(sinImg.includes('Hecho con KUTI\nlevodev.app\n') && pie.every((l) => l.length <= 24) && sinImg.startsWith('PRUEBA LEVOPRINT OK'), 'ancho ' + an + ': el pie cabe en 24 columnas (la dirección baja a su renglón)', pie)
 }
 R.setAncho(48)
 {
@@ -195,6 +203,64 @@ R.setAncho(48)
   const cab = /Agente de impresión v([0-9.]+) /.exec(src)
   ok(m && cab && m[1] === cab[1] && src.includes("_agente_config`, { device: dev, version: 'exe/' + VERSION_AGENTE }"),
     'agente_config lleva version = exe/' + (m && m[1]) + ' (la misma de la cabecera)', { m: m && m[1], cab: cab && cab[1] })
+}
+
+// ---------- [RCA · 25-nov] ancho mínimo 24 (el del render común): quien tenía 20–23 lo ve escrito ----------
+{
+  const i = src.indexOf('const ANCHO_MIN = 24'); const f = src.indexOf('  : null;', i)
+  const leer = (env) => { const ctx = { process: { env: { LEVO_ANCHO: env } } }; vm.createContext(ctx); vm.runInContext(src.slice(i, f + 9).replace(/^(const|let) /gm, 'var ') + '\nthis.r = { ANCHO, AVISO_ANCHO, v: anchoValido(5) }', ctx); return ctx.r }
+  const a22 = leer('22'); const a48 = leer('48'); const a500 = leer('500')
+  ok(i > 0 && a22.ANCHO === 24 && /mínimo de papel ahora es 24 columnas: tenías 22/.test(a22.AVISO_ANCHO) && a48.ANCHO === 48 && a48.AVISO_ANCHO === null && a500.ANCHO === 100 && a22.v === 24,
+    'ancho: 20–23 pasa a 24 con aviso; 48 sin aviso; tope 100', JSON.stringify([a22, a48, a500]))
+  ok(/v >= 1 && v < ANCHO_MIN\) return responderJson\(res, 400, \{ ok: false, error: 'ANCHO_MINIMO'/.test(src) && src.includes('avisoAncho: AVISO_ANCHO'), 'ventana: /ancho rechaza < 24 con mensaje y /estado lleva avisoAncho')
+}
+
+// ---------- [RCA · 25-nov] render común: hash y fixtures de las Edges vivas, byte a byte ----------
+{
+  const { verificar, aCjs, sha256 } = require('../render_comun/convertir.cjs')
+  const v = verificar()
+  ok(v.ok, 'hash: render_comun/render.mjs = ORIGEN.json, lib/render_comun.js = su conversión exacta, fixtures y RenderComun.kt (APK) al día', v.errores.join(' | '))
+  // el candado rechaza un render tocado a mano (lib), una fuente cambiada sin resincronizar y un port Kotlin desfasado
+  {
+    const os = require('os')
+    const { RUTAS } = require('../render_comun/convertir.cjs')
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lp-rca-'))
+    const copia = {}
+    for (const [k, r] of Object.entries(RUTAS)) { copia[k] = path.join(tmp, k + path.extname(r)); fs.copyFileSync(r, copia[k]) }
+    const toca = (k, de, a) => { const s = fs.readFileSync(RUTAS[k], 'utf8'); fs.writeFileSync(copia[k], s.replace(de, a)); const r = verificar(copia); fs.copyFileSync(RUTAS[k], copia[k]); return r }
+    ok(verificar(copia).ok, 'candado: la copia intacta pasa')
+    const r1 = toca('cjs', "'SON: '", "'SON:  '")
+    const r2 = toca('render', "'SON: '", "'SON:  '")
+    const r3 = toca('kotlin', /RENDER_SHA256 = "[0-9a-f]{64}"/, 'RENDER_SHA256 = "' + '0'.repeat(64) + '"')
+    const r4 = toca('fixtures', '"hex":"', '"hex":"00')
+    ok(!r1.ok && !r2.ok && !r3.ok && !r4.ok && /conversión exacta/.test(r1.errores.join()) && /ORIGEN/.test(r2.errores.join()) && /RenderComun\.kt/.test(r3.errores.join()) && /fixtures/.test(r4.errores.join()),
+      'candado: rechaza lib/render_comun.js tocado, render.mjs cambiado, RenderComun.kt de otro render y fixtures alterados', [r1, r2, r3, r4].map((r) => r.errores.join(' | ')).join(' || '))
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+  const lib = require('./lib/render_comun')
+  ok(lib.RENDER_SHA256 === v.origen.sha256_render && aCjs(fs.readFileSync(path.join(__dirname, '..', 'render_comun', 'render.mjs'), 'utf8')).includes("const RENDER_SHA256 = '" + sha256(fs.readFileSync(path.join(__dirname, '..', 'render_comun', 'render.mjs'), 'utf8')) + "'"),
+    'el agente lleva el sha del render común (' + String(lib.RENDER_SHA256).slice(0, 12) + ')')
+  ok(src.includes("const RENDER_COMUN = require('./lib/render_comun');") && !/function render(Cpe|Ticket|Comanda|Precuenta|CartaQr|Turno|Cierre)\(/.test(src) && !/function numeroALetras\(/.test(src),
+    'index.js ya no tiene un render propio de papeles (solo el común; queda VINCULADO)')
+  const fx = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'render_comun', 'fixtures.json'), 'utf8'))
+  const cache = {}
+  const por = { edges_vivas: [0, 0, []], propios: [0, 0, []] }
+  for (const x of fx) {
+    const A = cache[x.app] || (cache[x.app] = cargar(x.app.toLowerCase()))
+    A.setAncho(x.ancho); A.setImagen(x.imagen)
+    const hex = Buffer.from(A.render({ tipo: x.tipo, payload: x.payload }), 'binary').toString('hex')
+    const g = por[x.grupo] || (por[x.grupo] = [0, 0, []])
+    g[1]++; if (hex === x.hex) g[0]++; else g[2].push(x.f)
+  }
+  const [okV, nV, malV] = por.edges_vivas
+  ok(nV >= 90 && okV === nV, 'fixtures de las Edges vivas: ' + okV + ' de ' + nV + ' iguales byte a byte por el render local del agente', malV.join(', '))
+  const [okP, nP, malP] = por.propios
+  ok(okP === nP, 'fixtures propios del render común (QA LP-U1R): ' + okP + ' de ' + nP + ' iguales', malP.join(', '))
+  // CPE: monto en letras (SUNAT) en todo comprobante con total válido; nada de «S/ NaN»
+  const cpes = fx.filter((x) => x.tipo === 'CPE')
+  const sinSon = cpes.filter((x) => { const t = texto(cargar(x.app.toLowerCase()).render({ tipo: 'CPE', payload: x.payload })); return Number.isFinite(Number(x.payload.total)) && x.payload.total !== null && x.payload.total !== '' && !/\nSON: [A-Z ]+ CON \d\d\/100 SOLES\n/.test(t) })
+  ok(cpes.length > 20 && sinSon.length === 0, 'CPE: «SON: … SOLES» en los ' + cpes.length + ' comprobantes de los fixtures con total válido', sinSon.map((x) => x.f).join(', '))
+  console.log('RESUMEN fixtures agente .exe: ' + okV + '/' + nV + ' Edges vivas, ' + okP + '/' + nP + ' propios')
 }
 
 console.log(fallas ? fallas + ' falla(s)' : 'render del agente: todo OK')

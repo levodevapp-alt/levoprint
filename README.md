@@ -38,12 +38,20 @@ Cada estación (Cocina, Caja…) tiene **su** impresora, que puede ser de **red*
 ### Imprimir sin internet (LP-O02 · `.exe` 1.15.0)
 Con el internet del local caído, la caja y los mozos imprimen **por la red del local** en la PC con LevoPrint (puerto `9120`; si está ocupado, 9121–9124). **Apagado por defecto**: se enciende en la ventana con **Imprimir sin internet**, y cada equipo se empareja tocando **Emparejar equipo**, que muestra un **PIN de 6 dígitos** (vale 3 minutos y sirve una vez; no hay PIN permanente y muchos PIN errados bloquean el emparejamiento hasta pulsar «Otro PIN»). Un **diario** en disco evita que el mismo papel salga dos veces al volver internet, y las estaciones quedan guardadas para imprimir aunque la PC arranque sin red. Contrato, seguridad, firewall y **guion de prueba física**: [docs/LP_O02_IMPRESION_LAN.md](docs/LP_O02_IMPRESION_LAN.md). El APK todavía no lo tiene (sigue por la nube).
 
+### Render común = el de las Edges (RCA · `.exe` 1.16.0 · APK 1.8.0)
+**Novedades:** el comprobante sale igual que en el servidor, con el monto en letras; ancho mínimo 24. Los detalles, el desfase con el núcleo en la CI y su límite están en [docs/RUNBOOK_render_comun.md](docs/RUNBOOK_render_comun.md).
+El papel (comanda, precuenta, ticket, CPE, corte, carta QR, turno, prueba) es **el mismo byte a byte** que arma la Edge `<prefijo>-print`, porque sale de la misma fuente: `levodev-modules/core/print/render.mjs`.
+- `render_comun/render.mjs` = copia exacta de esa fuente; `render_comun/ORIGEN.json` guarda su sha256 (con saltos LF), el commit de origen y el de `render_comun/fixtures.json` (los papeles de las Edges vivas, 90, más los propios del render común).
+- `.exe`: `agente/lib/render_comun.js` es la conversión a CommonJS de `render.mjs` (solo cambia el `import`/`export`; ver `render_comun/convertir.cjs`). `agente/empaquetar.mjs` **no arma el paquete** si algo no cuadra con el hash. La ventana (`/estado`) y el arranque muestran el sha que lleva el `.exe`.
+- APK: `RenderComun.kt` es el port línea a línea a Kotlin (con la semántica de JS que importa para los bytes). Declara en `RENDER_SHA256` el `render.mjs` con el que se comparó. `RenderComunFixturesTest` compara todos los fixtures.
+- **Cuando cambie el render en levodev-modules**: `node render_comun/sincronizar.mjs --modulos <repo levodev-modules> --ref <commit>`. Luego hay que portar el cambio a `RenderComun.kt`, actualizar su `RENDER_SHA256` y pasar las pruebas. Hasta entonces, `node render_comun/sincronizar.mjs --check` y las pruebas fallan (a propósito). Con `--check --modulos <repo>` se ve si la fuente cambió.
+
 ### Pruebas (sin Supabase ni impresoras)
 - `cd agente && npm run prueba` — las tres de abajo, en orden.
 - `node agente/prueba_lan.cjs` — LP-O02: diario, PIN, servidor LAN (IP, Host, CORS, preflight PNA, tope de cuerpo), agente completo con impresora falsa (YA_IMPRESO, OTRO_EQUIPO, nube que no repite, `agente_lan`, reinicio sin red) y el paquete del `.exe`.
-- `node agente/prueba_render.cjs` — render local del `.exe`.
+- `node agente/prueba_render.cjs` — render local del `.exe`: candado de hash y los fixtures de las Edges byte a byte.
 - `node agente/prueba_integracion.cjs` — el agente contra `agente/mock_rpc.cjs` (PostgREST falso), dos impresoras falsas en 127.0.0.1/127.0.0.2 y `agente/doble_powershell.cjs` en vez de PowerShell: búsqueda, elegir, impresión por transporte, modo 1.12, guardas 403, USB colgado/restringido, `komo-agente.txt`. Los ajustes de prueba (`LEVO_BUSCAR_SUBRED`, `LEVO_BUSCAR_PUERTO`, `LEVO_PRUEBA_PS`, `LEVO_PRUEBA_PS_TIEMPO`, `LEVO_PRUEBA_CONFIG_MS`) solo valen con `node index.js`; el `.exe` los ignora.
-- APK: `gradle testReleaseUnitTest` (render y `BusquedaLogicaTest`). El CI los corre antes de compilar.
+- APK: `gradle testReleaseUnitTest` (render, `RenderComunFixturesTest` y `BusquedaLogicaTest`). El CI los corre antes de compilar.
 
 ### Pendientes (LP-U1)
 - **Quitar vínculo** desde la interfaz (ventana del `.exe` y APK): hoy un vínculo solo se reemplaza con un código nuevo de la misma app; para quitar una app hay que editar `LEVO_VINCULOS` en `levoprint.txt` (PC) o borrar los datos de la app (Android).

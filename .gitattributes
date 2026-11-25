@@ -1,0 +1,3 @@
+# [RCA · 25-nov] El render común se verifica por sha256 (render_comun/ORIGEN.json): siempre LF, en cualquier PC.
+render_comun/** text eol=lf
+agente/lib/render_comun.js text eol=lf

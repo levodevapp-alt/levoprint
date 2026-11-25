@@ -76,6 +76,14 @@ object Prefs {
   fun setAncho(ctx: Context, ancho: Int) {
     ctx.getSharedPreferences(F, Context.MODE_PRIVATE).edit().putInt("ancho", Agent.anchoValido(ancho)).apply()
   }
+  // [RCA · 25-nov] Ancho guardado tal cual (sin acotar): si era 20-23 (minimo viejo) se sube a 24 y se devuelve el aviso.
+  fun migrarAnchoMinimo(ctx: Context): String? {
+    val p = ctx.getSharedPreferences(F, Context.MODE_PRIVATE)
+    if (!p.contains("ancho")) return null
+    val aviso = Agent.avisoAncho(p.getInt("ancho", 48)) ?: return null
+    setAncho(ctx, Agent.ANCHO_MIN)
+    return aviso
+  }
 
   // Primer vinculo (o null si no hay ninguno): para "¿hay algo configurado?" (BootReceiver, pantalla).
   fun leer(ctx: Context): Cfg? = leerVinculos(ctx).firstOrNull()
