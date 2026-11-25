@@ -7,21 +7,13 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-// Render local del APK:
-//  1) KOMO y KIPU: BYTE A BYTE igual que canje-v3 (copia congelada en
-//     dev.levo.levoprint.original.Agent), en 4 anchos y con los sellos de
-//     siempre (mismos casos que la comparacion del .exe, cmprender.mjs de QA).
-//  2) KUTI: nota de venta (VENTA / ALQUILER DE SILLA, nota, quien atendio,
-//     cliente, profesional por servicio, propinas aparte), COPIA y corte.
-//  3) [O-23] KUTI: ticket del cliente sin cita (TURNO), definitivo y provisional.
+// Render local del APK por Agent.render (JSONObject de org.json → RenderComun):
+//  [RCA · 25-nov] La igualdad BYTE A BYTE con la Edge la prueba RenderComunFixturesTest (fixtures de las Edges
+//  vivas). Aqui quedan las pruebas de propiedades del papel: KUTI (nota de venta, ALQUILER DE SILLA, COPIA, corte),
+//  pie de marca, comanda, TURNO (O-23), ICBPER, montosOcultos, VINCULADO y anchos raros.
+//  (La comparacion con la copia congelada de canje-v3 se retiro: ese papel era justo el que difería de la Edge.)
 class AgentRenderTest {
   private fun o(s: String) = JSONObject(s)
-  // Payload + extras (las extras pisan claves del payload, como el spread del .exe).
-  private fun m(s: String, extra: String): JSONObject {
-    val a = o(s)
-    if (extra.isNotEmpty()) { val e = o("{" + extra.substring(1) + "}"); for (k in e.keys()) a.put(k, e.get(k)) }
-    return a
-  }
   private fun job(tipo: String, pl: JSONObject) = JSONObject().put("tipo", tipo).put("payload", pl)
 
   // Texto impreso sin los comandos ESC/POS (ESC @, ESC a n, ESC E n, ESC ! n, GS ! n, GS V n).
@@ -38,33 +30,27 @@ class AgentRenderTest {
   private val items = """[{"cantidad":2,"nombre":"Lomo saltado","precio":28.5},{"cantidad":0.5,"nombre":"Arroz extra largo nombre de plato de prueba","precio":10.01}]"""
   private val base = """"negocio":"Chifa X","hora":"13:05","fecha":"24/10/2026 13:05","items":$items,"total":62.01,"pagos":[{"medio":"Efectivo","monto":62.01}],"app":"KOMO","lema":"POS""""
 
-  private fun casosKomoKipu(): List<JSONObject> {
-    val r = ArrayList<JSONObject>()
-    for (extra in listOf("", ""","reimpresion":true""", ""","atrasada":true,"hora":"12:00"""", ""","reimpresion":true,"atrasada":true""")) {
-      r.add(job("TICKET", m("""{$base,"mesa":"5","mozo":"Ana"}""", extra)))
-      r.add(job("TICKET", m("""{$base,"nota":"NV-1","vendedor":"Luis"}""", extra)))
-      r.add(job("COMANDA", m("""{"mesa":"3","mozo":"Ana","items":$items,"hora":"12:30","ronda":2,"mensaje":"sin aji","nota":"rapido"}""", extra)))
-      r.add(job("PRECUENTA", m("""{$base,"mesa":"3","cuenta":{"n":1,"de":2},"qr":"x"}""", extra)))
-      r.add(job("CPE", m("""{"tipo":"BOLETA DE VENTA ELECTRONICA","serie":"B001","numero":7,"estado":"EMITIDO","empresa":{"razonSocial":"X SAC","ruc":"20123456789","direccion":"Av 1"},"cliente":{"nombre":"Juan","doc":"12345678","tipoDoc":"DNI"},"mesa":"4","mozo":"Ana","items":[{"cantidad":1,"nombre":"Lomo","total":28.5}],"totales":{"gravada":24.15,"igv":4.35},"total":28.5,"pagos":[{"medio":"Efectivo","monto":28.5}],"qr":"a|b","hash":"abcdefghijklmnopqrstuvwxyz0123456789"}""", extra)))
-      r.add(job("CARTA_QR", m("""{"titulo":"Carta","url":"https://x.y/z"}""", extra)))
-      r.add(job("PRUEBA", m("""{"x":1}""", extra)))
-      r.add(job("CIERRE", m("""{"caja":"x","total":5,"items":$items}""", extra)))
-      r.add(job("OTRO", m("""{"items":$items}""", extra)))
+  // [RCA] el CPE del APK lleva el monto en letras (SUNAT), ICBPER y los sellos del render comun
+  @Test fun cpeConMontoEnLetrasYSellos() {
+    val pl = o("""{"tipo":"BOLETA DE VENTA ELECTRONICA","serie":"B001","numero":7,"estado":"EMITIDO","empresa":{"razonSocial":"X SAC","ruc":"20123456789","direccion":"Av 1"},"cliente":{"nombre":"Juan","doc":"12345678","tipoDoc":"DNI"},"items":[{"cantidad":1,"nombre":"Lomo","total":28.5},{"cantidad":2,"nombre":"Bolsa","total":0.2}],"totales":{"gravada":24.32,"igv":4.38,"icbper":0.5},"total":29.2,"pagos":[{"medio":"Efectivo","monto":29.2}],"qr":"a|b","hash":"abcdefghijklmnopqrstuvwxyz0123456789"}""")
+    for (app in listOf("komo", "kipu", "kuti")) for (an in listOf(32, 48)) {
+      val t = texto(Agent.render(job("CPE", pl), an, app))
+      assertTrue(t, t.contains("\nSON: VEINTINUEVE CON 20/100 SOLES\n") && t.indexOf("SON:") > t.indexOf("TOTAL") && t.contains("BOLETA DE VENTA ELECTRONICA\nB001-00000007"))
+      assertTrue(t, Regex("ICBPER \\(bolsas\\) +S/ 0\\.50\n").containsMatchIn(t) && t.contains("Representacion impresa del"))
     }
-    return r
+    assertTrue(texto(Agent.render(job("CPE", JSONObject(pl.toString()).put("reimpresion", true)), 48, "kipu")).startsWith("*** REIMPRESION ***"))
+    assertTrue(texto(Agent.render(job("CPE", JSONObject(pl.toString()).put("reimpresion", true).put("copia", true)), 48, "kuti")).startsWith("*** COPIA ***"))
+    // sin total valido: «--» y sin «SON:» (nunca «S/ NaN»)
+    val sin = texto(Agent.render(job("CPE", JSONObject(pl.toString()).put("total", "x")), 48, "komo"))
+    assertTrue(sin, Regex("TOTAL +--\n").containsMatchIn(sin) && !sin.contains("SON:") && !sin.contains("NaN"))
   }
 
-  @Test fun komoYKipuByteAByteIgualQueCanjeV3() {
-    var n = 0
-    for (ancho in listOf(32, 42, 48, 64)) for (j in casosKomoKipu()) {
-      n++
-      // [MM3-01 · MM3-P1] el pie de marca de la copia congelada es un marcador: se cambia por el vigente
-      // (con imagen); el resto, byte a byte. La COMANDA tiene jerarquia nueva y sus propias pruebas.
-      if (j.optString("tipo") == "COMANDA") continue
-      val orig = dev.levo.levoprint.original.Agent.render(j, ancho).replace("@@PIE@@", Agent.pieConImagen("KOMO", ancho, true))
-      assertEquals("difiere ${j.optString("tipo")} ancho $ancho", orig, Agent.render(j, ancho, "KOMO"))
-    }
-    assertEquals(144, n)
+  // [RCA] ticket de turno de vendedor (KIPU): aviso de respaldo y la linea del turno, como la Edge
+  @Test fun kipuTicketDeTurno() {
+    val pl = o("""{"negocio":"Bodega","vendedor":"Rosa","hora":"11:05","turno":"T-07","local":"Centro","respaldo":true,"avisoRespaldo":"Se imprimió en Caja","items":[{"cantidad":1,"nombre":"Arroz","precio":5}],"total":5,"pagos":[]}""")
+    val t = texto(Agent.render(job("TICKET", pl), 48, "kipu"))
+    assertTrue(t, t.contains("(Se imprimi") && Regex("Turno T-07 +Centro\n").containsMatchIn(t) && t.contains("Atendio: Rosa") && t.contains("VENTA"))
+    assertTrue(Agent.render(job("TICKET", pl), 48, "kipu").none { it.code > 255 })
   }
 
   private val kuti = """{"app":"KUTI","lema":"Turnos y caja para barberias y salones","ticket":"t","refTipo":"DIRECTO","nota":"NV01-00000042","negocio":"Barbería Demo","local":null,"hora":"18:30","fecha":"24/10/2026 18:30","vendedor":"Jorge, Luis","cliente":null,"items":[{"cantidad":1.000,"nombre":"Perfilado","precio":13.00,"profesional":"Jorge"},{"cantidad":2.000,"nombre":"Ceja","precio":10.01,"profesional":"Luis"},{"cantidad":1,"nombre":"Descuento","precio":-5.01}],"total":28.01,"pagos":[{"medio":"Efectivo","monto":28.01}],"propinas":[{"profesional":"Luis","medio":"Yape","monto":5.00}],"propinaTotal":5.00}"""
@@ -72,7 +58,7 @@ class AgentRenderTest {
   @Test fun kutiNotaDeVenta() {
     for (ancho in listOf(32, 48)) {
       val t = texto(Agent.render(job("TICKET", o(kuti)), ancho))
-      assertTrue(t, t.contains("BARBERÍA DEMO") && t.contains("VENTA") && t.contains("Nota: NV01-00000042"))
+      assertTrue(t, t.contains("BARBERÍA DEMO") && t.contains("NOTA DE VENTA") && t.contains("\nNV01-00000042\n"))
       assertTrue(t, t.contains("Atendio: Jorge, Luis") && !t.contains("Cliente:") && !t.contains("MESA") && !t.contains("Mozo") && !t.contains("null"))
       assertTrue(t, t.contains("1 Perfilado") && t.contains("   - Jorge") && t.contains("   - Luis") && t.contains("S/ -5.01") && t.contains("S/ 20.02"))
       assertTrue(t, t.contains("S/ 28.01") && t.contains("PROPINAS (aparte, no suman al total)") && t.contains("Luis (Yape)") && t.contains("S/ 5.00"))
@@ -198,7 +184,7 @@ class AgentRenderTest {
     val f = listOf(java.io.File("build.gradle.kts"), java.io.File("app/build.gradle.kts")).first { it.exists() }
     val m = Regex("versionName\\s*=\\s*\"([^\"]+)\"").find(f.readText())
     assertEquals(m?.groupValues?.get(1), Agent.VERSION)
-    assertEquals("1.7.2", Agent.VERSION)
+    assertEquals("1.8.0", Agent.VERSION)
     val vc = Regex("versionCode\\s*=\\s*(\\d+)").find(f.readText())
     assertEquals(vc?.groupValues?.get(1)?.toInt(), Agent.VERSION_CODE)
   }
@@ -233,9 +219,9 @@ class AgentRenderTest {
   }
 
   @Test fun envolverPorPalabra() {
-    assertEquals(listOf("hola que", "tal"), Agent.envolver("hola  que tal", 8))
-    assertEquals(listOf("abcdefgh", "ij x"), Agent.envolver("abcdefghij x", 8))
-    assertEquals(emptyList<String>(), Agent.envolver("   ", 8))
+    assertEquals(listOf("hola que", "tal"), RenderComun.envolver("hola  que tal", 8))
+    assertEquals(listOf("abcdefgh", "ij x"), RenderComun.envolver("abcdefghij x", 8))
+    assertEquals(emptyList<String>(), RenderComun.envolver("   ", 8))
   }
 
   // [MM4-06] Papel al vincular: titulo, estacion y negocio en lineas aparte (sin el punto medio), hora y pie.
@@ -283,18 +269,19 @@ class AgentRenderTest {
       assertTrue("ancho $an", texto(t).replace("\n", "").contains("SUPERCALIFRAGILISTICOESPIALIDOSOEXTRAORDINARIAMENTE") && t.contains("VENTA"))
       assertTrue(Agent.render(job("COMANDA", o("""{"mesa":"3","items":[{"cantidad":1,"nombre":"YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY"}]}""")), an, "komo").contains("1 x Y"))
     }
-    assertEquals(listOf("a", "b"), Agent.envolver("a b", 0))
+    assertEquals(listOf("a", "b"), RenderComun.envolver("a b", 0))
   }
 
   // [Re-QA BAJO-4] el espacio duro (NBSP) corta palabras como en JS; las mayusculas fuera de latin1 salen "?"; a 24 columnas el pie cabe.
   @Test fun nbspMayusculasYPieA24() {
-    assertEquals(listOf("hola que", "tal"), Agent.envolver("hola" + 160.toChar() + "que tal", 8))
+    assertEquals(listOf("hola que", "tal"), RenderComun.envolver("hola" + 160.toChar() + "que tal", 8))
     val t = Agent.render(job("TICKET", o(kuti).put("negocio", "Ωmega" + 160.toChar() + "Barbería")), 48, "kuti", false)
     assertTrue(t, t.contains("?MEGA") && t.contains("BARBER") && t.none { it.code > 255 })
     for (an in listOf(24, 20)) {
       val p = Agent.render(job("PRUEBA", o("""{"app":"KOMO"}""")), an, "komo", false)
-      val pie = texto(p).let { it.substring(it.indexOf("Hecho con ")) }.split("\n").take(if (an == 24) 4 else 5)
-      assertTrue(pie.toString(), pie.all { it.length <= an } && texto(p).contains("Hecho con KOMO\nlevodev.app\n"))
+      // [RCA] el papel de la cola se acota a 24-80 columnas como en la Edge: con 20 sale a 24
+      val pie = texto(p).let { it.substring(it.indexOf("Hecho con ")) }.split("\n").take(4)
+      assertTrue(pie.toString(), pie.all { it.length <= 24 } && texto(p).contains("Hecho con KOMO\nlevodev.app\n"))
     }
   }
 }

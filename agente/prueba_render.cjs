@@ -210,6 +210,23 @@ R.setAncho(48)
   const { verificar, aCjs, sha256 } = require('../render_comun/convertir.cjs')
   const v = verificar()
   ok(v.ok, 'hash: render_comun/render.mjs = ORIGEN.json, lib/render_comun.js = su conversión exacta, fixtures y RenderComun.kt (APK) al día', v.errores.join(' | '))
+  // el candado rechaza un render tocado a mano (lib), una fuente cambiada sin resincronizar y un port Kotlin desfasado
+  {
+    const os = require('os')
+    const { RUTAS } = require('../render_comun/convertir.cjs')
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lp-rca-'))
+    const copia = {}
+    for (const [k, r] of Object.entries(RUTAS)) { copia[k] = path.join(tmp, k + path.extname(r)); fs.copyFileSync(r, copia[k]) }
+    const toca = (k, de, a) => { const s = fs.readFileSync(RUTAS[k], 'utf8'); fs.writeFileSync(copia[k], s.replace(de, a)); const r = verificar(copia); fs.copyFileSync(RUTAS[k], copia[k]); return r }
+    ok(verificar(copia).ok, 'candado: la copia intacta pasa')
+    const r1 = toca('cjs', "'SON: '", "'SON:  '")
+    const r2 = toca('render', "'SON: '", "'SON:  '")
+    const r3 = toca('kotlin', /RENDER_SHA256 = "[0-9a-f]{64}"/, 'RENDER_SHA256 = "' + '0'.repeat(64) + '"')
+    const r4 = toca('fixtures', '"hex":"', '"hex":"00')
+    ok(!r1.ok && !r2.ok && !r3.ok && !r4.ok && /conversión exacta/.test(r1.errores.join()) && /ORIGEN/.test(r2.errores.join()) && /RenderComun\.kt/.test(r3.errores.join()) && /fixtures/.test(r4.errores.join()),
+      'candado: rechaza lib/render_comun.js tocado, render.mjs cambiado, RenderComun.kt de otro render y fixtures alterados', [r1, r2, r3, r4].map((r) => r.errores.join(' | ')).join(' || '))
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
   const lib = require('./lib/render_comun')
   ok(lib.RENDER_SHA256 === v.origen.sha256_render && aCjs(fs.readFileSync(path.join(__dirname, '..', 'render_comun', 'render.mjs'), 'utf8')).includes("const RENDER_SHA256 = '" + sha256(fs.readFileSync(path.join(__dirname, '..', 'render_comun', 'render.mjs'), 'utf8')) + "'"),
     'el agente lleva el sha del render común (' + String(lib.RENDER_SHA256).slice(0, 12) + ')')

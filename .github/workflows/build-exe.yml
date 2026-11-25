@@ -18,6 +18,9 @@ jobs:
           node-version: '20'
       # [O-23] El render local del agente (TURNO, pie ASCII, COPIA…) se prueba ANTES de compilar:
       # si falla, no sale un .exe nuevo.
+      # [RCA] El render local es el de las Edges (levodev-modules core/print/render.mjs): hashes al día antes de todo.
+      - name: Verificar el render común (hash)
+        run: node render_comun/sincronizar.mjs --check
       - name: Probar el render del agente
         run: node agente/prueba_render.cjs
       # [LP-F3] Busqueda, destino por estacion, modo 1.12, guardas y USB (con un doble de PowerShell).

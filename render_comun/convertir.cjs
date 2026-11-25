@@ -19,7 +19,7 @@ const fs = require('fs')
 const path = require('path')
 
 const RAIZ = path.resolve(__dirname, '..')
-const RUTAS = {
+const RUTAS_REPO = {
   render: path.join(RAIZ, 'render_comun', 'render.mjs'),
   fixtures: path.join(RAIZ, 'render_comun', 'fixtures.json'),
   origen: path.join(RAIZ, 'render_comun', 'ORIGEN.json'),
@@ -49,8 +49,9 @@ function aCjs (fuenteMjs) {
     "\nconst RENDER_SHA256 = '" + sha + "'\nmodule.exports = { crearRender, envolver, MAX_FILAS, RENDER_SHA256 }\n"
 }
 
-// Verifica lo que va al .exe y al APK. Devuelve { ok, errores[], origen }.
-function verificar () {
+// Verifica lo que va al .exe y al APK. Devuelve { ok, errores[], origen }. «rutas» solo cambia en las pruebas
+// (copias tocadas a propósito para ver que el candado las rechaza).
+function verificar (RUTAS = RUTAS_REPO) {
   const errores = []
   let origen = {}
   try { origen = JSON.parse(fs.readFileSync(RUTAS.origen, 'utf8')) } catch (e) { errores.push('ORIGEN.json ilegible: ' + e.message); return { ok: false, errores, origen } }
@@ -72,4 +73,4 @@ function verificar () {
   return { ok: errores.length === 0, errores, origen }
 }
 
-module.exports = { aCjs, sha256, lf, verificar, RUTAS }
+module.exports = { aCjs, sha256, lf, verificar, RUTAS: RUTAS_REPO }

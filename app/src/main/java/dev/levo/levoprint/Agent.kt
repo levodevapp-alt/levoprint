@@ -34,9 +34,10 @@ object Agent {
   // Va en <prefijo>_agente_config (p.version = "apk/1.7.0"): KUTI (kuti_turno_print) solo manda el papel TURNO a un
   // local cuyos agentes vivos lo saben dibujar. KOMO/KIPU la ignoran. [LP-F3] Tambien va en <prefijo>_agente_impresoras:
   // la consola avisa «Actualiza LevoPrint» a los equipos con menos de apk/1.7.0.
-  const val VERSION = "1.7.2"
+  // [RCA · 25-nov] 1.8.0: los papeles de la cola salen del render comun (RenderComun.kt); el CPE trae «SON: … SOLES».
+  const val VERSION = "1.8.0"
   // [Re-QA LP-F3] = versionCode de app/build.gradle.kts (AgentRenderTest lo comprueba): el aviso de actualizacion lo compara con LevoPrint.json.
-  const val VERSION_CODE = 14
+  const val VERSION_CODE = 15
   // ESC/POS con codigos de caracter (sin bytes de control crudos en el
   // fuente). Se construye TODO como String de chars 0..255 y se envia en
   // latin1 (ISO-8859-1), igual que el agente .exe (Buffer 'binary').
@@ -45,13 +46,10 @@ object Agent {
   private val NL = 10.toChar().toString()
   private val INIT = ESC + "@"
   private val CENTRO = ESC + "a" + 1.toChar()
-  private val IZQ = ESC + "a" + 0.toChar()
   private val NEG_ON = ESC + "E" + 1.toChar()
   private val NEG_OFF = ESC + "E" + 0.toChar()
   private val GRANDE = GS + "!" + 17.toChar()
   private val NORMAL = GS + "!" + 0.toChar()
-  // [O-23] triple de ancho y alto (GS ! 0x22): el numero del turno se lee desde lejos
-  private val ENORME = GS + "!" + 34.toChar()
   private val FONT0 = ESC + "!" + 0.toChar()
   private val CORTE = NL + NL + NL + GS + "V" + 0.toChar()
   // [MM3-01 · MM3-P1 · 4-nov] Pie de marca del ticket termico (IDENTIDAD_VISUAL 12.12). El ticket es del
@@ -132,68 +130,12 @@ object Agent {
     rpc(c, c.prefijo + "_print_marcar", p)
   }
 
-  // ---- ESC/POS (mismo formato que el agente .exe) ----
+  // ---- ESC/POS ----
+  // [RCA · 25-nov] Los papeles de la cola (COMANDA, PRECUENTA, TICKET, CPE, CIERRE, CARTA_QR, TURNO, PRUEBA) los dibuja
+  // RenderComun.kt = port de levodev-modules core/print/render.mjs, el mismo de las Edges <prefijo>-print y del .exe:
+  // el CPE trae «SON: … SOLES», ICBPER, la leyenda de montosOcultos, COPIA de KUTI y el aviso de turno de KIPU.
+  // Aqui solo queda el papel de VINCULADO (local, no pasa por la cola).
   private fun linea(ancho: Int, ch: String = "-") = ch.repeat(ancho) + NL
-  private fun fila(izq: String, der: String, ancho: Int): String {
-    val esp = maxOf(1, ancho - izq.length - der.length)
-    return izq + " ".repeat(esp) + der + NL
-  }
-  private fun money(n: Double) = "S/ " + String.format(java.util.Locale.US, "%.2f", n)
-  private fun cant(n: Double) = if (n % 1.0 == 0.0) n.toInt().toString() else String.format(java.util.Locale.US, "%.3f", n)
-  private fun items(pl: JSONObject): JSONArray = pl.optJSONArray("items") ?: JSONArray()
-  private fun pagos(pl: JSONObject): JSONArray = pl.optJSONArray("pagos") ?: JSONArray()
-  private fun n(x: Double) = x
-
-  // QR grafico ESC/POS (GS ( k, modelo 2). Los bytes 0..255 van como chars
-  // y se serializan en latin1 al imprimir.
-  private fun qr(texto: String, tam: Int = 5): String {
-    val data = texto.toByteArray(Charsets.UTF_8)
-    val len = data.size + 3
-    val pL = (len and 0xff).toChar()
-    val pH = ((len shr 8) and 0xff).toChar()
-    val b = StringBuilder()
-    b.append(GS).append("(k").append(4.toChar()).append(0.toChar()).append('1').append('A').append('2').append(0.toChar())
-    b.append(GS).append("(k").append(3.toChar()).append(0.toChar()).append('1').append('C').append(tam.toChar())
-    b.append(GS).append("(k").append(3.toChar()).append(0.toChar()).append('1').append('E').append('1')
-    b.append(GS).append("(k").append(pL).append(pH).append('1').append('P').append('0')
-    for (by in data) b.append((by.toInt() and 0xff).toChar())
-    b.append(GS).append("(k").append(3.toChar()).append(0.toChar()).append('1').append('Q').append('0')
-    return b.toString()
-  }
-
-  // [MM3-01 · 4-nov] Comanda de cocina: jerarquia para leerla de pie y de lejos, y SIN marca. Titulo chico,
-  // la MESA enorme (GS ! 0x22), mozo y hora en negrita, cada item en doble alto y negrita (el nombre largo
-  // baja con sangria) y su nota en negrita debajo. Mismo papel que komo-print, el .exe de LevoPrint y el de KOMO.
-  private val ALTO = GS + "!" + 1.toChar()
-  private fun renderComanda(pl: JSONObject, ancho: Int, app: String): String {
-    val b = StringBuilder(INIT + CENTRO)
-    if (pl.optBoolean("correccion")) b.append(NEG_ON + GRANDE + "*** CORRECCION ***" + NL + NORMAL + NEG_OFF)
-    else b.append(NEG_ON + "COMANDA" + NL + NEG_OFF)
-    val mesa = "MESA " + pl.optString("mesa").ifBlank { "-" }
-    b.append(NEG_ON + (if (mesa.length * 3 <= ancho) ENORME else if (mesa.length * 2 <= ancho) GRANDE else "") + mesa + NL + NORMAL + NEG_OFF)
-    b.append(IZQ + linea(ancho, "="))
-    b.append(NEG_ON + fila("Mozo: " + pl.optString("mozo").ifBlank { "-" }, pl.optString("hora", ""), ancho) + NEG_OFF)
-    if (pl.optInt("ronda") > 0) b.append(fila("Ronda " + pl.optInt("ronda"), "", ancho))
-    b.append(linea(ancho, "="))
-    if (pl.optString("mensaje").isNotBlank())
-      b.append(NEG_ON + GRANDE + pl.optString("mensaje") + NL + NORMAL + NEG_OFF + linea(ancho))
-    val its = items(pl)
-    for (i in 0 until its.length()) {
-      val it = its.getJSONObject(i)
-      val cab = cant(it.optDouble("cantidad", 1.0)) + " x "
-      envolver(it.optString("nombre"), maxOf(8, ancho - cab.length)).ifEmpty { listOf("(sin nombre)") }.forEachIndexed { j, l ->
-        b.append(NEG_ON + ALTO + (if (j == 0) cab else " ".repeat(cab.length)) + l + NL + NORMAL + NEG_OFF)
-      }
-      val nota = it.optString("nota")
-      if (nota.isNotBlank()) for (l in envolver(nota, ancho - 6)) b.append(NEG_ON + "   >> " + l + NEG_OFF + NL)
-    }
-    val nota = pl.optString("nota")
-    if (nota.isNotBlank()) { b.append(linea(ancho)); for (l in envolver("NOTA: " + nota, ancho)) b.append(NEG_ON + l + NEG_OFF + NL) }
-    // [MM4-09 · P6 · 3-nov] La comanda no lleva pie: al cliente nunca le llega y eran lineas de
-    // rollo por ronda que se botan. Solo el corte (el parametro app queda por simetria con los demas).
-    b.append(linea(ancho, "=") + CORTE)
-    return b.toString()
-  }
 
   // [MM4-06 · 3-nov] Papel corto al vincular: el cajero ve en papel que funciona en su primer
   // turno. "nombre" es el del canje ("<estacion> · <negocio>"): cada parte va en su linea (sin el
@@ -209,284 +151,36 @@ object Agent {
     return b.toString()
   }
 
-  private fun renderPrecuenta(pl: JSONObject, ancho: Int, app: String): String {
-    val b = StringBuilder(INIT + CENTRO + GRANDE + "PRECUENTA" + NL + NORMAL)
-    b.append("MESA " + pl.optString("mesa") + NL)
-    val c = pl.optJSONObject("cuenta")
-    if (c != null && c.has("de")) b.append(NEG_ON + "CUENTA " + c.optString("n") + " de " + c.optString("de") + NL + NEG_OFF)
-    b.append(IZQ + linea(ancho, "="))
-    b.append(fila("Mozo: " + pl.optString("mozo", "-"), pl.optString("hora", ""), ancho) + linea(ancho))
-    val its = items(pl)
-    for (i in 0 until its.length()) {
-      val it = its.getJSONObject(i)
-      b.append(fila((cant(it.optDouble("cantidad", 1.0)) + " " + it.optString("nombre")).take(ancho - 9),
-        money(it.optDouble("cantidad", 1.0) * it.optDouble("precio", 0.0)), ancho))
-    }
-    b.append(linea(ancho, "=") + NEG_ON + fila("TOTAL", money(pl.optDouble("total", 0.0)), ancho) + NEG_OFF + linea(ancho, "="))
-    b.append(CENTRO + "[QR] " + pl.optString("qr") + NL + "NO ES COMPROBANTE DE PAGO" + NL + pie(app, ancho))
-    return b.toString()
-  }
-
-  private fun renderTicket(pl: JSONObject, ancho: Int, app: String): String {
-    // [kuti] KUTI manda "refTipo" (KOMO/KIPU no): su nota de venta va aparte y
-    // lo de KOMO/KIPU sale byte a byte igual que antes (AgentRenderTest).
-    if (pl.has("refTipo")) return renderTicketKuti(pl, ancho, app)
-    val b = StringBuilder(INIT + CENTRO + GRANDE + "COBRADO" + NL + NORMAL)
-    b.append("MESA " + pl.optString("mesa", "-") + NL + IZQ + linea(ancho, "="))
-    b.append(fila("Mozo: " + pl.optString("mozo", "-"), pl.optString("hora", ""), ancho) + linea(ancho))
-    val its = items(pl)
-    for (i in 0 until its.length()) {
-      val it = its.getJSONObject(i)
-      b.append(fila((cant(it.optDouble("cantidad", 1.0)) + " " + it.optString("nombre")).take(ancho - 9),
-        money(it.optDouble("cantidad", 1.0) * it.optDouble("precio", 0.0)), ancho))
-    }
-    b.append(linea(ancho, "=") + NEG_ON + fila("TOTAL", money(pl.optDouble("total", 0.0)), ancho) + NEG_OFF)
-    val pg = pagos(pl)
-    for (i in 0 until pg.length()) {
-      val p = pg.getJSONObject(i)
-      b.append(fila("  " + p.optString("medio"), money(p.optDouble("monto", 0.0)), ancho))
-    }
-    // [KCAP-PRINT · caja_captor_comun] reimpresion a ciegas de un papel ajeno: el servidor manda sin pagos;
-    // payloads viejos no traen la marca y salen igual que antes (como agente/index.js y kuti-print/render.ts).
-    if (pl.optBoolean("montosOcultos", false)) b.append("Medios de pago: al contar la caja" + NL)
-    b.append(linea(ancho, "=") + CENTRO + "NO ES COMPROBANTE DE PAGO" + NL + pie(app, ancho))
-    return b.toString()
-  }
-
-  // Texto de un campo que puede venir null en el JSON (optString daria "null").
-  private fun txt(o: JSONObject, k: String): String = if (o.isNull(k)) "" else o.optString(k)
-
-  // [kuti] Nota de venta de KUTI (misma forma que la rama retail del .exe):
-  // negocio, local, VENTA o ALQUILER DE SILLA, nota, quien atendio, cliente
-  // (en alquiler, el profesional), servicios con su profesional en una segunda
-  // linea, TOTAL, pagos y propinas APARTE (no suman al total).
-  // [QA M2 · 4-nov] El nombre del negocio va en doble ancho (cabe la mitad de las columnas): se parte por palabras en varios
-  // renglones dobles; una palabra que sola no cabe baja a tamano normal en negrita (partida al ancho si hace falta). Nunca se pierde un caracter.
-  // [Re-QA BAJO-1] el ancho valido es 20-100 (como la ventana del .exe); fuera de eso se acota, nunca <= 0.
+  // [Re-QA BAJO-1] el ancho valido de la configuracion es 20-100 (como la ventana del .exe); fuera de eso se acota,
+  // nunca <= 0. El papel de la cola lo acota ademas RenderComun a 24-80, igual que la Edge.
   fun anchoValido(n: Int): Int = n.coerceIn(20, 100)
-  // [Re-QA B4] mayusculas sin salir de latin1: lo que no cabe en un byte sale "?" (igual en los 6 render).
-  private fun mayus(s: String): String = String(s.uppercase().map { if (it.code > 255) '?' else it }.toCharArray())
-  private val ESPACIOS = Regex("[\\s\\u00A0]+") // incluye el espacio duro (NBSP), como \s de JS
-  private fun negocioGrande(nombre: String, ancho: Int): String {
-    val mitad = ancho / 2
-    val out = StringBuilder(); var l = ""
-    fun sale(s: String) { out.append(NEG_ON + (if (s.length <= mitad) GRANDE else "") + s + NL + NORMAL + NEG_OFF) }
-    for (w in mayus(nombre).split(ESPACIOS).filter { it.isNotEmpty() }) {
-      if (w.length > mitad) { if (l.isNotEmpty()) { sale(l); l = "" }; w.chunked(maxOf(1, ancho)).forEach { sale(it) }; continue }
-      if (l.isNotEmpty() && l.length + 1 + w.length <= mitad) l += " " + w else { if (l.isNotEmpty()) sale(l); l = w }
-    }
-    if (l.isNotEmpty()) sale(l)
-    return out.toString()
+
+  // [RCA] org.json (JSONObject de Android, que conserva el orden de las claves) → modelo de RenderComun:
+  // Map ordenado / List / String / Double / Boolean / null (JSONObject.NULL). Los numeros van como Double, igual que
+  // JSON.parse de JS (la Edge recibe el mismo JSON).
+  fun desdeOrgJson(x: Any?): Any? = when {
+    x == null || x === JSONObject.NULL -> null
+    x is JSONObject -> LinkedHashMap<String, Any?>().also { m -> val ks = x.keys(); while (ks.hasNext()) { val k = ks.next(); m[k] = desdeOrgJson(x.opt(k)) } }
+    x is JSONArray -> ArrayList<Any?>().also { l -> for (i in 0 until x.length()) l.add(desdeOrgJson(x.opt(i))) }
+    x is Number -> x.toDouble()
+    x is Boolean || x is String -> x
+    else -> x.toString()
   }
-  private fun renderTicketKuti(pl: JSONObject, ancho: Int, app: String): String {
-    val b = StringBuilder(INIT + CENTRO)
-    if (txt(pl, "negocio").isNotBlank()) b.append(negocioGrande(txt(pl, "negocio"), ancho))
-    if (txt(pl, "local").isNotBlank()) b.append(txt(pl, "local") + NL)
-    b.append(GRANDE + (if (txt(pl, "refTipo") == "ALQUILER") "ALQUILER DE SILLA" else "VENTA") + NL + NORMAL)
-    b.append(IZQ + linea(ancho, "="))
-    if (txt(pl, "nota").isNotBlank()) b.append("Nota: " + txt(pl, "nota") + NL)
-    val quien = txt(pl, "vendedor")
-    b.append(fila(if (quien.isNotBlank()) "Atendio: " + quien else "", txt(pl, "hora"), ancho))
-    if (txt(pl, "cliente").isNotBlank()) b.append("Cliente: " + txt(pl, "cliente") + NL)
-    b.append(linea(ancho))
-    val its = items(pl)
-    for (i in 0 until its.length()) {
-      val it = its.getJSONObject(i)
-      b.append(fila((cant(it.optDouble("cantidad", 1.0)) + " " + txt(it, "nombre")).take(ancho - 9),
-        money(it.optDouble("cantidad", 1.0) * it.optDouble("precio", 0.0)), ancho))
-      if (txt(it, "profesional").isNotBlank()) b.append("   - " + txt(it, "profesional") + NL)
-    }
-    b.append(linea(ancho, "=") + NEG_ON + fila("TOTAL", money(pl.optDouble("total", 0.0)), ancho) + NEG_OFF)
-    val pg = pagos(pl)
-    for (i in 0 until pg.length()) {
-      val p = pg.getJSONObject(i)
-      b.append(fila("  " + txt(p, "medio"), money(p.optDouble("monto", 0.0)), ancho))
-    }
-    val pr = pl.optJSONArray("propinas") ?: JSONArray()
-    if (pr.length() > 0) {
-      b.append(linea(ancho) + "PROPINAS (aparte, no suman al total)" + NL)
-      for (i in 0 until pr.length()) {
-        val p = pr.getJSONObject(i)
-        b.append(fila(("  " + txt(p, "profesional") + " (" + txt(p, "medio") + ")").take(ancho - 12), money(p.optDouble("monto", 0.0)), ancho))
-      }
-    }
-    // [KCAP-PRINT · caja_captor_comun] reimpresion a ciegas de un papel ajeno: el servidor manda sin pagos ni propinas;
-    // payloads viejos no traen la marca y salen igual que antes (como agente/index.js y kuti-print/render.ts).
-    if (pl.optBoolean("montosOcultos", false)) b.append("Medios de pago: al contar la caja" + NL)
-    b.append(linea(ancho, "=") + CENTRO + "NO ES COMPROBANTE DE PAGO" + NL + pie(app, ancho))
-    return b.toString()
+  // App del papel (pie «Hecho con <APP>» y familia pos/kuti): la del prefijo del local (komo → KOMO); si viene vacio
+  // (pruebas, equipos viejos), la del payload; si tampoco sirve, LEVODEV (familia pos).
+  fun appDelRender(appCfg: String, pl: Any?): String {
+    val a = appCfg.trim().uppercase()
+    if (Regex("^[A-Z]{2,12}$").matches(a)) return a
+    val b = Js.str(Js.or(Js.get(pl, "app"), "")).trim().uppercase()
+    return if (Regex("^[A-Z]{2,12}$").matches(b)) b else "LEVODEV"
   }
 
-  // [kuti] Corte de caja: las lineas {izq, der, sep, negrita} ya vienen formateadas
-  // desde la base. Sin "lineas" (KOMO/KIPU) sigue el render generico de siempre.
-  private fun renderCierre(pl: JSONObject, ancho: Int, app: String): String {
-    val ls = pl.optJSONArray("lineas") ?: return renderGenerico("CIERRE", pl, ancho, app)
-    val b = StringBuilder(INIT + CENTRO)
-    if (pl.optString("negocio").isNotBlank()) b.append(NEG_ON + pl.optString("negocio").uppercase() + NL + NEG_OFF)
-    b.append(GRANDE + "CORTE DE CAJA" + NL + NORMAL + IZQ + linea(ancho, "="))
-    for (i in 0 until ls.length()) {
-      val l = ls.optJSONObject(i) ?: continue
-      if (l.optString("sep").isNotBlank()) { b.append(linea(ancho, l.optString("sep").take(1))); continue }
-      val der = l.optString("der")
-      val f = fila(l.optString("izq").take(maxOf(1, ancho - der.length - 1)), der, ancho)
-      b.append(if (l.optBoolean("negrita")) NEG_ON + f + NEG_OFF else f)
-    }
-    b.append(linea(ancho, "=") + CENTRO + pie(app, ancho))
-    return b.toString()
-  }
-
-  private fun renderCpe(pl: JSONObject, ancho: Int, app: String): String {
-    val e = pl.optJSONObject("empresa") ?: JSONObject()
-    val cl = pl.optJSONObject("cliente") ?: JSONObject()
-    val tot = pl.optJSONObject("totales") ?: JSONObject()
-    val numero = pl.optString("serie") + "-" + pl.optString("numero").padStart(8, '0')
-    val b = StringBuilder(INIT + CENTRO + NEG_ON + (e.optString("razonSocial").ifBlank { e.optString("nombre") }) + NL + NEG_OFF)
-    if (e.optString("ruc").isNotBlank()) b.append("RUC " + e.optString("ruc") + NL)
-    if (e.optString("direccion").isNotBlank()) b.append(e.optString("direccion") + NL)
-    b.append(linea(ancho, "=") + NEG_ON + pl.optString("tipo", "COMPROBANTE") + NL + GRANDE + numero + NL + NORMAL + NEG_OFF)
-    if (pl.optString("estado") == "STUB") b.append("*** MODO PRACTICA - SIN VALOR ***" + NL)
-    b.append(IZQ + linea(ancho, "="))
-    b.append(fila("Fecha: " + pl.optString("fecha"), "", ancho))
-    if (pl.optString("mesa").isNotBlank()) b.append(fila("Mesa: " + pl.optString("mesa"), if (pl.optString("mozo").isNotBlank()) "Mozo: " + pl.optString("mozo") else "", ancho))
-    b.append("Cliente: " + (cl.optString("nombre").ifBlank { "CLIENTE VARIOS" }) + NL)
-    if (cl.optString("doc").isNotBlank() && cl.optString("doc") != "0") b.append(cl.optString("tipoDoc", "DOC") + ": " + cl.optString("doc") + NL)
-    if (cl.optString("direccion").isNotBlank()) b.append(cl.optString("direccion") + NL)
-    b.append(linea(ancho))
-    val its = items(pl)
-    for (i in 0 until its.length()) {
-      val it = its.getJSONObject(i)
-      b.append(fila((cant(it.optDouble("cantidad", 1.0)) + " " + it.optString("nombre")).take(ancho - 10), money(it.optDouble("total", 0.0)), ancho))
-    }
-    b.append(linea(ancho))
-    if (n(tot.optDouble("gravada", 0.0)) > 0) b.append(fila("OP. GRAVADA", money(tot.optDouble("gravada")), ancho))
-    if (n(tot.optDouble("exonerada", 0.0)) > 0) b.append(fila("OP. EXONERADA", money(tot.optDouble("exonerada")), ancho))
-    if (n(tot.optDouble("inafecta", 0.0)) > 0) b.append(fila("OP. INAFECTA", money(tot.optDouble("inafecta")), ancho))
-    if (n(tot.optDouble("igv", 0.0)) > 0) b.append(fila("IGV 18%", money(tot.optDouble("igv")), ancho))
-    // [KS-09 ICBPER] Bolsas de plastico: el impuesto va aparte del IGV (RS 150-2019/SUNAT). Solo si viene.
-    if (n(tot.optDouble("icbper", 0.0)) > 0) b.append(fila("ICBPER (bolsas)", money(tot.optDouble("icbper")), ancho))
-    b.append(NEG_ON + fila("TOTAL", money(pl.optDouble("total", 0.0)), ancho) + NEG_OFF)
-    val pg = pagos(pl)
-    for (i in 0 until pg.length()) {
-      val p = pg.getJSONObject(i)
-      b.append(fila("  " + p.optString("medio"), money(p.optDouble("monto", 0.0)), ancho))
-    }
-    // [KCAP-PRINT · caja_captor_comun] reimpresion a ciegas de un papel ajeno: el servidor manda sin pagos;
-    // payloads viejos no traen la marca y salen igual que antes (como agente/index.js y kuti-print/render.ts).
-    if (pl.optBoolean("montosOcultos", false)) b.append("Medios de pago: al contar la caja" + NL)
-    b.append(linea(ancho, "=") + CENTRO)
-    if (pl.optString("qr").isNotBlank()) b.append(qr(pl.optString("qr")) + NL)
-    if (pl.optString("hash").isNotBlank()) b.append("Hash: " + pl.optString("hash").take(28) + NL)
-    b.append("Representacion impresa del" + NL + "comprobante electronico." + NL + "Consulte en sunat.gob.pe" + NL + pie(app, ancho))
-    return b.toString()
-  }
-
-  private fun renderCartaQr(pl: JSONObject, ancho: Int, app: String): String {
-    val b = StringBuilder(INIT + CENTRO + NEG_ON + GRANDE + pl.optString("titulo") + NL + NORMAL + NEG_OFF)
-    b.append(FONT0 + (pl.optString("sub").ifBlank { "Escanea nuestra carta" }) + NL + NL)
-    if (pl.optString("url").isNotBlank()) b.append(qr(pl.optString("url"), 8) + NL)
-    b.append(FONT0 + pl.optString("url") + NL + pie(app, ancho))
-    return b.toString()
-  }
-
-  // [O-23 · 04-nov] Ticket del cliente SIN CITA de KUTI (tipo TURNO). Mismo papel que kuti-print
-  // (render.ts) y que el agente .exe: negocio, local, "TURNO SIN CITA", el numero de la cola
-  // (definitivo) o el provisional del equipo (sin red) en triple alto, nombre, con quien, hora y
-  // las notas de la hoja de KUTI en ASCII PURO (la pagina de codigos de la termica varia), partidas
-  // por palabra al ancho. Payload: negocio, local, definitivo, numero, provisional, nombre, con,
-  // fecha, delante (n o null).
-  fun envolver(texto: String, anchoIn: Int): List<String> {
-    val ancho = maxOf(1, anchoIn)
-    val out = ArrayList<String>()
-    var l = ""
-    for (palabra in texto.split(ESPACIOS).filter { it.isNotEmpty() }) {
-      var w = palabra
-      while (w.length > ancho) {
-        if (l.isNotEmpty()) { out.add(l); l = "" }
-        out.add(w.substring(0, ancho)); w = w.substring(ancho)
-      }
-      if (w.isEmpty()) continue
-      l = if (l.isEmpty()) w else if (l.length + 1 + w.length <= ancho) "$l $w" else { out.add(l); w }
-    }
-    if (l.isNotEmpty()) out.add(l)
-    return out
-  }
-  private fun numeroTurno(pl: JSONObject, ancho: Int): String {
-    val v = if (pl.optBoolean("definitivo")) txt(pl, "numero") else txt(pl, "provisional").ifBlank { txt(pl, "numero") }
-    return v.replace(Regex("[^\\x21-\\x7e]"), "").take(maxOf(1, ancho / 3))
-  }
-  fun notasTurno(pl: JSONObject, ancho: Int): List<String> {
-    val n = ArrayList<String>()
-    if (pl.optBoolean("definitivo")) {
-      // NaN.toInt() da 0 en Kotlin: un "delante" que no es numero no debe decir "Es el siguiente".
-      val dd = if (!pl.has("delante") || pl.isNull("delante") || txt(pl, "delante").isBlank()) -1.0 else pl.optDouble("delante", -1.0)
-      val d = if (dd.isNaN()) -1 else dd.toInt()
-      when {
-        d == 0 -> n.add("Es el siguiente en la cola.")
-        d == 1 -> n.add("Hay 1 persona delante.")
-        d > 1 -> n.add("Hay " + d + " personas delante.")
-      }
-      n.add("Mira la pantalla de la sala: ahi sale tu numero cuando te toque.")
-    } else {
-      n.add("Numero provisional: se tomo sin internet.")
-      n.add("Cuando vuelva la red recibes tu numero de la cola. En la pantalla de la sala lo veras junto a este, por ejemplo:")
-      n.add("15 - " + numeroTurno(pl, ancho) + " (el 15 es un ejemplo)")
-      n.add("No pierdes tu lugar: la cola va por la hora en que llegaste.")
-    }
-    return n
-  }
-  private fun renderTurno(pl: JSONObject, ancho: Int, app: String): String {
-    val b = StringBuilder(INIT + CENTRO)
-    val neg = txt(pl, "negocio"); val loc = txt(pl, "local")
-    // [QA M2] el negocio va en doble ancho, partido en varios renglones (nunca se corta)
-    if (neg.isNotBlank()) b.append(negocioGrande(neg, ancho))
-    if (loc.isNotBlank() && loc != neg) b.append(loc + NL)
-    b.append(NEG_ON + "TURNO SIN CITA" + NL + NEG_OFF + linea(ancho, "="))
-    b.append((if (pl.optBoolean("definitivo")) "Tu numero" else "Tu numero provisional") + NL)
-    b.append(NEG_ON + ENORME + numeroTurno(pl, ancho) + NL + NORMAL + NEG_OFF)
-    if (txt(pl, "nombre").isNotBlank()) b.append(txt(pl, "nombre").take(ancho) + NL)
-    if (txt(pl, "con").isNotBlank()) b.append(("Con " + txt(pl, "con")).take(ancho) + NL)
-    val hora = txt(pl, "fecha").ifBlank { txt(pl, "hora") }
-    if (hora.isNotBlank()) b.append(hora + NL)
-    b.append(IZQ + linea(ancho))
-    for (nota in notasTurno(pl, ancho)) for (l in envolver(nota, ancho)) b.append(l + NL)
-    b.append(linea(ancho, "=") + CENTRO + pie(app, ancho))
-    return b.toString()
-  }
-
-  private fun renderGenerico(tipo: String, pl: JSONObject, ancho: Int, app: String): String {
-    val b = StringBuilder(INIT + CENTRO + GRANDE + tipo + NL + NORMAL + IZQ + linea(ancho, "="))
-    val its = items(pl)
-    for (i in 0 until its.length()) {
-      val it = its.getJSONObject(i)
-      b.append(cant(it.optDouble("cantidad", 1.0)) + " x " + it.optString("nombre") + NL)
-    }
-    b.append(linea(ancho, "=") + CENTRO + pie(app, ancho))
-    return b.toString()
-  }
-
-  // [MM3-01] appCfg = prefijo de la configuracion del local (komo/kipu/kuti). Si viene vacio
-  // (pruebas, equipos viejos) se usa el "app" del payload; si tampoco hay, el pie generico.
+  // [RCA · 25-nov] Papel de la cola = render común (mismo que la Edge <prefijo>-print). imagen = interruptor «Pie con
+  // logo» del equipo; payload.sinImagen lo apaga para un papel. Devuelve chars 0..255 (lo de fuera de latin1 ya es «?»).
   fun render(job: JSONObject, anchoIn: Int, appCfg: String = "", imagen: Boolean = true): String {
-    val ancho = anchoValido(anchoIn)
-    val tipo = job.optString("tipo")
-    val pl = job.optJSONObject("payload") ?: JSONObject()
-    // [MM3-01 · MM3-P1] sin imagen si la impresora no la soporta (interruptor del equipo) o el payload lo pide
-    conImagen.set(imagen && !pl.optBoolean("sinImagen"))
-    val app = appCfg.ifBlank { pl.optString("app") }
-    val t = when (tipo) {
-      "PRUEBA" -> INIT + CENTRO + "PRUEBA LEVOPRINT OK" + NL + pie(app, ancho) // la prueba lleva el pie: se ve si la impresora imprime el logo
-      "COMANDA" -> renderComanda(pl, ancho, app)
-      "PRECUENTA" -> renderPrecuenta(pl, ancho, app)
-      "TICKET" -> renderTicket(pl, ancho, app)
-      "CPE" -> renderCpe(pl, ancho, app)
-      "CARTA_QR" -> renderCartaQr(pl, ancho, app)
-      "TURNO" -> renderTurno(pl, ancho, app)
-      "CIERRE" -> renderCierre(pl, ancho, app)
-      else -> renderGenerico(tipo.ifBlank { "COMPROBANTE" }, pl, ancho, app)
-    }
-    // [kuti] Toda reimpresion de KUTI trae "copia": sello arriba. KOMO/KIPU no lo mandan.
-    if (!pl.optBoolean("copia") || !t.startsWith(INIT)) return t
-    return INIT + CENTRO + NEG_ON + GRANDE + "*** COPIA ***" + NL + NORMAL + NEG_OFF + IZQ + t.substring(INIT.length)
+    val pl = desdeOrgJson(job.opt("payload"))
+    val tipo = desdeOrgJson(job.opt("tipo"))
+    return RenderComun(appDelRender(appCfg, pl)).render(tipo, pl, anchoIn.toDouble(), imagen)
   }
 
   // Bytes a enviar a la impresora: latin1 (ISO-8859-1), como el .exe.
