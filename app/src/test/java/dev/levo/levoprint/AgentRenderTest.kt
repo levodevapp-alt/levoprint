@@ -258,10 +258,14 @@ class AgentRenderTest {
     }
   }
 
-  // [Re-QA BAJO-1] el ancho valido es 20-100: nunca <= 0 (chunked(0) lanzaba) ni absurdo, al guardar y al usar.
+  // [Re-QA BAJO-1 · RCA] el ancho valido es 24-100: nunca <= 0 (chunked(0) lanzaba) ni absurdo, al guardar y al usar.
   @Test fun anchoValidoYRenderConAnchosAbsurdos() {
-    assertEquals(20, Agent.anchoValido(-10)); assertEquals(20, Agent.anchoValido(0)); assertEquals(20, Agent.anchoValido(1))
+    assertEquals(24, Agent.anchoValido(-10)); assertEquals(24, Agent.anchoValido(0)); assertEquals(24, Agent.anchoValido(1))
+    assertEquals(24, Agent.anchoValido(20)); assertEquals(24, Agent.anchoValido(23)); assertEquals(24, Agent.anchoValido(24))
     assertEquals(48, Agent.anchoValido(48)); assertEquals(100, Agent.anchoValido(999))
+    // quien tenia 20-23 lo ve escrito; 24 o mas, sin aviso
+    assertTrue(Agent.avisoAncho(22)!!.contains("minimo de papel ahora es 24 columnas: tenias 22"))
+    assertEquals(null, Agent.avisoAncho(24)); assertEquals(null, Agent.avisoAncho(48))
     for (an in listOf(-10, 0, 1, 999)) {
       val pl = o(kuti).put("negocio", "Supercalifragilisticoespialidosoextraordinariamente SAC")
       val t = Agent.render(job("TICKET", pl), an, "kuti")

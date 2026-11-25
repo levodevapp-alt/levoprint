@@ -191,7 +191,15 @@ const CONFIG_CADA_MS = (!esExe && parseInt(process.env.LEVO_PRUEBA_CONFIG_MS || 
 // [O-23 · QA MEDIO-2] Versión de este agente: va en <prefijo>_agente_config (p.version = 'exe/1.13'). KUTI
 // (kuti_turno_print) solo manda el papel TURNO a un local cuyos agentes vivos lo saben dibujar; KOMO/KIPU la ignoran.
 const VERSION_AGENTE = '1.16.0';
-let ANCHO = Math.min(100, Math.max(20, parseInt(process.env.LEVO_ANCHO || '48', 10) || 48)); // [Re-QA] 20–100 como la ventana // columnas típicas de térmica 58mm (48) u 80mm (64/72)
+// [RCA · 25-nov] Ancho mínimo 24 (antes 20): el render común (el de la Edge) acota a 24, así que 20–23 imprimía a 24
+// sin decirlo. Quien tenía 20–23 en levoprint.txt pasa a 24 y lo ve escrito (consola y ventana: avisoAncho).
+const ANCHO_MIN = 24, ANCHO_MAX = 100;
+function anchoValido(n) { return Math.min(ANCHO_MAX, Math.max(ANCHO_MIN, n)); }
+const ANCHO_PEDIDO = parseInt(process.env.LEVO_ANCHO || '48', 10) || 48;
+let ANCHO = anchoValido(ANCHO_PEDIDO); // columnas típicas de térmica 58mm (32/48) u 80mm (64/72)
+let AVISO_ANCHO = ANCHO_PEDIDO >= 20 && ANCHO_PEDIDO < ANCHO_MIN
+  ? 'El ancho mínimo de papel ahora es ' + ANCHO_MIN + ' columnas: tenías ' + ANCHO_PEDIDO + ' y se usa ' + ANCHO_MIN + ' (igual que el papel que arma el servidor).'
+  : null;
 // [ventana] LEVO_SINVENTANA=1 (o corriendo como servicio de Windows): no abrir
 // navegador, pero la mini-GUI web se sigue sirviendo igual (soporte remoto).
 // [MM3-01 · MM3-P1 · 4-nov] LEVO_IMAGEN=0 (o no/false/texto): impresora vieja sin soporte de imagen (GS v 0) → el pie
@@ -1700,6 +1708,7 @@ function estadoActual() {
     render: RENDER_SHA.slice(0, 12), // [RCA] sha256 del render común que trae este .exe (render_comun/ORIGEN.json)
     modoConsola: MODO_CONSOLA,
     ancho: ANCHO,
+    avisoAncho: AVISO_ANCHO, // [RCA] tenía 20–23 columnas: ahora se usa 24
     imagen: CON_IMAGEN,
     prefijo: PREFIJO,
     sinUrlAnon,
@@ -1920,7 +1929,7 @@ async function refrescar() {
     return h + '</div>';
   }).join('');
 
-  document.getElementById('anchoTexto').textContent = '(' + e.ancho + ' columnas, ' + (e.ancho > 56 ? '80 mm' : '58 mm') + ')';
+  document.getElementById('anchoTexto').textContent = '(' + e.ancho + ' columnas, ' + (e.ancho > 56 ? '80 mm' : '58 mm') + ')' + (e.avisoAncho ? ' - ' + e.avisoAncho : '');
   document.getElementById('imagenTexto').textContent = e.imagen ? '(con logo)' : '(solo texto)';
   const ini = e.inicio || {};
   document.getElementById('filaInicio').style.display = ini.disponible ? 'flex' : 'none';
@@ -2129,7 +2138,7 @@ document.getElementById('appsBox').addEventListener('click', function (ev) {
 function cambiarAncho(v) {
   const msg = document.getElementById('msgPrueba');
   j('/ancho', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ancho: v }) })
-    .then(function (r) { msg.textContent = (r && r.ok) ? 'Ancho actualizado.' : 'No se pudo cambiar.'; msg.className = 'msg ' + ((r && r.ok) ? 'ok' : 'err'); refrescar(); });
+    .then(function (r) { msg.textContent = (r && r.ok) ? 'Ancho actualizado.' : ((r && r.mensaje) || 'No se pudo cambiar.'); msg.className = 'msg ' + ((r && r.ok) ? 'ok' : 'err'); refrescar(); });
 }
 document.getElementById('btnImagen').addEventListener('click', function () {
   const msg = document.getElementById('msgPrueba');
@@ -2326,8 +2335,10 @@ async function manejarVincular(req, res) {
 async function manejarAncho(req, res) {
   const body = await leerBodyJson(req);
   const v = parseInt(body.ancho, 10);
-  if (!v || v < 20 || v > 100) return responderJson(res, 400, { ok: false, error: 'ANCHO_INVALIDO' });
+  if (v >= 1 && v < ANCHO_MIN) return responderJson(res, 400, { ok: false, error: 'ANCHO_MINIMO', mensaje: 'El ancho mínimo es ' + ANCHO_MIN + ' columnas.' });
+  if (!v || v > ANCHO_MAX) return responderJson(res, 400, { ok: false, error: 'ANCHO_INVALIDO' });
   ANCHO = v;
+  AVISO_ANCHO = null;
   process.env.LEVO_ANCHO = String(v);
   const persistido = persistirAncho(v);
   return responderJson(res, 200, { ok: true, ancho: ANCHO, persistido });
@@ -2593,6 +2604,7 @@ async function arrancar() {
   }
   console.log('LevoPrint agente de impresion v' + VERSION_AGENTE + ' (vincular con el codigo + varias apps + impresora por estacion) - LevoDev');
   console.log('Render local = render comun de las Edges (sha256 ' + RENDER_SHA.slice(0, 12) + ')');
+  if (AVISO_ANCHO) { console.log('[ancho] ' + AVISO_ANCHO); persistirAncho(ANCHO); }
   console.log(MODO_CONSOLA ? 'MODO CONSOLA (sin impresoras reales)' : 'Modo impresión real');
   migrarConfigVieja();
   // [LP-F3] komo-agente.txt en la misma carpeta: se adopta su vínculo (mismo token, sin código).

@@ -5,6 +5,11 @@ name: build-exe
 # La publicacion la hace Luis desde su PC con tools/publicar_bucket.mjs (la llave nunca sale de su .env).
 on:
   workflow_dispatch:
+    inputs:
+      modulos_ref:
+        description: 'Commit o rama de levodev-modules contra el que se compara el render común (vacío = origin/main)'
+        type: string
+        default: ''
 # [RT-1] GITHUB_TOKEN con el minimo: solo lectura del codigo.
 permissions:
   contents: read
@@ -21,6 +26,16 @@ jobs:
       # [RCA] El render local es el de las Edges (levodev-modules core/print/render.mjs): hashes al día antes de todo.
       - name: Verificar el render común (hash)
         run: node render_comun/sincronizar.mjs --check
+      # [RCA] Desfase con el núcleo. levodev-modules es PRIVADO y este CI no usa secretos (RT-1): el clon anónimo
+      # falla y se usa el sha publicado (variable del repo LEVO_RENDER_SHA_URL, no secreta). Si se pidió un
+      # modulos_ref y no hay forma de verificarlo, el build FALLA; sin pedirlo, solo avisa (docs/RUNBOOK_render_comun.md).
+      - name: Desfase del render con levodev-modules
+        shell: bash
+        env:
+          GIT_TERMINAL_PROMPT: '0'
+          REF: ${{ inputs.modulos_ref }}
+          SHA_URL: ${{ vars.LEVO_RENDER_SHA_URL }}
+        run: bash render_comun/ci_desfase.sh
       - name: Probar el render del agente
         run: node agente/prueba_render.cjs
       # [LP-F3] Busqueda, destino por estacion, modo 1.12, guardas y USB (con un doble de PowerShell).

@@ -205,6 +205,16 @@ R.setAncho(48)
     'agente_config lleva version = exe/' + (m && m[1]) + ' (la misma de la cabecera)', { m: m && m[1], cab: cab && cab[1] })
 }
 
+// ---------- [RCA · 25-nov] ancho mínimo 24 (el del render común): quien tenía 20–23 lo ve escrito ----------
+{
+  const i = src.indexOf('const ANCHO_MIN = 24'); const f = src.indexOf('  : null;', i)
+  const leer = (env) => { const ctx = { process: { env: { LEVO_ANCHO: env } } }; vm.createContext(ctx); vm.runInContext(src.slice(i, f + 9).replace(/^(const|let) /gm, 'var ') + '\nthis.r = { ANCHO, AVISO_ANCHO, v: anchoValido(5) }', ctx); return ctx.r }
+  const a22 = leer('22'); const a48 = leer('48'); const a500 = leer('500')
+  ok(i > 0 && a22.ANCHO === 24 && /mínimo de papel ahora es 24 columnas: tenías 22/.test(a22.AVISO_ANCHO) && a48.ANCHO === 48 && a48.AVISO_ANCHO === null && a500.ANCHO === 100 && a22.v === 24,
+    'ancho: 20–23 pasa a 24 con aviso; 48 sin aviso; tope 100', JSON.stringify([a22, a48, a500]))
+  ok(/v >= 1 && v < ANCHO_MIN\) return responderJson\(res, 400, \{ ok: false, error: 'ANCHO_MINIMO'/.test(src) && src.includes('avisoAncho: AVISO_ANCHO'), 'ventana: /ancho rechaza < 24 con mensaje y /estado lleva avisoAncho')
+}
+
 // ---------- [RCA · 25-nov] render común: hash y fixtures de las Edges vivas, byte a byte ----------
 {
   const { verificar, aCjs, sha256 } = require('../render_comun/convertir.cjs')

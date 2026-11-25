@@ -151,9 +151,14 @@ object Agent {
     return b.toString()
   }
 
-  // [Re-QA BAJO-1] el ancho valido de la configuracion es 20-100 (como la ventana del .exe); fuera de eso se acota,
-  // nunca <= 0. El papel de la cola lo acota ademas RenderComun a 24-80, igual que la Edge.
-  fun anchoValido(n: Int): Int = n.coerceIn(20, 100)
+  // [Re-QA BAJO-1 · RCA 25-nov] el ancho valido de la configuracion es 24-100 (como la ventana del .exe); fuera de eso
+  // se acota, nunca <= 0. Antes el minimo era 20, pero el render comun (el de la Edge) imprime a 24 como minimo: quien
+  // tenia 20-23 pasa a 24 y la app lo dice (avisoAncho).
+  const val ANCHO_MIN = 24
+  fun anchoValido(n: Int): Int = n.coerceIn(ANCHO_MIN, 100)
+  // Texto para quien tenia un ancho de 20-23 columnas (o lo escribe): null si no hace falta avisar.
+  fun avisoAncho(pedido: Int): String? =
+    if (pedido in 1 until ANCHO_MIN) "El ancho minimo de papel ahora es $ANCHO_MIN columnas: tenias $pedido y se usa $ANCHO_MIN (igual que el papel del servidor)." else null
 
   // [RCA] org.json (JSONObject de Android, que conserva el orden de las claves) → modelo de RenderComun:
   // Map ordenado / List / String / Double / Boolean / null (JSONObject.NULL). Los numeros van como Double, igual que

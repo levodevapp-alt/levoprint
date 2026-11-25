@@ -6,9 +6,10 @@
 //        existen) en render_comun/fixtures.json, escribe ORIGEN.json (hashes + commit) y regenera
 //        agente/lib/render_comun.js. Con --ref lee del commit con «git show» (no del disco): queda fijado.
 //   node render_comun/sincronizar.mjs --regenerar   solo regenera agente/lib/render_comun.js desde render.mjs
-//   node render_comun/sincronizar.mjs --check [--modulos <repo> [--ref <x>]]
+//   node render_comun/sincronizar.mjs --check [--modulos <repo> [--ref <x>] | --sha <hex> | --sha-url <url>]
 //        verifica hashes (lo mismo que empaquetar.mjs antes de armar el .exe); con --modulos compara además con
-//        la fuente: si levodev-modules cambió el render, sale 1 («resincroniza»).
+//        la fuente: si levodev-modules cambió el render, sale 1 («resincroniza»). Sin poder clonar el núcleo
+//        (privado), --sha/--sha-url compara con un sha256 publicado (el primer hex de 64 del texto de la URL).
 // Tras sincronizar un render NUEVO: el port Kotlin del APK (RenderComun.kt) declara el sha con el que se comparó;
 // --check falla hasta revisar el port, actualizar RENDER_SHA256 y pasar RenderComunFixturesTest.
 // No toca la red ni ninguna base. LevoDev
@@ -66,7 +67,20 @@ if (args.includes('--check')) {
   const v = verificar()
   for (const e of v.errores) console.log('FALLA ' + e)
   let fuenteOk = true
-  if (MODULOS) {
+  const SHA = val('--sha') || ''
+  const SHA_URL = val('--sha-url') || ''
+  if (SHA || SHA_URL) {
+    // [RCA] sha publicado del núcleo (cuando no se puede clonar levodev-modules: repo privado y CI sin secretos).
+    let publicado = SHA
+    if (!publicado) {
+      try {
+        const r = await fetch(SHA_URL, { signal: AbortSignal.timeout(15000) })
+        publicado = r.ok ? ((/\b[0-9a-f]{64}\b/.exec(await r.text()) || [])[0] || '') : ''
+      } catch (_) { publicado = '' }
+    }
+    fuenteOk = /^[0-9a-f]{64}$/.test(publicado) && publicado === v.origen.sha256_render
+    console.log((fuenteOk ? 'OK    ' : 'FALLA ') + 'sha publicado del núcleo ' + (publicado ? publicado.slice(0, 12) : '(no se pudo leer)') + (fuenteOk ? ' = copia del agente' : ' ≠ ' + String(v.origen.sha256_render).slice(0, 12) + ': resincroniza con --modulos'))
+  } else if (MODULOS) {
     const s = sha256(leerFuente('core/print/render.mjs'))
     fuenteOk = s === v.origen.sha256_render
     console.log((fuenteOk ? 'OK    ' : 'FALLA ') + 'levodev-modules' + (REF ? '@' + REF : '') + ' core/print/render.mjs ' + (fuenteOk ? '= copia del agente' : 'cambió (' + s.slice(0, 12) + '): resincroniza con --modulos'))
