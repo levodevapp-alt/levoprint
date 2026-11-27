@@ -20,6 +20,8 @@ import org.json.JSONObject
 // luego kipu. Importa porque cada CODIGO_INVALIDO suma al freno por IP del
 // proyecto. Un codigo con formato malo (o letra que este build no conoce)
 // se rechaza AQUI, sin gastar un intento en el servidor.
+// [D8 · 1.9.0] Una letra desconocida primero se consulta al registro del servidor (public.levoprint_apps,
+// Proyectos.actualizar): una app nueva de LevoDev no pide publicar otro APK.
 //
 // Exito: "modo" (nuevo|reemplazar|adicional); "reemplazara" = equipos que
 // se apagaran cuando ESTE imprima su primer trabajo (hasta entonces los dos
@@ -37,15 +39,11 @@ data class DatosLink(val codigo: String, val prefijo: String?, val url: String?,
 
 object Emparejamiento {
   // Mismo patron que el servidor (rev 4).
-  private val FORMATO = Regex("^[KPT][ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$")
+  // [D8 · 1.9.0] Cualquier letra: si la app existe lo dice el registro (fabrica + servidor, Proyectos.kt).
+  val FORMATO = Regex("^[A-Z][ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$")
 
-  // Letra -> nombre visible de la app (para OTRA_APP y la letra reservada).
-  fun nombreApp(letra: String): String = when (letra.uppercase()) {
-    "K" -> "KOMO"
-    "P" -> "KIPU"
-    "T" -> "KUTI"
-    else -> letra.uppercase()
-  }
+  // Letra -> nombre visible de la app (para OTRA_APP y la letra reservada). [D8] Del registro.
+  fun nombreApp(letra: String): String = Proyectos.porLetra(letra.uppercase())?.nombre ?: letra.uppercase()
 
   // Mensajes para el dueno (no tecnico). "segundos" solo aplica a
   // DEMASIADOS_INTENTOS y "app" (la letra) a OTRA_APP / CODIGO_RESERVADO;
@@ -60,8 +58,11 @@ object Emparejamiento {
     "DEMASIADOS_INTENTOS" -> "Hubo demasiados intentos con códigos equivocados. " + textoEspera(segundos)
     "IP_DESCONOCIDA" -> "No se pudo identificar la conexión. Intenta de nuevo."
     "AGENTE_INVALIDO" -> msgDesactivado(prefijo)
-    "CODIGO_FORMATO" -> "El código tiene 9 caracteres y empieza con K (KOMO), P (KIPU) o T (KUTI). Revisa que esté bien escrito."
-    "CODIGO_RESERVADO" -> "Este código es de " + nombreApp(app) + ", que esta versión de LevoPrint todavía no admite. Actualiza LevoPrint e intenta de nuevo."
+    "CODIGO_FORMATO" -> "El código tiene 9 caracteres y empieza con la letra de tu app (" +
+      Proyectos.FABRICA.joinToString(", ") { it.letra + " de " + it.nombre } + "…). Revisa que esté bien escrito."
+    // [D8] Letra que ni la fabrica ni el servidor conocen (el servidor ya se consulto en el canje).
+    "CODIGO_RESERVADO" -> "Este código empieza con «" + app.uppercase() + "», que no es de ninguna app de LevoDev que LevoPrint conozca. Revisa que esté bien escrito."
+    "REGISTRO_SIN_RED" -> "No se pudo confirmar de qué app es este código (empieza con «" + app.uppercase() + "»). Revisa tu internet e intenta de nuevo."
     "SIN_CODIGO" -> "Escribe el código de 9 caracteres."
     "RED" -> "No se pudo conectar. Revisa tu internet e intenta de nuevo."
     "RESPUESTA_INCOMPLETA" -> "El servidor respondió sin los datos necesarios. Intenta de nuevo."
@@ -76,9 +77,10 @@ object Emparejamiento {
 
   fun consolaDe(prefijo: String, seccion: String = ""): String {
     val pfx = prefijo.lowercase()
-    val app = when (pfx) { "komo" -> "KOMO"; "kipu" -> "KIPU"; "kuti" -> "KUTI"; else -> pfx.uppercase() }
+    // [D8] Nombre y seccion del registro (fabrica + servidor).
+    val app = Proyectos.nombreDe(pfx)
     val sec = seccion.trim().ifBlank {
-      seccionVista[pfx] ?: when (pfx) { "komo" -> "Estaciones"; "kipu" -> "Impresoras"; "kuti" -> "Impresoras"; else -> "" }
+      seccionVista[pfx] ?: (Proyectos.porPrefijo(pfx)?.seccion ?: "")
     }
     return when {
       app.isNotBlank() && sec.isNotBlank() -> "tu consola de $app › $sec"
@@ -146,8 +148,14 @@ object Emparejamiento {
     // la letra; si algun dia difieren, manda la letra (el servidor igual
     // responderia OTRA_APP). url+anon forzados en el link solo se usan si el
     // prefijo coincide con el de la letra.
-    val conocido = Proyectos.porLetra(letra)
-      ?: return CanjeResultado.Error("CODIGO_RESERVADO", mensajeError("CODIGO_RESERVADO", app = letra))
+    // [D8] Letra que este equipo aun no conoce: se pregunta al servidor (public.levoprint_apps) ANTES de rechazar.
+    // canjear corre fuera del hilo principal (MainActivity lo llama en un Thread), asi que la consulta puede ir aqui.
+    val conocido = Proyectos.porLetra(letra) ?: run {
+      Proyectos.actualizar(forzar = true)
+      Proyectos.porLetra(letra)
+    } ?: return if (!Proyectos.registroLeido && !Proyectos.ausente)
+      CanjeResultado.Error("RED", mensajeError("REGISTRO_SIN_RED", app = letra))
+    else CanjeResultado.Error("CODIGO_RESERVADO", mensajeError("CODIGO_RESERVADO", app = letra))
     val p = if (urlForzada != null && anonForzado != null &&
                 (prefijoForzado == null || prefijoForzado.equals(conocido.prefijo, ignoreCase = true)))
       conocido.copy(url = urlForzada, anon = anonForzado)

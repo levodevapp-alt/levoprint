@@ -1,5 +1,6 @@
 // ============================================================
-// LevoPrint · Agente de impresión v1.16.0 (impresora por estación: red o USB, búsqueda sola; ICBPER en el CPE;
+// LevoPrint · Agente de impresión v1.17.0 (impresora por estación: red o USB, búsqueda sola; ICBPER en el CPE;
+// [D8] 1.17: las letras de las apps nuevas llegan del servidor (public.levoprint_apps), sin publicar otro LevoPrint;
 // [LP-O02] imprimir sin internet por la red del local :9120 con PIN y diario anti-duplicado;
 // [RCA] render local = render común de las Edges, verificado por hash) · LevoDev
 // Corre en la PC del local. Poll cada 2-6 s a <prefijo>_print_tomar de CADA app
@@ -152,9 +153,83 @@ const esDeviceValido = (d) => /^[0-9a-f-]{20,}$/i.test(String(d || '')) && !/PEG
 // [canje-v4] Codigo de estacion rev 4: <letra de la app> + 8 del alfabeto sin
 // ambiguos. La letra dice a que proyecto llamar (no se prueba a ciegas: cada
 // CODIGO_INVALIDO suma al freno por IP). T = KUTI.
-const CODIGO_FORMATO = /^[KPT][ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/;
-const PREFIJO_POR_LETRA = { K: 'komo', P: 'kipu', T: 'kuti' };
-const NOMBRE_APP = { K: 'KOMO', P: 'KIPU', T: 'KUTI' };
+// [D8 · NUC-COM7 · 27-nov] Las letras ya no están solo en el código: además de las de FÁBRICA (K, P, T), el
+// SERVIDOR da las de cada app nueva (public.levoprint_apps, módulo levoprint_registro de levodev-modules; la fuente
+// única es apps.json → __LP_COD__). Crear una app no pide publicar otro LevoPrint. Lo recibido se guarda en
+// levoprint_apps.json (junto a levoprint.txt) para arrancar sin red. Las de fábrica nunca se pisan: un registro mal
+// armado no desvía K, P ni T. El formato acepta cualquier letra; si la app existe lo dice el registro.
+const CODIGO_FORMATO = /^[A-Z][ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/;
+const APPS_FABRICA = {
+  K: { prefijo: 'komo', nombre: 'KOMO', seccion: 'Estaciones' },
+  P: { prefijo: 'kipu', nombre: 'KIPU', seccion: 'Impresoras' },
+  T: { prefijo: 'kuti', nombre: 'KUTI', seccion: 'Impresoras' },
+};
+const PREFIJO_POR_LETRA = {};   // letra -> prefijo (fábrica + servidor)
+const NOMBRE_APP = {};          // letra -> nombre visible
+const APP_POR_PREFIJO = {};     // prefijo -> nombre visible
+const SECCION_POR_PREFIJO = {}; // prefijo -> pantalla de la consola donde se genera el código
+const RUTA_REGISTRO = path.join(DIR_TXT, 'levoprint_apps.json');
+const REGISTRO_CADA_MS = 6 * 3600e3;     // se refresca cada 6 h…
+const REGISTRO_REINTENTO_MS = 10 * 60e3; // …y, si falló, a los 10 min
+const REGISTRO_MIN_FORZADO_MS = 30e3;    // una letra desconocida pregunta al servidor como mucho cada 30 s
+const TEXTO_REGISTRO = /^[0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ .&-]{1,40}$/;
+function registroValido(a) {
+  return !!a && typeof a === 'object' && /^[A-Z]$/.test(String(a.letra || '')) && /^[a-z][a-z0-9]{1,15}$/.test(String(a.prefijo || ''))
+    && TEXTO_REGISTRO.test(String(a.nombre || '')) && (a.seccion == null || a.seccion === '' || TEXTO_REGISTRO.test(String(a.seccion)));
+}
+function aplicarRegistro(lista) {
+  for (const o of [PREFIJO_POR_LETRA, NOMBRE_APP, APP_POR_PREFIJO, SECCION_POR_PREFIJO]) for (const k of Object.keys(o)) delete o[k];
+  const poner = (letra, a) => {
+    PREFIJO_POR_LETRA[letra] = a.prefijo; NOMBRE_APP[letra] = a.nombre; APP_POR_PREFIJO[a.prefijo] = a.nombre;
+    if (a.seccion) SECCION_POR_PREFIJO[a.prefijo] = a.seccion;
+  };
+  for (const [letra, a] of Object.entries(APPS_FABRICA)) poner(letra, a);
+  for (const a of Array.isArray(lista) ? lista : []) {
+    if (!registroValido(a) || APPS_FABRICA[a.letra] || PREFIJO_POR_LETRA[a.letra]) continue;   // fábrica manda; una letra, una app
+    if (Object.values(PREFIJO_POR_LETRA).includes(a.prefijo)) continue;                        // un prefijo, una letra
+    poner(a.letra, a);
+  }
+}
+(function cargarRegistroGuardado() {
+  let lista = [];
+  try { lista = (JSON.parse(fs.readFileSync(RUTA_REGISTRO, 'utf8')) || {}).apps || []; } catch { lista = []; }
+  aplicarRegistro(lista);
+})();
+let registroTs = 0, registroIntentoTs = 0, registroEnCurso = null, registroAusente = false;
+// Pide public.levoprint_apps al proyecto compartido. forzar = letra desconocida al canjear (con tope de 30 s).
+// Nunca lanza: sin red o con un backend sin el módulo sigue con lo que ya sabe (fábrica + lo guardado).
+function actualizarRegistro(forzar) {
+  const ahora = Date.now();
+  if (registroEnCurso) return registroEnCurso;
+  if (forzar ? ahora - registroIntentoTs < REGISTRO_MIN_FORZADO_MS
+    : (registroTs && ahora - registroTs < REGISTRO_CADA_MS) || ahora - registroIntentoTs < REGISTRO_REINTENTO_MS) return Promise.resolve(false);
+  registroIntentoTs = ahora;
+  registroEnCurso = (async () => {
+    try {
+      if (!URL_BASE || !ANON) return false;
+      const d = await rpc('levoprint_apps', {});
+      if (!d || d.ok !== true || !Array.isArray(d.apps)) throw new Error('respuesta sin apps');
+      const apps = d.apps.filter(registroValido).map((a) => ({ letra: a.letra, prefijo: a.prefijo, nombre: a.nombre, seccion: a.seccion || null }));
+      aplicarRegistro(apps);
+      registroTs = Date.now();
+      try { fs.writeFileSync(RUTA_REGISTRO, JSON.stringify({ guardado: new Date().toISOString(), apps }, null, 1)); } catch (_) { /* solo lectura: vale hasta cerrar */ }
+      return true;
+    } catch (e) {
+      if (esRpcAusente(e)) registroAusente = true;   // backend sin levoprint_registro: solo las de fábrica, sin culpar a la red
+      else console.error('[registro] no se pudo leer las apps del servidor: ' + (e && e.message));
+      return false;
+    } finally { registroEnCurso = null; }
+  })();
+  return registroEnCurso;
+}
+// «KOMO, KIPU y KUTI» (o, con conSeccion, «KOMO › Estaciones, KIPU › Impresoras o KUTI › Impresoras») con lo que se
+// sabe hoy (fábrica primero, luego por letra).
+function listaApps(conector, conSeccion) {
+  const n = Object.keys(NOMBRE_APP).sort((a, b) => (APPS_FABRICA[b] ? 1 : 0) - (APPS_FABRICA[a] ? 1 : 0) || a.localeCompare(b))
+    .map((l) => NOMBRE_APP[l] + (conSeccion ? ' › ' + (SECCION_POR_PREFIJO[PREFIJO_POR_LETRA[l]] || 'Impresoras') : ''));
+  return n.length <= 1 ? (n[0] || '') : n.slice(0, -1).join(', ') + ' ' + (conector || 'y') + ' ' + n[n.length - 1];
+}
+const escHtmlSrv = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 // [emparejar] Si el "levoprint.txt" trae LEVO_CODIGO (lo pone el boton
 // "Descargar" de la consola) y AUN no hay device, se canjea una vez: el
 // agente pide su token al servidor y lo guarda. Asi el dueno no pega el
@@ -190,7 +265,7 @@ const INTERVALO_MAX_MS = 6000;  // sin trabajo: se espacia de a poco hasta 6 s
 const CONFIG_CADA_MS = (!esExe && parseInt(process.env.LEVO_PRUEBA_CONFIG_MS || '', 10)) || 60000;
 // [O-23 · QA MEDIO-2] Versión de este agente: va en <prefijo>_agente_config (p.version = 'exe/1.13'). KUTI
 // (kuti_turno_print) solo manda el papel TURNO a un local cuyos agentes vivos lo saben dibujar; KOMO/KIPU la ignoran.
-const VERSION_AGENTE = '1.16.0';
+const VERSION_AGENTE = '1.17.0';
 // [RCA · 25-nov] Ancho mínimo 24 (antes 20): el render común (el de la Edge) acota a 24, así que 20–23 imprimía a 24
 // sin decirlo. Quien tenía 20–23 en levoprint.txt pasa a 24 y lo ve escrito (consola y ventana: avisoAncho).
 const ANCHO_MIN = 24, ANCHO_MAX = 100;
@@ -1158,8 +1233,7 @@ function migrarConfigVieja() {
 // respuesta de canjear trae "seccion" (KOMO "Estaciones", KIPU "Impresoras");
 // manda esa, y si no viene (o el mensaje no sale de un canje) se usa la
 // ultima vista para ese prefijo en esta sesion o, si no, la conocida.
-const APP_POR_PREFIJO = { komo: 'KOMO', kipu: 'KIPU', kuti: 'KUTI' };
-const SECCION_POR_PREFIJO = { komo: 'Estaciones', kipu: 'Impresoras', kuti: 'Impresoras' };
+// [D8] APP_POR_PREFIJO y SECCION_POR_PREFIJO salen del registro (fábrica + servidor): ver aplicarRegistro.
 const seccionVista = {}; // prefijo -> seccion que devolvio el servidor
 function consolaDe(prefijo, seccion) {
   const pfx = String(prefijo || '').toLowerCase();
@@ -1198,8 +1272,11 @@ function mensajeCanje(err, segundos, app, prefijo, seccion) {
     AGENTE_YA_VINCULADO: 'Otro equipo se vinculó a este local mientras tanto. Genera un código nuevo en ' + consola + '.',
     IP_DESCONOCIDA: 'No se pudo identificar la conexión. Intenta de nuevo.',
     AGENTE_INVALIDO: msgDesactivado(prefijo),
-    CODIGO_FORMATO: 'El código tiene 9 caracteres y empieza con K (KOMO), P (KIPU) o T (KUTI). Revisa que esté bien escrito.',
-    CODIGO_RESERVADO: 'Este código es de ' + nomApp + ', que esta versión de LevoPrint todavía no admite. Actualiza LevoPrint e intenta de nuevo.',
+    CODIGO_FORMATO: 'El código tiene 9 caracteres y empieza con la letra de tu app (' +
+      Object.keys(NOMBRE_APP).filter((l) => APPS_FABRICA[l]).map((l) => l + ' de ' + NOMBRE_APP[l]).join(', ') + '…). Revisa que esté bien escrito.',
+    // [D8] Letra que ni la fábrica ni el servidor conocen (el servidor ya se consultó en el canje).
+    CODIGO_RESERVADO: 'Este código empieza con «' + String(app || '').toUpperCase() + '», que no es de ninguna app de LevoDev que LevoPrint conozca. Revisa que esté bien escrito.',
+    REGISTRO_SIN_RED: 'No se pudo confirmar de qué app es este código (empieza con «' + String(app || '').toUpperCase() + '»). Revisa tu internet e intenta de nuevo.',
     SIN_CODIGO: 'Escribe el código de 9 caracteres.',
   })[err] || ('No se pudo vincular (' + err + ').');
 }
@@ -1220,11 +1297,15 @@ async function canjearCodigo(codigoIn) {
     return { ok: false, error: 'CODIGO_FORMATO', mensaje: msg };
   }
   const letra = cod.charAt(0);
+  // [D8] Letra que este equipo aún no conoce: se pregunta al servidor (public.levoprint_apps) ANTES de rechazar.
+  let consultado = null;
+  if (!PREFIJO_POR_LETRA[letra]) consultado = await actualizarRegistro(true);
   const prefijoCod = PREFIJO_POR_LETRA[letra];
   if (!prefijoCod) {
-    const msg = mensajeCanje('CODIGO_RESERVADO', 0, letra);
+    const err = consultado === false && !registroTs && !registroAusente ? 'REGISTRO_SIN_RED' : 'CODIGO_RESERVADO';
+    const msg = mensajeCanje(err, 0, letra);
     console.error(msg);
-    return { ok: false, error: 'CODIGO_RESERVADO', mensaje: msg };
+    return { ok: false, error: err === 'REGISTRO_SIN_RED' ? 'RED' : err, mensaje: msg };
   }
   console.log('Vinculando con el codigo ' + cod + ' (' + prefijoCod + ')...');
   let d;
@@ -1781,13 +1862,13 @@ function paginaHtml() {
 <body>
   <div class="card">
     <h1>LevoPrint</h1>
-    <div class="sub">Imprime los pedidos y tickets de KOMO, KIPU y KUTI en esta PC.</div>
+    <div class="sub">Imprime los pedidos y tickets de ${escHtmlSrv(listaApps('y'))} en esta PC.</div>
 
     <div id="semaforo" class="semaforo info"><span class="dot"></span><span id="semaforoTexto">Cargando...</span></div>
 
     <div id="vinculoBox">
       <h2 id="vinculoTitulo">Vincula esta PC en 2 pasos</h2>
-      <div class="paso"><span class="num">1</span><span>Escribe el código que ves en tu app<br><span class="muted">KOMO › Estaciones, KIPU › Impresoras o KUTI › Impresoras. Son 9 letras y números, y dura 15 minutos.</span></span></div>
+      <div class="paso"><span class="num">1</span><span>Escribe el código que ves en tu app<br><span class="muted">${escHtmlSrv(listaApps('o', true))}. Son 9 letras y números, y dura 15 minutos.</span></span></div>
       <input id="codigo" type="text" maxlength="16" autocomplete="off" spellcheck="false" placeholder="K1234ABCD">
       <button id="btnVincular" class="ancho">Vincular</button>
       <div id="msgVinculo" class="msg"></div>
@@ -2615,6 +2696,9 @@ async function arrancar() {
   cargarRutas();
   if (lan.activo) encenderLan();   // [QA MEDIO-1] arrancar no crea PIN
   iniciarGui();
+  // [D8] Letras de las apps desde el servidor (public.levoprint_apps): al arrancar y cada 6 h, sin frenar nada.
+  actualizarRegistro(false).catch(() => {});   // un canje con letra nueva espera esta misma consulta (registroEnCurso)
+  setInterval(() => { actualizarRegistro(false).catch(() => {}); }, REGISTRO_CADA_MS / 6).unref();
   // [LP-F3] Búsqueda de impresoras al arrancar y cada 15 min (además: tras vincular, cuando la
   // consola la pide con buscar:true y con «Buscar de nuevo» en la ventana).
   setTimeout(() => { if (vinculos.length) buscarImpresoras('arranque').catch(() => {}); }, 1500);

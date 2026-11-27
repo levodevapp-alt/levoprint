@@ -65,6 +65,9 @@ class MainActivity : AppCompatActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     setContentView(R.layout.activity_main)
+    // [D8] Letras de las apps: lo guardado al instante y, en segundo plano, el registro del servidor (cada 6 h).
+    Proyectos.iniciar(this)
+    Thread { Proyectos.actualizar() }.start()
 
     val inUrl = findViewById<EditText>(R.id.inUrl)
     val inAnon = findViewById<EditText>(R.id.inAnon)
@@ -294,7 +297,7 @@ class MainActivity : AppCompatActivity() {
           Prefs.guardar(this, manual)
           if (Proyectos.conocidos.none { it.prefijo == manual.prefijo }) {
             // Aviso suave (ambar): se guarda igual.
-            txtEmparejar.text = "Ojo: «" + manual.prefijo + "» no es una app conocida por esta versión (komo, kipu, kuti). Se guardó igual; revisa que esté bien escrito."
+            txtEmparejar.text = "Ojo: «" + manual.prefijo + "» no es una app conocida (" + Proyectos.conocidos.joinToString(", ") { it.prefijo } + "). Se guardó igual; revisa que esté bien escrito."
             txtEmparejar.setTextColor(COLOR_AVISO)
           }
         } else Prefs.setAncho(this, ancho)

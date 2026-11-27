@@ -5,6 +5,7 @@
 //   const { crearMock } = require('./mock_rpc.cjs')   (lo usa prueba_integracion.cjs)
 // Imita lo que el agente llama: POST /rest/v1/rpc/<prefijo>_<fn> con {p}, y
 // /functions/v1/<prefijo>-print (responde 404: el agente cae al render local).
+// [D8] También public.levoprint_apps (registro de letras: opts.registro / ponerRegistro).
 // RPC: agente_config, print_tomar, print_marcar, estacion_codigo_canjear y las
 // de [LP-F3] (contrato docs/LEVOPRINT.md §8): agente_impresoras y
 // agente_estacion_elegir. Un prefijo con «ausente: true» responde a estas dos
@@ -19,6 +20,7 @@ function nuevoEstado(apps) {
   for (const [pfx, a] of Object.entries(apps || {})) {
     est[pfx] = {
       ausente: !!a.ausente,
+      canje: a.canje || null,  // [D8] respuesta de <pfx>_estacion_codigo_canjear (o función de p)
       devices: new Set(a.devices || []),
       estaciones: (a.estaciones || []).map((e) => ({ id: e.id, nombre: e.nombre })),
       // destino por estación: { transporte, ip, puerto, btMac, usbId, impresoraNombre, equipo }
@@ -59,10 +61,18 @@ function crearMock(opts) {
     };
   }
 
+  // [D8] public.levoprint_apps (módulo levoprint_registro): opts.registro = la respuesta; sin él, 404 como un backend
+  // sin el módulo. mock.ponerRegistro(x) lo cambia en caliente (null = 404, 'error' = 500).
+  let registro = (opts && opts.registro) || null;
   function atender(pfx, fn, p) {
+    if (pfx === 'levoprint' && fn === 'apps') {
+      if (registro === 'error') return [500, { message: 'fallo de prueba' }];
+      return registro ? [200, registro] : [404, ausente('levoprint_apps')];
+    }
     const a = estado[pfx];
     if (!a) return [404, ausente(pfx + '_' + fn)];
-    if (fn === 'estacion_codigo_canjear') return [200, { ok: false, error: 'CODIGO_INVALIDO' }];
+    // [D8] canje: «canje» en la app = respuesta fija (o función de p); si no, CODIGO_INVALIDO como antes.
+    if (fn === 'estacion_codigo_canjear') return [200, a.canje ? (typeof a.canje === 'function' ? a.canje(p) : a.canje) : { ok: false, error: 'CODIGO_INVALIDO' }];
     if (!p || !a.devices.has(p.device)) return [400, { code: 'P0001', message: 'AGENTE_INVALIDO' }];
     if (fn === 'agente_config') {
       return [200, { ok: true, estaciones: a.estaciones.map((e) => { const d = destinoPublico(a, e, p.device); return { id: e.id, nombre: e.nombre, ip: d.ip, puerto: d.puerto || 9100 }; }) }];
@@ -132,7 +142,7 @@ function crearMock(opts) {
   return new Promise((resolve) => {
     server.listen((opts && opts.puerto) || 0, '127.0.0.1', () => {
       const puerto = server.address().port;
-      resolve({ server, puerto, url: 'http://127.0.0.1:' + puerto, estado, llamadas, close: () => new Promise((r) => server.close(r)) });
+      resolve({ server, puerto, url: 'http://127.0.0.1:' + puerto, estado, llamadas, ponerRegistro: (x) => { registro = x; }, close: () => new Promise((r) => server.close(r)) });
     });
   });
 }

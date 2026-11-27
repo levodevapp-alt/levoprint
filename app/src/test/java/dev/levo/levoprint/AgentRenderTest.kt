@@ -184,7 +184,7 @@ class AgentRenderTest {
     val f = listOf(java.io.File("build.gradle.kts"), java.io.File("app/build.gradle.kts")).first { it.exists() }
     val m = Regex("versionName\\s*=\\s*\"([^\"]+)\"").find(f.readText())
     assertEquals(m?.groupValues?.get(1), Agent.VERSION)
-    assertEquals("1.8.0", Agent.VERSION)
+    assertEquals("1.9.0", Agent.VERSION)
     val vc = Regex("versionCode\\s*=\\s*(\\d+)").find(f.readText())
     assertEquals(vc?.groupValues?.get(1)?.toInt(), Agent.VERSION_CODE)
   }
