@@ -35,9 +35,10 @@ object Agent {
   // local cuyos agentes vivos lo saben dibujar. KOMO/KIPU la ignoran. [LP-F3] Tambien va en <prefijo>_agente_impresoras:
   // la consola avisa «Actualiza LevoPrint» a los equipos con menos de apk/1.7.0.
   // [RCA · 25-nov] 1.8.0: los papeles de la cola salen del render comun (RenderComun.kt); el CPE trae «SON: … SOLES».
-  const val VERSION = "1.8.0"
+  // [D8 · 27-nov] 1.9.0: las letras de las apps nuevas llegan del servidor (public.levoprint_apps, Proyectos.kt).
+  const val VERSION = "1.9.0"
   // [Re-QA LP-F3] = versionCode de app/build.gradle.kts (AgentRenderTest lo comprueba): el aviso de actualizacion lo compara con LevoPrint.json.
-  const val VERSION_CODE = 15
+  const val VERSION_CODE = 16
   // ESC/POS con codigos de caracter (sin bytes de control crudos en el
   // fuente). Se construye TODO como String de chars 0..255 y se envia en
   // latin1 (ISO-8859-1), igual que el agente .exe (Buffer 'binary').

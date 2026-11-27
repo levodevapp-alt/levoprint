@@ -107,6 +107,7 @@ class PrintService : Service() {
 
   override fun onCreate() {
     super.onCreate()
+    Proyectos.iniciar(this)   // [D8] nombres y secciones de las apps del registro guardado (mensajes del servicio)
     try {
       ContextCompat.registerReceiver(this, receptor, IntentFilter(ACCION_REINTENTO), ContextCompat.RECEIVER_NOT_EXPORTED)
       receptorRegistrado = true
